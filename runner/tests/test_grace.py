@@ -414,3 +414,33 @@ async def test_real_process_killed_and_reaped_on_grace_expiry(make_server, sock_
     await c2.hello()
     assert (await c2.inventory())["children"] == []
     c2.close()
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        {"version": 2, "op": "hello"},  # bad version, no token
+        {"version": 1, "op": "nope", "token": "wrong"},  # bad op
+        {"version": 1, "op": "hello", "request_id": "r"},  # no token
+        {"version": 1, "op": "hello", "request_id": "r", "token": "wrong"},
+        {"version": 1, "op": "inventory", "request_id": "r", "token": TOKEN},  # no hello
+        {"version": 1, "op": "hello", "request_id": "r", "token": TOKEN},  # no epoch/conn_id
+    ],
+)
+async def test_no_token_in_any_reply_before_authentication(make_server, sock_path, frame):
+    await make_server(grace_s=30.0, heartbeat_s=5.0)
+    c = await connect(sock_path)
+    rep = await c.call(frame)
+    assert rep["ok"] is False
+    assert TOKEN not in str(rep) and "token" not in rep
+    c.close()
+
+
+async def test_no_token_in_reply_to_garbage_frame(make_server, sock_path):
+    await make_server(grace_s=30.0, heartbeat_s=5.0)
+    r, w = await asyncio.open_unix_connection(sock_path)
+    w.write((5).to_bytes(4, "big") + b"[1,2]")  # valid length, JSON but not an object
+    await w.drain()
+    rep = await asyncio.wait_for(read_frame(r), 2.0)
+    assert rep["ok"] is False and "token" not in rep and TOKEN not in str(rep)
+    w.close()

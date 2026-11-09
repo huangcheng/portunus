@@ -207,7 +207,7 @@ class Runner:
             return False
         token = msg.get("token")
         if not isinstance(token, str) or not hmac.compare_digest(token.encode(), self._token_b):
-            await self._error(sess, msg, "unauthorized", "invalid token", with_token=False)
+            await self._error(sess, msg, "unauthorized", "invalid token")
             return False
         op = msg["op"]
 
@@ -231,7 +231,7 @@ class Runner:
         elif op in ("stop", "kill"):
             await self._do_signal(sess, msg, op)
         else:
-            await self._error(sess, msg, "unsupported", f"op {op} not implemented")
+            await self._error(sess, msg, "unsupported", f"op {op} not implemented", with_token=True)
         return True
 
     async def _do_hello(self, sess: Session, msg: dict) -> bool:
@@ -261,19 +261,19 @@ class Runner:
             and argv
             and all(isinstance(a, str) for a in argv)
         ):
-            await self._error(sess, msg, "unsupported", "malformed start")
+            await self._error(sess, msg, "unsupported", "malformed start", with_token=True)
             return
         if child_id in self.children:
-            await self._error(sess, msg, "unsupported", "duplicate child_id", reason="duplicate")
+            await self._error(sess, msg, "unsupported", "duplicate child_id", reason="duplicate", with_token=True)
             return
         try:
             handle = await self._spawn(msg)
         except PortunusError as e:
-            await self._error(sess, msg, e.code, e.message or "spawn rejected")
+            await self._error(sess, msg, e.code, e.message or "spawn rejected", with_token=True)
             return
         except Exception:
             log.exception("spawn failed")
-            await self._error(sess, msg, "spawn_failed", "spawn failed")
+            await self._error(sess, msg, "spawn_failed", "spawn failed", with_token=True)
             return
         self.children.add(child_id, handle, server_id=server_id)
         await self._reply(sess, msg, child_id=child_id, pid=handle.pid)
@@ -283,7 +283,7 @@ class Runner:
         rec = self.children.get(child_id) if isinstance(child_id, str) else None
         if rec is None:
             await self._error(
-                sess, msg, "unsupported", "unknown child", reason="unknown_child"
+                sess, msg, "unsupported", "unknown child", reason="unknown_child", with_token=True
             )
             return
         with contextlib.suppress(ProcessLookupError):
@@ -311,7 +311,7 @@ class Runner:
         code: str,
         message: str = "",
         *,
-        with_token: bool = True,
+        with_token: bool = False,
         **fields: Any,
     ) -> None:
         frame: dict[str, Any] = {
