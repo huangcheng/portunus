@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db.models import AuditEvent, Server, Tool, VaultEntry
 from .runner_client import RunnerRequestError
+from .runner_pool import RunnerPool
 from .vault import Vault, VaultError
 
 MAX_ENV_ENTRIES = 256  # mirrors the runner's bound
@@ -162,6 +163,7 @@ class Registry:
         self._sf = session_factory
         self.vault = vault
         self.runner = runner
+        self.pool = RunnerPool.ensure(runner)
         self.trusted_path = list(trusted_path)
         self.binary_allowlist = list(binary_allowlist)
         self.slots = slots  # SlotManager (disable_server) once wired by the app
@@ -352,7 +354,11 @@ class Registry:
 
         timeout_s = self.probe_timeout_s
         try:
-            reply = await self.runner.request(
+            decision = self.pool.pick(())  # probes carry no region preference yet
+            if decision is None:
+                raise RunnerRequestError("runner_unavailable", "runner not connected", sent=False)
+            reply = await self.pool.request(
+                decision.site_id,
                 "probe",
                 timeout=timeout_s + PROBE_TRANSPORT_SLACK_S,
                 probe_id=uuid.uuid4().hex,

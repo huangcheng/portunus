@@ -33,6 +33,7 @@ from .omni import Omni, ServerStateCache
 from .operator_auth import INSECURE_COOKIE_ENV, OperatorAuth
 from .registry import Registry
 from .runner_client import RunnerClient
+from .runner_pool import RunnerPool
 from .slots import SlotManager
 from .vault import Vault
 
@@ -130,17 +131,20 @@ def create_gateway_app() -> FastAPI:
         heartbeat_s=heartbeat_s,
         expected_uid=expected_runner_uid(dev=dev),
     )
+    # Pool of one for the single-socket deployment; more links can be added without touching
+    # slots/registry/omni, which only ever address a runner through the pool.
+    pool = RunnerPool([client])
 
     # The Omni gate verifies keys through the module-level store (keys.verify_agent_token);
     # SlotManager/Omni get the same object injected so revokes/grants cannot diverge.
     store = authz.authz_store
     cache = ServerStateCache()
-    slots = SlotManager(client, store, server_enabled=cache.enabled, vault_version=cache.vault_version)
-    slots.attach(client)
+    slots = SlotManager(pool, store, server_enabled=cache.enabled, vault_version=cache.vault_version)
+    slots.attach(pool)
     registry = Registry(
         async_session,
         vault,
-        client,
+        pool,
         trusted_path=trusted_path,
         binary_allowlist=binary_allowlist,
         slots=slots,
@@ -149,7 +153,7 @@ def create_gateway_app() -> FastAPI:
         session_factory=async_session,
         registry=registry,
         slots=slots,
-        runner=client,
+        runner=pool,
         authz=store,
         state_cache=cache,
     )
@@ -157,23 +161,24 @@ def create_gateway_app() -> FastAPI:
 
     app = build_app(registry=registry, omni=omni, auth=auth)
     app.state.runner = client
+    app.state.runner_pool = pool
     inner_lifespan = app.router.lifespan_context
 
     @contextlib.asynccontextmanager
     async def lifespan(a: FastAPI) -> AsyncIterator[None]:
         await store.reload_from_db()  # authz is rebuilt from the DB on start (spec §3)
-        client.start()
+        pool.start()
         try:
             async with inner_lifespan(a):
                 yield
         finally:
-            await client.close()
+            await pool.close()
 
     app.router.lifespan_context = lifespan
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, object]:
-        return {"ok": True, "runner_connected": client.connected}
+        return {"ok": True, "runner_connected": pool.any_connected()}
 
     dist = Path(os.environ.get("PORTUNUS_DASHBOARD_DIR") or default_dashboard_dir())
     if (dist / "index.html").is_file():

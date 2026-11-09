@@ -11,6 +11,10 @@ Invariants
 * ``pending_stop`` is sticky: it survives reconnects, a child that is pending_stop is never
   adopted or committed, and the kill is retried until exit evidence (or the socket drops, in
   which case the next reconcile re-issues it).
+* Every slot is pinned to the ``site_id`` of the runner it was started on (fleet: the pick is
+  made once, by the scheduler, at reserve time). Stop/kill/rpc/reconcile for a slot only ever
+  talk to that site's connection; one site's inventory or ``child_exited`` is never evidence
+  about another site's children.
 * Authorization is re-checked at commit (``is_revoked`` first, because
   ``AuthzStore.has_grant`` keeps answering for revoked keys) and again for every child the
   runner lists on reconnect. A start that races a revoke/ungrant can therefore never come
@@ -24,13 +28,14 @@ import contextlib
 import enum
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from portunus_shared import DEFAULTS, PortunusError
 
 from .runner_client import RunnerRequestError
+from .runner_pool import RunnerPool
 
 log = logging.getLogger("portunus.gateway.slots")
 
@@ -67,6 +72,8 @@ class Slot:
     generation: int
     vault_version: int | None
     pending_stop: bool = False
+    site_id: str = "local"  # runner site that owns the child; every request for it goes there
+    preferred_miss: bool = False  # scheduled outside the server's preferred regions
     exited: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     kill_attempted: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     stop_task: asyncio.Task | None = field(default=None, repr=False)
@@ -88,7 +95,7 @@ def _str_list(value: Any, what: str) -> list[str]:
 class SlotManager:
     def __init__(
         self,
-        client: _Client,
+        client: _Client | RunnerPool,
         authz: _Authz,
         *,
         max_children_per_key: int = DEFAULTS.max_children_per_key,
@@ -99,7 +106,8 @@ class SlotManager:
         server_enabled: Callable[[uuid.UUID], bool] | None = None,
         vault_version: Callable[[uuid.UUID], int | None] | None = None,
     ) -> None:
-        self.client = client
+        self.client = client  # a RunnerClient or a RunnerPool; routing always goes via the pool
+        self.pool = RunnerPool.ensure(client)
         self.authz = authz
         self.max_children_per_key = max_children_per_key
         self.max_children_global = max_children_global
@@ -111,13 +119,49 @@ class SlotManager:
         self._slots: dict[str, Slot] = {}
         self._by_pair: dict[tuple[uuid.UUID, str], Slot] = {}
         self._pair_locks: dict[tuple[uuid.UUID, str], asyncio.Lock] = {}
+        self._foreign_kills: set[asyncio.Task] = set()
 
     # ---- wiring / introspection --------------------------------------------------
 
-    def attach(self, client: Any) -> None:
-        """Hook a RunnerClient so reconnects reconcile and ``child_exited`` frees slots."""
-        client.on_connected = self.sync_with_runner
-        client.on_child_exited = self.on_child_exited
+    def attach(self, target: Any) -> None:
+        """Hook a RunnerClient (or every client of a pool) so reconnects reconcile that site and
+        its ``child_exited`` frames free that site's slots."""
+        if isinstance(target, RunnerPool):
+            for c in target.clients:
+                self.attach(c)
+            return
+        client = target
+
+        def site() -> str | None:
+            return self.pool.site_of(client)
+
+        async def on_connected() -> None:
+            await self.sync_with_runner(site())
+
+        def on_exited(child_id: str) -> bool:
+            return self.on_child_exited(child_id, site_id=site())
+
+        client.on_connected = on_connected
+        client.on_child_exited = on_exited
+
+    def _site_or_only(self, site_id: str | None) -> str:
+        """``site_id``, or the pool's single site (v1 callers never name one)."""
+        if site_id is not None:
+            return site_id
+        ids = self.pool.site_ids()
+        if len(ids) != 1:
+            raise ValueError("site_id is required with a multi-runner pool")
+        return ids[0]
+
+    def site_of(self, child_id: str) -> str | None:
+        slot = self._slots.get(child_id)
+        return slot.site_id if slot is not None else None
+
+    def _loads(self) -> dict[str, int]:
+        loads: dict[str, int] = {}
+        for s in self._slots.values():
+            loads[s.site_id] = loads.get(s.site_id, 0) + 1
+        return loads
 
     @property
     def slots(self) -> dict[str, Slot]:
@@ -202,13 +246,18 @@ class SlotManager:
             raise PortunusError("child_cap", "per-key child cap reached")
 
     async def reserve_and_start(
-        self, server_id: uuid.UUID, key_id: str, start_payload: dict
+        self,
+        server_id: uuid.UUID,
+        key_id: str,
+        start_payload: dict,
+        *,
+        preferred_regions: Iterable[str] = (),
     ) -> str:
         """Return the ``child_id`` of a live, authorized child for the pair (reusing one).
 
         Raises ``revoked`` / ``not_granted`` / ``server_disabled`` (admission or lost a race),
-        ``child_cap``, ``runner_unavailable``, ``spawn_rejected`` / ``spawn_failed`` (runner
-        refused), ``upstream_timeout`` (no ack in ``start_ack_s``; the child is pending_stop),
+        ``child_cap``, ``runner_unavailable`` (no live runner in the pool), ``spawn_rejected`` /
+        ``spawn_failed`` (runner refused), ``upstream_timeout`` (no ack in ``start_ack_s``; the child is pending_stop),
         ``upstream_crash`` (exited before the ack) or ``cancelled`` (stopped mid-start).
         """
         argv, trailing, env, vault_version = self._validate_payload(start_payload)
@@ -227,7 +276,8 @@ class SlotManager:
                 raise PortunusError(
                     "runner_unavailable", "previous child for this server/key still resolving"
                 )
-            if not self.client.connected:
+            decision = self.pool.pick(preferred_regions, loads=self._loads())
+            if decision is None:
                 raise PortunusError("runner_unavailable", "runner not connected")
             self._check_caps(key_id)  # reserve is synchronous with the check: no overshoot
             slot = Slot(
@@ -235,9 +285,11 @@ class SlotManager:
                 server_id=server_id,
                 key_id=key_id,
                 state=SlotState.RESERVED,
-                sent_seq=self.client.conn_seq,
+                sent_seq=self.pool.conn_seq(decision.site_id),
                 generation=self.authz.generation,
                 vault_version=vault_version,
+                site_id=decision.site_id,
+                preferred_miss=decision.preferred_miss,
             )
             self._slots[slot.child_id] = slot
             self._by_pair[pair] = slot
@@ -257,8 +309,8 @@ class SlotManager:
             "env": env,
         }
         try:
-            await self.client.request(
-                "start", timeout=self.start_ack_s, conn_seq=slot.sent_seq, **fields
+            await self.pool.request(
+                slot.site_id, "start", timeout=self.start_ack_s, conn_seq=slot.sent_seq, **fields
             )
         except asyncio.CancelledError:
             # Caller went away mid-start: the child may exist. Stop it; free on evidence.
@@ -294,10 +346,13 @@ class SlotManager:
 
     # ---- exit evidence -----------------------------------------------------------
 
-    def on_child_exited(self, child_id: str) -> bool:
-        """``child_exited`` from the runner: exit evidence, frees the slot."""
+    def on_child_exited(self, child_id: str, site_id: str | None = None) -> bool:
+        """``child_exited`` from a runner: exit evidence, frees the slot.
+
+        With ``site_id`` the frame only counts if that site owns the slot.
+        """
         slot = self._slots.get(child_id)
-        if slot is None:
+        if slot is None or (site_id is not None and slot.site_id != site_id):
             return False
         self._free(slot)
         return True
@@ -331,11 +386,11 @@ class SlotManager:
         reconcile re-issues the kill after reconnect."""
         try:
             while self._slots.get(slot.child_id) is slot:
-                if not self.client.connected:
+                if not self.pool.is_connected(slot.site_id):
                     return
                 try:
-                    await self.client.request(
-                        "kill", timeout=self.kill_ack_s, child_id=slot.child_id
+                    await self.pool.request(
+                        slot.site_id, "kill", timeout=self.kill_ack_s, child_id=slot.child_id
                     )
                 except RunnerRequestError as e:
                     if e.reason == "unknown_child":
@@ -378,14 +433,17 @@ class SlotManager:
 
     # ---- reconcile ---------------------------------------------------------------
 
-    async def sync_with_runner(self) -> ReconcileResult:
-        """Request inventory on the current connection and reconcile against it."""
-        seq = self.client.conn_seq
-        reply = await self.client.request("inventory", timeout=self.kill_ack_s * 2, conn_seq=seq)
+    async def sync_with_runner(self, site_id: str | None = None) -> ReconcileResult:
+        """Request inventory on a site's current connection and reconcile against it."""
+        site = self._site_or_only(site_id)
+        seq = self.pool.conn_seq(site)
+        reply = await self.pool.request(
+            site, "inventory", timeout=self.kill_ack_s * 2, conn_seq=seq
+        )
         children = reply.get("children")
         if not isinstance(children, list):
             raise PortunusError("unsupported", "malformed inventory")
-        return await self.reconcile(children, conn_seq=seq)
+        return await self.reconcile(children, conn_seq=seq, site_id=site)
 
     async def reconcile(
         self,
@@ -397,8 +455,11 @@ class SlotManager:
         server_enabled: Callable[[uuid.UUID], bool] | None = None,
         vault_version: Callable[[uuid.UUID], int | None] | None = None,
         conn_seq: int | None = None,
+        site_id: str | None = None,
     ) -> ReconcileResult:
-        """Reconcile slots with the runner's complete inventory (spec §6.1 grace step 3).
+        """Reconcile one site's slots with that runner's complete inventory (spec §6.1 grace
+        step 3). Slots owned by other sites are never freed, adopted or stopped by it, and a
+        listed child that another site owns is killed on the reporting site, not adopted.
 
         Predicates default to this manager's authz store. A listed child is kept/adopted only
         if its key is not revoked, the server is granted + enabled, it is not pending_stop and
@@ -409,7 +470,8 @@ class SlotManager:
         freed for absence nor adopted -- their own ack decides.
         """
         gen_now = generation() if generation is not None else self.authz.generation
-        seq = self.client.conn_seq if conn_seq is None else conn_seq
+        site = self._site_or_only(site_id)
+        seq = self.pool.conn_seq(site) if conn_seq is None else conn_seq
         listed: dict[str, dict] = {}
         for item in inventory:
             cid = item.get("child_id") if isinstance(item, dict) else None
@@ -418,7 +480,7 @@ class SlotManager:
 
         res = ReconcileResult()
         for slot in list(self._slots.values()):
-            if slot.child_id in listed or slot.sent_seq >= seq:
+            if slot.site_id != site or slot.child_id in listed or slot.sent_seq >= seq:
                 continue
             self._free(slot)
             res.freed.append(slot.child_id)
@@ -426,8 +488,13 @@ class SlotManager:
         waits: list[asyncio.Event] = []
         for cid, item in listed.items():
             slot = self._slots.get(cid)
+            if slot is not None and slot.site_id != site:
+                # Owned by another site: this inventory is no evidence about it.
+                self._kill_foreign(site, cid)
+                res.stopped.append(cid)
+                continue
             if slot is None:
-                slot = self._track_unknown(cid, item, seq, gen_now)
+                slot = self._track_unknown(cid, item, seq, gen_now, site)
                 res.stopped.append(cid)
                 waits.append(slot.kill_attempted)
                 continue
@@ -463,7 +530,22 @@ class SlotManager:
                     await asyncio.gather(*(e.wait() for e in waits))
         return res
 
-    def _track_unknown(self, child_id: str, item: dict, seq: int, gen: int) -> Slot:
+    def _kill_foreign(self, site: str, child_id: str) -> None:
+        """Best-effort kill of a duplicate child on ``site`` that another site's slot owns."""
+
+        async def run() -> None:
+            with contextlib.suppress(RunnerRequestError):
+                await self.pool.request(
+                    site, "kill", timeout=self.kill_ack_s, child_id=child_id
+                )
+
+        task = asyncio.get_running_loop().create_task(run())
+        self._foreign_kills.add(task)
+        task.add_done_callback(self._foreign_kills.discard)
+
+    def _track_unknown(
+        self, child_id: str, item: dict, seq: int, gen: int, site: str
+    ) -> Slot:
         sid: uuid.UUID | None
         try:
             sid = uuid.UUID(str(item.get("server_id")))
@@ -478,6 +560,7 @@ class SlotManager:
             generation=gen,
             vault_version=None,
             pending_stop=True,
+            site_id=site,
         )
         self._slots[child_id] = slot
         self._mark_pending_stop(slot)

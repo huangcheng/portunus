@@ -49,6 +49,7 @@ from .db.models import Tool as ToolRow
 from .keys import AuthError, verify_agent_token
 from .registry import RegistryError
 from .runner_client import RunnerRequestError
+from .runner_pool import RunnerPool
 
 MAX_BODY_BYTES = 1024 * 1024
 MAX_RESULT_BYTES = 1024 * 1024
@@ -255,6 +256,7 @@ class Omni:
         self.registry = registry
         self.slots = slots
         self.runner = runner
+        self.pool = RunnerPool.ensure(runner)
         self.authz = authz
         self.state_cache = state_cache or ServerStateCache()
         self.invoke_timeout_s = invoke_timeout_s
@@ -464,8 +466,12 @@ class Omni:
         start = await self.registry.start_payload(server.id)
         self.state_cache.put(server.id, server.enabled, start["vault_version"])
         child_id = await self.slots.reserve_and_start(server.id, key_id, start)
+        site_id = self.slots.site_of(child_id)  # the rpc goes to the site that owns the child
+        if site_id is None:
+            raise PortunusError("upstream_crash", "child exited before the call")
         try:
-            reply = await self.runner.request(
+            reply = await self.pool.request(
+                site_id,
                 "rpc",
                 timeout=timeout_s + RPC_SLACK_S,
                 child_id=child_id,
