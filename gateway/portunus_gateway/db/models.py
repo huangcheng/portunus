@@ -71,6 +71,10 @@ class Server(Base):
     command: Mapped[str | None] = mapped_column(String(1024))  # stdio
     args: Mapped[list[str] | None] = mapped_column(JSON)  # stdio argv (literals)
     url: Mapped[str | None] = mapped_column(String(2048))  # remote
+    # Soft scheduling affinity: runner regions to try first. Empty = any live runner.
+    preferred_regions: Mapped[list[str]] = mapped_column(
+        JSON, default=list, server_default="[]"
+    )
     # Bumped on every vault change; children record it, reconcile compares it.
     vault_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = _created_at()

@@ -293,6 +293,14 @@ class SlotManager:
             )
             self._slots[slot.child_id] = slot
             self._by_pair[pair] = slot
+            # Ids only: never argv/env. Misses are worth an operator's attention.
+            log.log(
+                logging.INFO if slot.preferred_miss else logging.DEBUG,
+                "scheduled child server=%s site=%s preferred_miss=%s",
+                server_id,
+                slot.site_id,
+                slot.preferred_miss,
+            )
             return await self._start(slot, argv, trailing, env)
 
     async def _start(

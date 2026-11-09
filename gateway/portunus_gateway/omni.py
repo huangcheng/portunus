@@ -465,7 +465,9 @@ class Omni:
     ) -> types.CallToolResult:
         start = await self.registry.start_payload(server.id)
         self.state_cache.put(server.id, server.enabled, start["vault_version"])
-        child_id = await self.slots.reserve_and_start(server.id, key_id, start)
+        child_id = await self.slots.reserve_and_start(
+            server.id, key_id, start, preferred_regions=start.get("preferred_regions") or ()
+        )
         site_id = self.slots.site_of(child_id)  # the rpc goes to the site that owns the child
         if site_id is None:
             raise PortunusError("upstream_crash", "child exited before the call")

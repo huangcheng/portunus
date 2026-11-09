@@ -77,6 +77,13 @@ class CreateServer(BaseModel):
     args: list[str] = Field(default_factory=list, max_length=64)
     env: dict[str, str] = Field(default_factory=dict)
     url: str | None = Field(default=None, max_length=2048)
+    preferred_regions: list[str] = Field(default_factory=list)
+
+
+class UpdateServer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preferred_regions: list[str]
 
 
 class EnableBody(BaseModel):
@@ -102,6 +109,19 @@ async def create_server(
         args=body.args,
         env=body.env,
         actor=actor,
+        preferred_regions=body.preferred_regions,
+    )
+
+
+@router.patch("/servers/{server_id}")
+async def update_server(
+    server_id: uuid.UUID,
+    body: UpdateServer,
+    actor: str = Depends(require_operator),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    return await registry.update_server(
+        server_id, preferred_regions=body.preferred_regions, actor=actor
     )
 
 

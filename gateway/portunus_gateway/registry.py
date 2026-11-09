@@ -36,7 +36,9 @@ from .vault import Vault, VaultError
 MAX_ENV_ENTRIES = 256  # mirrors the runner's bound
 MAX_ENV_BYTES = 128 * 1024
 MAX_TOOLS = 2000
+MAX_PREFERRED_REGIONS = 16
 PROBE_TRANSPORT_SLACK_S = 5  # the runner enforces timeout_s; leave room for its reply
+_REGION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", re.ASCII)
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
 _FORBIDDEN_ENV_PREFIXES = ("PORTUNUS_", "LD_", "DYLD_")  # runner rejects these too
 _RUNNER_STATUS = {
@@ -90,6 +92,19 @@ def validate_env(env: dict[str, str]) -> dict[str, str]:
     return dict(env)
 
 
+def validate_regions(regions: Any) -> list[str]:
+    """Normalize a ``preferred_regions`` list: strict names, de-duplicated, order preserved."""
+    if not isinstance(regions, list) or len(regions) > MAX_PREFERRED_REGIONS:
+        raise RegistryError(422, "invalid_regions", "preferred_regions must be a short list")
+    out: list[str] = []
+    for r in regions:
+        if not isinstance(r, str) or not _REGION.fullmatch(r):
+            raise RegistryError(422, "invalid_regions", "invalid region name")
+        if r not in out:
+            out.append(r)
+    return out
+
+
 def server_view(server: Server, env_names: list[str]) -> dict[str, Any]:
     return {
         "id": str(server.id),
@@ -100,6 +115,7 @@ def server_view(server: Server, env_names: list[str]) -> dict[str, Any]:
         "command": server.command,
         "args": list(server.args or []),
         "url": server.url,
+        "preferred_regions": list(server.preferred_regions or []),
         "vault_version": server.vault_version,
         "env_names": sorted(env_names),  # names only, never values
         "created_at": server.created_at.isoformat() if server.created_at else None,
@@ -203,11 +219,13 @@ class Registry:
         args: list[str],
         env: dict[str, str],
         actor: str,
+        preferred_regions: list[str] | None = None,
     ) -> dict[str, Any]:
         if kind != "stdio":
             raise RegistryError(400, "unsupported", f"server kind {kind!r} is not supported yet")
         self._validate_argv(command, args)
         env = validate_env(env)
+        regions = validate_regions(preferred_regions or [])
         server = Server(
             id=uuid.uuid4(),
             name=name,
@@ -216,6 +234,7 @@ class Registry:
             enabled=False,
             command=command,
             args=list(args),
+            preferred_regions=regions,
             vault_version=1 if env else 0,
         )
         entries = []
@@ -245,6 +264,18 @@ class Registry:
                 await s.rollback()
                 raise RegistryError(409, "conflict", "slug already in use") from None
         return server_view(server, list(env))
+
+    async def update_server(
+        self, server_id: uuid.UUID, *, preferred_regions: list[str], actor: str
+    ) -> dict[str, Any]:
+        regions = validate_regions(preferred_regions)
+        async with self._sf() as s:
+            server = await self._get_server(s, server_id)
+            server.preferred_regions = regions
+            s.add(self._audit(actor, "server.update", server_id, {"preferred_regions": regions}))
+            await s.commit()
+            names = await self._env_names(s, server_id)
+            return server_view(server, names)
 
     async def list_servers(self) -> list[dict[str, Any]]:
         async with self._sf() as s:
@@ -320,12 +351,14 @@ class Registry:
             self._validate_argv(command, args)
             env = await self._decrypt_env(s, server_id)
             vault_version = server.vault_version
+            preferred_regions = list(server.preferred_regions or [])
         assert command is not None
         return {
             "argv": [command, *args],
             "trailing_allowlist": [],
             "env": env,
             "vault_version": vault_version,
+            "preferred_regions": preferred_regions,  # scheduling hint; not sent to the runner
         }
 
     # ---- probe -------------------------------------------------------------------
@@ -350,11 +383,12 @@ class Registry:
             command, args = server.command, list(server.args or [])
             self._validate_argv(command, args)  # policy may have changed since create
             env = await self._decrypt_env(s, server_id)
+            preferred_regions = list(server.preferred_regions or [])
         assert command is not None
 
         timeout_s = self.probe_timeout_s
         try:
-            decision = self.pool.pick(())  # probes carry no region preference yet
+            decision = self.pool.pick(preferred_regions)
             if decision is None:
                 raise RunnerRequestError("runner_unavailable", "runner not connected", sent=False)
             reply = await self.pool.request(
@@ -410,7 +444,14 @@ class Registry:
                     actor,
                     "server.probe",
                     server_id,
-                    {"tools": len(incoming), "added": added, "changed": changed, "missing": missing},
+                    {
+                        "tools": len(incoming),
+                        "added": added,
+                        "changed": changed,
+                        "missing": missing,
+                        "site_id": decision.site_id,
+                        "preferred_miss": decision.preferred_miss,
+                    },
                 )
             )
             await s.commit()
