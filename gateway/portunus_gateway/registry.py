@@ -169,6 +169,10 @@ class Registry:
         self.max_probes = max_probes
         self._probing: set[uuid.UUID] = set()
 
+    @property
+    def session_factory(self) -> Callable[[], AsyncSession]:
+        return self._sf
+
     # ---- argv --------------------------------------------------------------------
 
     def _validate_argv(self, command: str | None, args: list[str]) -> None:

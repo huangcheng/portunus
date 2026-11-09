@@ -21,7 +21,7 @@ import httpx
 import pytest
 from portunus_gateway.db.models import AuditEvent, Server, VaultEntry
 from portunus_gateway.db.session import async_session
-from portunus_gateway.operator_api import create_app, require_operator
+from portunus_gateway.operator_api import create_app, require_operator, require_step_up
 from portunus_gateway.registry import Registry
 from portunus_gateway.runner_client import RunnerClient, RunnerRequestError
 from portunus_gateway.vault import Vault
@@ -43,6 +43,7 @@ def _app(registry: Registry, *, authed: bool = True):
     app = create_app(registry)
     if authed:
         app.dependency_overrides[require_operator] = lambda: "test-operator"
+        app.dependency_overrides[require_step_up] = lambda: "test-operator"
     return app
 
 

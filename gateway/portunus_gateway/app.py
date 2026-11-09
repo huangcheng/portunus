@@ -15,11 +15,12 @@ from starlette.routing import Route
 
 from .omni import Omni
 from .operator_api import create_app
+from .operator_auth import OperatorAuth
 from .registry import Registry
 
 
-def build_app(*, registry: Registry, omni: Omni) -> FastAPI:
-    app = create_app(registry)
+def build_app(*, registry: Registry, omni: Omni, auth: OperatorAuth | None = None) -> FastAPI:
+    app = create_app(registry, auth=auth)
     app.state.omni = omni
     # A Route (not a Mount) so ``POST /mcp`` matches without a trailing-slash redirect.
     app.router.routes.append(Route("/mcp", endpoint=omni.asgi))
