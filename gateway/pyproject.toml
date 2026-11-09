@@ -6,10 +6,16 @@ requires-python = ">=3.12"
 dependencies = [
     "portunus-shared",
     "cryptography>=43",
+    "aiosqlite>=0.20",
+    "alembic>=1.13",
+    "sqlalchemy[asyncio]>=2.0",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "anyio>=4.16.0",
+    "pytest>=8",
+]
 
 [tool.uv.sources]
 portunus-shared = { path = "../packages/portunus_shared", editable = true }
