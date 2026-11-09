@@ -595,6 +595,30 @@ async def test_reconcile_kills_unknown_inventory_child(slot_manager, fake_runner
     assert "ghost2" in fake_runner.kills
 
 
+async def test_ghost_that_never_exits_does_not_wedge_later_reconciles(
+    slot_manager, fake_runner, authz
+):
+    s_ok, s_bad = uuid.uuid4(), uuid.uuid4()
+    grant(authz, "k1", s_ok)
+    grant(authz, "k1", s_bad)
+    ok = await slot_manager.reserve_and_start(s_ok, "k1", PAYLOAD)
+    bad = await slot_manager.reserve_and_start(s_bad, "k1", PAYLOAD)
+    fake_runner.children["ghost"] = {"child_id": "ghost", "server_id": str(s_ok), "pid": 9}
+    fake_runner.kill_exits = False  # kills are acked but nothing ever exits
+    fake_runner.reconnect()
+    res1 = await slot_manager.sync_with_runner()
+    assert "ghost" in res1.stopped and ok in res1.kept
+    # connection drops; ghost slot (key_id None) survives; the next reconcile must not raise
+    ungrant(authz, "k1", s_bad)  # and must still handle a real child that lost its grant
+    fake_runner.reconnect()
+    res2 = await slot_manager.sync_with_runner()
+    assert "ghost" in res2.stopped and "ghost" not in res2.kept
+    assert bad in res2.stopped and ok in res2.kept
+    assert slot_manager.slot("ghost").pending_stop
+    assert slot_manager.slot(bad).pending_stop
+    assert fake_runner.kills.count(bad) >= 1
+
+
 async def test_reconcile_vault_version_mismatch_killed(fake_runner, authz):
     srv = uuid.uuid4()
     grant(authz, "k1", srv)

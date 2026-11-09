@@ -427,7 +427,13 @@ class SlotManager:
                 res.stopped.append(cid)
                 waits.append(slot.kill_attempted)
                 continue
-            assert slot.key_id is not None
+            if slot.key_id is None:
+                # Ghost (unknown to the gateway) left over from an earlier reconcile whose
+                # kill never produced exit evidence: keep killing it, never adopt it.
+                self._mark_pending_stop(slot)
+                res.stopped.append(cid)
+                waits.append(slot.kill_attempted)
+                continue
             deny = self._deny_reason(
                 slot.key_id,
                 slot.server_id,
