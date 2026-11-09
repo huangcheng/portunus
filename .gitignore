@@ -30,3 +30,10 @@ pepper
 # Compose-local material
 secrets/
 deploy/runner-policy.json
+
+# Local ops / personal automation (never commit)
+inventory/
+*.pem
+*.key
+id_rsa*
+id_ed25519*

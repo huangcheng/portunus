@@ -1,8 +1,8 @@
 # Portunus — MCP Gateway Design
 
 **Date:** 2026-11-09  
-**Status:** draft (pi panel passed — 4/4 GO on round 15; audits under `/tmp/portunus-audit/`)  
-**Sibling:** Janus — LLM front door. Portunus is the MCP front door and central tool vault.
+**Status:** implemented on `main` for the stdio Omni path (v1); see also fleet follow-on spec.  
+**Sibling product:** an LLM front door. Portunus is the MCP front door and central tool vault.
 
 **One-liner:** Self-hosted MCP gateway: register `npx`/`uvx` and remote MCP servers, operator vault, agent keys with grants, Omni `/mcp` (MCP Streamable HTTP).
 

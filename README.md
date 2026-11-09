@@ -132,7 +132,8 @@ the children keep none.
   (`gateway/portunus_gateway/remote.py`, with its SSRF controls) is not yet wired into the registry
   or Omni; `remote` servers are refused at invoke time with `unsupported`.
 - Dev mode (and the default compose stack) does not enforce the child privilege drop.
-- Single gateway worker and single runner only.
+- Single gateway worker and single runner only (multi-site fleet is a follow-on; see
+  `docs/superpowers/specs/2026-11-09-portunus-fleet-design.md`).
 - **v1 ships the stdio Omni path only.** `remote.py` exists and is tested in isolation but is not wired
   into the `Registry` or Omni; `remote` servers cannot be invoked in v1.
 
@@ -145,6 +146,7 @@ Known follow-ups (documented gaps, not implemented in v1):
 - Cancel-operation API/tool for in-flight invocations.
 - 30-day audit log retention/pruning: audit rows are kept indefinitely.
 - Remote MCP OAuth/PKCE (and wiring the remote proxy in, see above).
+- Multi-site runners with soft region affinity (fleet v1.1 plan under `docs/superpowers/plans/`).
 
 ## Tests
 
