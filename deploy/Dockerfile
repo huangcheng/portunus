@@ -9,10 +9,11 @@ COPY dashboard/ ./
 RUN npm run build
 
 FROM python:3.12-slim
-# node/npm give the runner `npx`; uv gives it `uvx`.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# node/npx for the runner: copied from the official node image (no apt, small).
+COPY --from=dashboard /usr/local/bin/node /usr/local/bin/node
+COPY --from=dashboard /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 ARG WITH_POSTGRES=0

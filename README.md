@@ -55,6 +55,15 @@ docker compose up --build        # gateway + runner on http://localhost:8080
 #   in .env, then: docker compose --profile postgres up --build
 ```
 
+Verified: `docker compose build` and `up` succeed; gateway reports `/healthz` ok with the runner connected (the e2e script itself was not run against containers). The gateway is published on **127.0.0.1 only** (`PORTUNUS_PORT` changes the port, not the interface); to expose
+it, put a TLS reverse proxy in front rather than widening the bind in dev mode.
+
+**Secret file modes.** `secrets/` is `0700` and `.env` is `0600`. `secrets/pepper` and `secrets/runner.token` are
+`0644` because compose bind-mounts keep host modes and the container user (uid 10001) must read them; host
+users other than you cannot reach them through the `0700` directory, but anything that can read the file (root, a
+process of yours, a backup of the dir) can. For stricter modes, `chmod 0600` them and run the services as your
+own uid (`user:` in `docker-compose.yml`) with `run`/`data` volumes owned by that uid, or use Docker/Swarm secrets.
+
 Services: `portunus` (gateway, dashboard, `/mcp`), `portunus-runner` (no published port; shares only the
 socket volume), `postgres` (profile `postgres`). The default compose stack runs in **dev mode**
 (`PORTUNUS_DEV=1`, same uid for gateway and runner). Edit `deploy/runner-policy.json` (copied from
