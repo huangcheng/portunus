@@ -2,21 +2,18 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from sqlalchemy import event
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from portunus_gateway.db.url import database_url
+from portunus_gateway.db.url import database_url, ensure_sqlite_dir
 
 
 def _make_engine(url: str):
     parsed = make_url(url)
     is_sqlite = parsed.get_backend_name() == "sqlite"
-    if is_sqlite and parsed.database and parsed.database != ":memory:":
-        Path(parsed.database).expanduser().parent.mkdir(parents=True, exist_ok=True)
+    ensure_sqlite_dir(url)
     # SQLite connections are cheap; NullPool avoids cross-event-loop connection reuse.
     eng = create_async_engine(url, poolclass=NullPool) if is_sqlite else create_async_engine(url)
     if is_sqlite:

@@ -10,7 +10,7 @@ from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from portunus_gateway.db.models import Base
-from portunus_gateway.db.url import database_url
+from portunus_gateway.db.url import database_url, ensure_sqlite_dir
 
 config = context.config
 if config.config_file_name is not None:
@@ -53,6 +53,7 @@ async def _run_async(url: str) -> None:
 
 def run_migrations_online() -> None:
     url = _url()
+    ensure_sqlite_dir(url)
     if make_url(url).get_driver_name() in ASYNC_DRIVERS:
         asyncio.run(_run_async(url))
         return

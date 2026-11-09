@@ -6,7 +6,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.exc import IntegrityError
 
 from portunus_gateway.db.models import (
@@ -210,3 +210,34 @@ def test_alembic_migration_matches_models(tmp_path):
     finally:
         eng.dispose()
     command.downgrade(cfg, "base")
+
+
+def test_alembic_upgrade_async_url_creates_data_dir(tmp_path):
+    """Production path: aiosqlite URL (``_run_async``) with a not-yet-existing parent dir."""
+    db = tmp_path / "does" / "not" / "exist" / "portunus.db"
+    assert not db.parent.exists()
+    url = f"sqlite+aiosqlite:///{db}"
+    cfg = Config(str(GATEWAY_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(GATEWAY_DIR / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", url)
+    command.upgrade(cfg, "head")
+    assert db.exists()
+    eng = create_engine(f"sqlite:///{db}")
+    try:
+        with eng.connect() as conn:
+            tables = set(inspect(conn).get_table_names())
+            assert {"servers", "tools", "vault_entries", "agent_keys", "grants",
+                    "operator_sessions", "audit_events", "alembic_version"} <= tables
+            assert compare_metadata(MigrationContext.configure(conn), Base.metadata) == []
+    finally:
+        eng.dispose()
+
+
+def test_alembic_upgrade_default_url_in_fresh_cwd(tmp_path, monkeypatch):
+    """Fresh checkout: no URL override, default ``./data/portunus.db`` relative to cwd."""
+    monkeypatch.delenv("PORTUNUS_DATABASE_URL", raising=False)
+    monkeypatch.chdir(tmp_path)
+    cfg = Config(str(GATEWAY_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(GATEWAY_DIR / "alembic"))
+    command.upgrade(cfg, "head")
+    assert (tmp_path / "data" / "portunus.db").exists()
