@@ -1,0 +1,30 @@
+[project]
+name = "portunus-runner"
+version = "0.1.0"
+description = "Portunus runner: Unix-socket listener, sole gateway client, heartbeat grace, child reap"
+requires-python = ">=3.12"
+dependencies = [
+    "portunus-shared",
+]
+
+[project.scripts]
+portunus-runner = "portunus_runner.main:cli"
+
+[dependency-groups]
+dev = [
+    "anyio>=4.16.0",
+    "pytest>=8",
+]
+
+[tool.uv.sources]
+portunus-shared = { path = "../packages/portunus_shared", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["portunus_runner"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
