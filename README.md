@@ -115,9 +115,16 @@ PORTUNUS_URL=http://localhost:8080 PORTUNUS_OPERATOR_PASSWORD=... E2E_COMMAND=/a
 ## Production
 
 Dev mode is not production. Run the gateway as `portunus`, the runner as `portunus-runner` with
-`CAP_SETUID|CAP_SETGID`, children as `portunus-mcp`, set `PORTUNUS_DEV` unset and
+`CAP_SETUID|CAP_SETGID|CAP_KILL`, children as `portunus-mcp`, set `PORTUNUS_DEV` unset and
 `PORTUNUS_DROP_PRIVS=1`, a root-owned `0644` policy at `/etc/portunus/runner-policy.json`, and terminate TLS
 in front of the gateway (the session cookie is `Secure` outside dev). See design §3 and §7.
+
+**`CAP_KILL` is required for production drop-privs.** Children run as `portunus-mcp`, a different uid
+from the runner, so the runner cannot signal them without `CAP_KILL`: grace, stop and kill fail with
+`EPERM`, orphaned children are not reaped, and a new-epoch hello can hang waiting for the previous epoch's
+children. `PORTUNUS_DROP_PRIVS=1` without `CAP_KILL` is **unsupported**. The design's two-cap residual
+(§3) is therefore three caps in practice; the runner drops everything but these three after binding, and
+the children keep none.
 
 ## Limitations
 
@@ -126,6 +133,18 @@ in front of the gateway (the session cookie is `Secure` outside dev). See design
   or Omni; `remote` servers are refused at invoke time with `unsupported`.
 - Dev mode (and the default compose stack) does not enforce the child privilege drop.
 - Single gateway worker and single runner only.
+- **v1 ships the stdio Omni path only.** `remote.py` exists and is tested in isolation but is not wired
+  into the `Registry` or Omni; `remote` servers cannot be invoked in v1.
+
+Known follow-ups (documented gaps, not implemented in v1):
+
+- Vault key rotation endpoint (re-seal under the newest key version); rotate by editing `PORTUNUS_SECRETS_KEY`
+  keyring and re-saving each server's env manually.
+- Idle child stop (the design's 15 min idle timeout): stdio children stay up until revoked, ungranted,
+  disabled, or the runner/gateway restarts.
+- Cancel-operation API/tool for in-flight invocations.
+- 30-day audit log retention/pruning: audit rows are kept indefinitely.
+- Remote MCP OAuth/PKCE (and wiring the remote proxy in, see above).
 
 ## Tests
 

@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 import pytest
@@ -128,6 +129,66 @@ async def test_mark_revoked_bumps_once(pepper_file, db):
     st.mark_revoked("k")
     st.mark_revoked("k")
     assert st.generation == 1 and st.is_revoked("k")
+
+
+async def test_concurrent_reloads_do_not_apply_stale_snapshot_over_ungrant(pepper_file, db):
+    """A reload that read the DB before an ungrant committed must not clobber the post-ungrant reload."""
+    _, row = await mint_agent_key(expires_at=None)
+    sid = await _server()
+    await _grant(row.key_id, sid)
+    st = AuthzStore()
+
+    real_read = st._read_snapshot
+    release_first = asyncio.Event()
+    first_read_done = asyncio.Event()
+    calls = 0
+
+    async def gated_read():
+        nonlocal calls
+        calls += 1
+        snap = await real_read()
+        if calls == 1:  # first reload: read (grant present), then stall before swapping
+            first_read_done.set()
+            await release_first.wait()
+        return snap
+
+    st._read_snapshot = gated_read  # type: ignore[method-assign]
+
+    stale = asyncio.create_task(st.reload_from_db())
+    await first_read_done.wait()
+    # Ungrant commits while the stale reload is in flight, then its own reload starts.
+    async with async_session() as s:
+        g = (await s.execute(select(Grant))).scalar_one()
+        await s.delete(g)
+        await s.commit()
+    fresh = asyncio.create_task(st.reload_from_db())
+    # Without serialization the fresh reload completes here while the stale one is still parked;
+    # with the lock it stays blocked, so give it a bounded window and then let the stale one go.
+    await asyncio.wait({fresh}, timeout=0.3)
+    release_first.set()
+    await asyncio.gather(stale, fresh)
+    assert not st.has_grant(row.key_id, sid)
+
+
+async def test_interleaved_grant_and_ungrant_reloads_converge(pepper_file, db):
+    _, row = await mint_agent_key(expires_at=None)
+    keep, drop = await _server("keep"), await _server("drop")
+    await _grant(row.key_id, drop)
+    st = AuthzStore()
+    await st.reload_from_db()
+
+    async def grant_keep():
+        await _grant(row.key_id, keep)
+        await st.reload_from_db()
+
+    async def ungrant_drop():
+        async with async_session() as s:
+            await s.delete((await s.execute(select(Grant).where(Grant.server_id == drop))).scalar_one())
+            await s.commit()
+        await st.reload_from_db()
+
+    await asyncio.gather(grant_keep(), ungrant_drop(), st.reload_from_db(), st.reload_from_db())
+    assert st.has_grant(row.key_id, keep) and not st.has_grant(row.key_id, drop)
 
 
 def test_module_singleton_exists():

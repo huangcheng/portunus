@@ -29,7 +29,7 @@ One gateway worker + one runner.
 
 **OS users:** `portunus` (gateway ∈ `portunus-ipc`), `portunus-runner` (runner ∈ `portunus-ipc`), `portunus-mcp` (children; not in `portunus-ipc`).
 
-**Runner privilege:** install grants the runner `CAP_SETUID|CAP_SETGID` (residual: root-equivalent for process identity — accepted). After binding as `portunus-runner`, retain only those caps for spawn. Child spawn sequence: close surplus fds → `setgroups([])` → `setgid(portunus-mcp)` → `setuid(portunus-mcp)` → **clear permitted/effective/inheritable/ambient capability sets (empty `capset`)** → `prctl(PR_SET_NO_NEW_PRIVS)` → `exec`. Caps must not survive into the child.
+**Runner privilege:** install grants the runner `CAP_SETUID|CAP_SETGID|CAP_KILL` (`CAP_KILL` is required to signal children running under a different uid; without it grace/stop/kill fail with EPERM; residual: root-equivalent for process identity — accepted). After binding as `portunus-runner`, retain only those caps for spawn and child signalling. Child spawn sequence: close surplus fds → `setgroups([])` → `setgid(portunus-mcp)` → `setuid(portunus-mcp)` → **clear permitted/effective/inheritable/ambient capability sets (empty `capset`)** → `prctl(PR_SET_NO_NEW_PRIVS)` → `exec`. Caps must not survive into the child.
 
 **Paths:** `/var/lib/portunus` `0700` portunus. `/run/portunus` `0770` `portunus-runner:portunus-ipc`. Token `0640` same group. Policy `/etc/portunus/runner-policy.json` mode `0644` root-owned (readable by runner) — contents: `trusted_path`, `binary_allowlist` (realpaths). Parent cache `/var/cache/portunus` mode `0755` uid `portunus-mcp`; per-server subdirs created by a `portunus-mcp` helper via `mkdir -p`. Sibling cache reads remain an accepted same-uid residual.
 
