@@ -383,15 +383,19 @@ async def test_default_spawn_refused_outside_dev(sock_path):
         await srv.close()
 
 
-async def test_real_process_killed_and_reaped_on_grace_expiry(make_server, sock_path):
-    """Integration with a real child (dev mode, absolute /bin/sleep)."""
-    srv = await make_server()
+async def test_real_process_killed_and_reaped_on_grace_expiry(make_server, sock_path, tmp_path):
+    """Integration with a real child (dev mode, policy-allowlisted absolute /bin/sleep)."""
+    policy = tmp_path / "policy.json"
+    policy.write_text(
+        '{"trusted_path": ["/usr/bin", "/bin"], "binary_allowlist": ["/bin/sleep"]}'
+    )
+    srv = await make_server(policy_path=str(policy))
     c = await connect(sock_path)
     await c.hello()
     rep = await c.call(
         wire.start(
             request_id=_rid(), token=TOKEN, child_id="real", server_id="s",
-            argv=["/bin/sleep", "30"], **c.ids(),
+            argv=["/bin/sleep", "30"], trailing_allowlist=["30"], **c.ids(),
         )
     )
     assert rep["ok"] is True

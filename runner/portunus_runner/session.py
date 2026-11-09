@@ -29,7 +29,9 @@ from portunus_shared import (
     wire,
 )
 
-from .children import ChildHandle, ChildTable, spawn_dev_simple
+from .children import ChildHandle, ChildTable
+from .policy import DEFAULT_POLICY_PATH
+from .spawn import Spawner
 
 log = logging.getLogger("portunus.runner")
 
@@ -52,10 +54,6 @@ def peer_cred(sock: Any) -> tuple[int | None, int]:
         pid = struct.unpack("i", sock.getsockopt(sol_local, local_peerpid, 4))[0]
         return pid, uid
     raise OSError("peer credentials unsupported on this platform")
-
-
-async def _reject_spawn(_msg: dict) -> ChildHandle:
-    raise PortunusError("spawn_rejected", "spawn policy not available outside dev mode")
 
 
 @dataclass
@@ -89,6 +87,9 @@ class Runner:
         dev: bool = False,
         expected_uid: int | None = None,
         spawn: SpawnFn | None = None,
+        policy_path: str = DEFAULT_POLICY_PATH,
+        drop_privs: bool = False,
+        stop_kill_s: float = 5.0,
     ) -> None:
         if not token:
             raise ValueError("token required")
@@ -101,7 +102,11 @@ class Runner:
         self.gap_s = heartbeat_s * GAP_FACTOR
         self.dev = dev
         self.expected_uid = expected_uid
-        self._spawn: SpawnFn = spawn or (spawn_dev_simple if dev else _reject_spawn)
+        self._spawn: SpawnFn = spawn or Spawner(
+            policy_path=policy_path, dev=dev, drop_privs=drop_privs
+        )
+        self.stop_kill_s = stop_kill_s
+        self._stop_tasks: set[asyncio.Task] = set()
         self.run_id = uuid.uuid4().hex
         self.children = ChildTable(on_exit=self._on_child_exit)
 
@@ -230,6 +235,8 @@ class Runner:
             await self._do_start(sess, msg)
         elif op in ("stop", "kill"):
             await self._do_signal(sess, msg, op)
+        elif op == "probe":
+            await self._do_probe(sess, msg)
         else:
             await self._error(sess, msg, "unsupported", f"op {op} not implemented", with_token=True)
         return True
@@ -287,8 +294,40 @@ class Runner:
             )
             return
         with contextlib.suppress(ProcessLookupError):
-            rec.handle.kill() if op == "kill" else rec.handle.terminate()
+            if op == "kill":
+                rec.handle.kill()
+            else:
+                rec.handle.terminate()
+                self._schedule_stop_escalation(rec)
         await self._reply(sess, msg, child_id=child_id)
+
+    def _schedule_stop_escalation(self, rec: Any) -> None:
+        """`stop` is SIGTERM; a child that ignores it is SIGKILLed after stop_kill_s."""
+
+        async def _escalate() -> None:
+            try:
+                await asyncio.wait_for(asyncio.shield(rec.handle.wait()), self.stop_kill_s)
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    rec.handle.kill()
+            except Exception:
+                pass
+
+        task = asyncio.get_running_loop().create_task(_escalate())
+        self._stop_tasks.add(task)
+        task.add_done_callback(self._stop_tasks.discard)
+
+    async def _do_probe(self, sess: Session, msg: dict) -> None:
+        """Liveness probe for a tracked child (runner-side; RPC-level probes come later)."""
+        child_id = msg.get("child_id")
+        rec = self.children.get(child_id) if isinstance(child_id, str) else None
+        if rec is None:
+            await self._error(
+                sess, msg, "unsupported", "unknown child", reason="unknown_child", with_token=True
+            )
+            return
+        alive = rec.handle.returncode is None
+        await self._reply(sess, msg, child_id=child_id, pid=rec.handle.pid, alive=alive)
 
     # ---- replies -----------------------------------------------------------------
 
@@ -355,6 +394,8 @@ class Runner:
         if task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        for t in list(self._stop_tasks):
+            t.cancel()
         async with self._reap_lock:
             await self.children.kill_all_and_reap()
 

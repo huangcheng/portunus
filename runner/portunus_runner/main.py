@@ -13,6 +13,7 @@ import sys
 
 from portunus_shared import DEFAULTS
 
+from .policy import DEFAULT_POLICY_PATH
 from .session import Runner
 
 DEFAULT_SOCKET = "/run/portunus/runner.sock"
@@ -92,6 +93,8 @@ async def amain() -> None:
             grace_s=_env_float("PORTUNUS_GRACE_S", DEFAULTS.grace_s),
             dev=dev,
             expected_uid=_expected_uid(),
+            policy_path=os.environ.get("PORTUNUS_POLICY", DEFAULT_POLICY_PATH),
+            drop_privs=os.environ.get("PORTUNUS_DROP_PRIVS") == "1",
         )
     except ValueError as e:
         raise SystemExit(f"runner config error: {e}") from e

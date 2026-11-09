@@ -28,6 +28,7 @@ class ProcessHandle:
     def __init__(self, proc: asyncio.subprocess.Process) -> None:
         self._proc = proc
         self.pid = proc.pid
+        self._swept = False
 
     @property
     def returncode(self) -> int | None:
@@ -48,8 +49,20 @@ class ProcessHandle:
     def terminate(self) -> None:
         self._signal(signal.SIGTERM)
 
+    @property
+    def proc(self) -> asyncio.subprocess.Process:
+        return self._proc
+
     async def wait(self) -> int:
-        return await self._proc.wait()
+        code = await self._proc.wait()
+        # Leader is reaped: sweep any surviving members of its process group (e.g. npx
+        # grandchildren). Kernel keeps the pgid reserved while members live; if none are
+        # left this is ESRCH. After this the early return in _signal is safe (group is empty).
+        if not self._swept:
+            self._swept = True
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.pid, signal.SIGKILL)
+        return code
 
 
 ExitCallback = Callable[[str, int | None], Awaitable[None] | None]
@@ -126,30 +139,3 @@ class ChildTable:
                 # never non-empty after wait() has returned.
                 if self._children.get(rec.child_id) is rec:
                     del self._children[rec.child_id]
-
-
-async def spawn_dev_simple(msg: dict) -> ChildHandle:
-    """Dev-only stopgap spawn (Task 7 replaces with policy-validated, setuid spawn).
-
-    Requires an absolute argv[0]; no policy/grammar validation, no uid drop. Starts the
-    child in its own session with a scrubbed env and no stdio, so neither the runner's
-    token env nor its fds leak.
-    """
-    from portunus_shared import PortunusError
-
-    argv = msg["argv"]
-    if not os.path.isabs(argv[0]):
-        raise PortunusError("spawn_rejected", "argv[0] must be an absolute path")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env={"PATH": "/usr/bin:/bin"},
-            start_new_session=True,
-            close_fds=True,
-        )
-    except OSError as e:
-        raise PortunusError("spawn_failed", f"exec failed: {e.strerror}") from e
-    return ProcessHandle(proc)
