@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import uuid
@@ -89,6 +90,35 @@ async def test_five_failed_logins_lock_out_ip_for_15_minutes(db):
         assert (await _login(c)).status_code == 429
         clock.now += 61  # 15 min + 1 s since the lock
         assert (await _login(c)).status_code == 200
+
+
+async def test_concurrent_bad_logins_cannot_outrun_lockout(db):
+    """TOCTOU: the attempt is reserved before the (slow) hash check, so a burst of parallel
+    guesses reaches the hasher at most MAX_FAILURES times."""
+    import threading
+    import time
+
+    calls: list[int] = []
+    guard = threading.Lock()
+
+    class SlowHasher(PasswordHasher):
+        def verify(self, hash, password):  # noqa: A002
+            with guard:
+                calls.append(1)
+            time.sleep(0.05)  # widen the race window
+            return super().verify(hash, password)
+
+    hasher = SlowHasher(time_cost=1, memory_cost=8, parallelism=1)
+    auth = OperatorAuth.from_password(
+        PASSWORD, session_factory=async_session, hasher=hasher, clock=Clock(), secure_cookie=False
+    )
+    async with _client(auth) as c:
+        rs = await asyncio.gather(*(_login(c, f"wrong-{i}") for i in range(20)))
+        assert len(calls) <= 5
+        assert sorted({r.status_code for r in rs}) == [401, 429]
+        assert sum(r.status_code == 401 for r in rs) <= 5
+        # Locked even for the right password.
+        assert (await _login(c)).status_code == 429
 
 
 async def test_lockout_is_per_ip(db):

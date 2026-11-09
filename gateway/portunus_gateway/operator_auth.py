@@ -176,16 +176,19 @@ class OperatorAuth:
     async def check_password(self, ip: str, password: str) -> tuple[bool, int]:
         """Throttled password check. Returns ``(ok, retry_after)``; ``retry_after > 0`` means
         the IP is locked out and the password was not examined."""
+        # Check + reserve with no ``await`` in between (atomic on the event loop): the attempt is
+        # counted as a failure *before* the slow argon2 verify, so concurrent requests cannot all
+        # pass the lock check. A correct password clears the reservation.
         wait = self.throttle.retry_after(ip)
         if wait:
             return False, wait
+        newly_locked = self.throttle.record_failure(ip)
         if await self._password_ok(password):
             self.throttle.record_success(ip)
             return True, 0
-        if self.throttle.record_failure(ip):
-            await self.audit("anonymous", "operator.lockout", {"ip": ip})
-        else:
-            await self.audit("anonymous", "operator.login_failed", {"ip": ip})
+        await self.audit(
+            "anonymous", "operator.lockout" if newly_locked else "operator.login_failed", {"ip": ip}
+        )
         return False, 0
 
     # ---- sessions --------------------------------------------------------------------
