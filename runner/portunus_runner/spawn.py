@@ -39,6 +39,9 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
 _FORBIDDEN_ENV_PREFIXES = ("PORTUNUS_", "LD_", "DYLD_")
 _MAX_ENV_ENTRIES = 256
 _MAX_ENV_BYTES = 128 * 1024
+# StreamReader line limit for child stdout: MCP frames are one JSON line (tools/list with big
+# schemas exceeds asyncio's 64KiB default). Stays below the 5MiB wire frame cap.
+STDOUT_LIMIT = 4 * 1024 * 1024
 
 
 def _reject(message: str) -> PortunusError:
@@ -216,6 +219,7 @@ class Spawner:
                 start_new_session=True,
                 close_fds=True,  # surplus fds never reach the child (dev and production)
                 pass_fds=(),
+                limit=STDOUT_LIMIT,
                 **extra,
             )
         except Exception as e:  # OSError, SubprocessError (preexec/harden failure), ValueError

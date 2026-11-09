@@ -29,6 +29,7 @@ from portunus_shared import (
     wire,
 )
 
+from . import probe
 from .children import ChildHandle, ChildTable
 from .policy import DEFAULT_POLICY_PATH
 from .spawn import Spawner
@@ -107,6 +108,7 @@ class Runner:
         )
         self.stop_kill_s = stop_kill_s
         self._stop_tasks: set[asyncio.Task] = set()
+        self._probes: set[asyncio.Task] = set()  # tools/list probes: not in the child table
         self.run_id = uuid.uuid4().hex
         self.children = ChildTable(on_exit=self._on_child_exit)
 
@@ -177,6 +179,7 @@ class Runner:
             log.exception("session error")
         finally:
             sess.closed = True
+            await self._cancel_probes()  # probe children never outlive their session
             await _close_writer(writer)  # fully closed before the slot is released
             if sess.authenticated:
                 self._arm_grace()
@@ -318,7 +321,11 @@ class Runner:
         task.add_done_callback(self._stop_tasks.discard)
 
     async def _do_probe(self, sess: Session, msg: dict) -> None:
-        """Liveness probe for a tracked child (runner-side; RPC-level probes come later)."""
+        """Two forms. ``argv`` present: ephemeral ``tools/list`` probe of a fresh child (spec §5).
+        Otherwise: liveness probe for a tracked child."""
+        if "argv" in msg:
+            await self._start_tools_probe(sess, msg)
+            return
         child_id = msg.get("child_id")
         rec = self.children.get(child_id) if isinstance(child_id, str) else None
         if rec is None:
@@ -328,6 +335,51 @@ class Runner:
             return
         alive = rec.handle.returncode is None
         await self._reply(sess, msg, child_id=child_id, pid=rec.handle.pid, alive=alive)
+
+    # ---- tools/list probes -----------------------------------------------------------
+
+    async def _start_tools_probe(self, sess: Session, msg: dict) -> None:
+        """Run in a task: a probe can take up to ``probe_timeout_s`` and must not stall the
+        read loop (heartbeats). Capped at ``max_probes`` outside the child table and caps."""
+        if len(self._probes) >= DEFAULTS.max_probes:
+            await self._error(sess, msg, "child_cap", "probe pool busy", with_token=True)
+            return
+        task = asyncio.get_running_loop().create_task(self._run_tools_probe(sess, msg))
+        self._probes.add(task)
+        task.add_done_callback(self._probes.discard)
+
+    async def _run_tools_probe(self, sess: Session, msg: dict) -> None:
+        raw = msg.get("timeout_s")
+        timeout_s = float(DEFAULTS.probe_timeout_s)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+            timeout_s = min(float(raw), timeout_s)  # the gateway can shorten, never extend
+        handle: ChildHandle | None = None
+        try:
+            handle = await self._spawn(msg)  # same argv grammar + policy as `start`
+            proc = getattr(handle, "proc", None)
+            if proc is None:
+                raise PortunusError("spawn_failed", "spawner does not expose stdio")
+            tools = await probe.list_tools(proc, timeout_s)
+            await self._reply(sess, msg, tools=tools)
+        except asyncio.CancelledError:
+            raise
+        except FrameError as e:
+            await self._error(sess, msg, e.code, "probe result too large", with_token=True)
+        except PortunusError as e:
+            await self._error(sess, msg, e.code, e.message or "probe failed", with_token=True)
+        except Exception:
+            log.exception("probe failed")
+            await self._error(sess, msg, "spawn_failed", "probe failed", with_token=True)
+        finally:
+            if handle is not None:
+                await _kill_and_reap(handle)
+
+    async def _cancel_probes(self) -> None:
+        tasks = list(self._probes)
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     # ---- replies -----------------------------------------------------------------
 
@@ -396,8 +448,23 @@ class Runner:
                 await task
         for t in list(self._stop_tasks):
             t.cancel()
+        await self._cancel_probes()
         async with self._reap_lock:
             await self.children.kill_all_and_reap()
+
+
+async def _kill_and_reap(handle: ChildHandle) -> None:
+    """SIGKILL and wait; shielded so a cancelled probe still reaps its child."""
+    with contextlib.suppress(ProcessLookupError):
+        handle.kill()
+    waiter = asyncio.ensure_future(handle.wait())
+    try:
+        await asyncio.shield(waiter)
+    except asyncio.CancelledError:
+        await asyncio.gather(waiter, return_exceptions=True)
+        raise
+    except Exception:
+        pass
 
 
 async def _close_writer(writer: asyncio.StreamWriter) -> None:

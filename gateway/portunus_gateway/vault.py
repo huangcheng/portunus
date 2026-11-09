@@ -32,6 +32,8 @@ class Vault:
         if not keys:
             raise VaultError("keyring is empty")
         self._aeads = {v: AESGCM(k) for v, k in keys.items()}
+        # New entries are sealed under the newest key; older versions stay readable.
+        self.current_version = max(keys)
 
     @classmethod
     def from_keyring(cls, keyring: str) -> Vault:

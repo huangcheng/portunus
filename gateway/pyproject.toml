@@ -9,16 +9,20 @@ dependencies = [
     "aiosqlite>=0.20",
     "alembic>=1.13",
     "sqlalchemy[asyncio]>=2.0",
+    "fastapi>=0.162.2",
 ]
 
 [dependency-groups]
 dev = [
     "anyio>=4.16.0",
+    "httpx>=0.28.1",
+    "portunus-runner",
     "pytest>=8",
 ]
 
 [tool.uv.sources]
 portunus-shared = { path = "../packages/portunus_shared", editable = true }
+portunus-runner = { path = "../runner", editable = true }
 
 [build-system]
 requires = ["hatchling"]
