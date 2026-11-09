@@ -5,6 +5,9 @@ Behaviour switches (environment, so tests can drive them through the vault):
   FAKE_MCP_HANG=1          -> never answers tools/list
   FAKE_MCP_PAGES=1         -> splits the tool list over two pages (nextCursor)
   FAKE_MCP_V2=1            -> alpha tool has a different input schema
+  FAKE_MCP_EXTRA=1         -> adds ``big`` (result of 1MiB+1 bytes) and ``slow`` (never answers)
+
+``tools/call``: ``alpha`` echoes its arguments as JSON text; ``beta`` returns an ``isError`` result.
 """
 
 import json
@@ -27,6 +30,9 @@ BETA = {"name": "beta", "description": "second tool", "inputSchema": {"type": "o
 
 def tools() -> list[dict]:
     out = [ALPHA_V2 if os.environ.get("FAKE_MCP_V2") else ALPHA, BETA]
+    if os.environ.get("FAKE_MCP_EXTRA"):
+        out.append({"name": "big", "description": "huge result", "inputSchema": {"type": "object"}})
+        out.append({"name": "slow", "description": "never answers", "inputSchema": {"type": "object"}})
     echo = os.environ.get("FAKE_MCP_ECHO_ENV")
     if echo:
         out.append(
@@ -81,6 +87,22 @@ def main() -> None:
                     send({"jsonrpc": "2.0", "id": mid, "result": {"tools": all_tools[1:]}})
             else:
                 send({"jsonrpc": "2.0", "id": mid, "result": {"tools": all_tools}})
+        elif method == "tools/call":
+            params = msg.get("params") or {}
+            name = params.get("name")
+            if name == "alpha":
+                text = json.dumps(params.get("arguments") or {}, sort_keys=True)
+                result = {"content": [{"type": "text", "text": text}]}
+            elif name == "beta":
+                result = {"content": [{"type": "text", "text": "beta failed"}], "isError": True}
+            elif name == "big":
+                result = {"content": [{"type": "text", "text": "x" * (1024 * 1024 + 1)}]}
+            elif name == "slow":
+                time.sleep(3600)
+            else:
+                send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "unknown tool"}})
+                continue
+            send({"jsonrpc": "2.0", "id": mid, "result": result})
         elif mid is not None:
             send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "nope"}})
 

@@ -368,6 +368,10 @@ class SlotManager:
     def ungrant(self, key_id: str, server_id: uuid.UUID) -> None:
         self._stop_matching(lambda s: s.key_id == key_id and s.server_id == server_id)
 
+    def stop_pair(self, key_id: str, server_id: uuid.UUID) -> None:
+        """Retire one ``(key, server)`` child (e.g. wedged in a timed-out call); no authz change."""
+        self._stop_matching(lambda s: s.key_id == key_id and s.server_id == server_id)
+
     def disable_server(self, server_id: uuid.UUID) -> None:
         """Server disabled: same stop path as ungrant, for every key."""
         self._stop_matching(lambda s: s.server_id == server_id)

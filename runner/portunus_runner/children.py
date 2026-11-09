@@ -8,7 +8,7 @@ import os
 import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class ChildHandle(Protocol):
@@ -74,6 +74,7 @@ class ChildRecord:
     server_id: str
     handle: ChildHandle
     watcher: asyncio.Task | None = field(default=None, repr=False)
+    rpc: Any = field(default=None, repr=False)  # rpc.ChildRpc once the child was initialised
 
 
 class ChildTable:

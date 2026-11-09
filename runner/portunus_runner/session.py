@@ -29,7 +29,7 @@ from portunus_shared import (
     wire,
 )
 
-from . import probe
+from . import probe, rpc
 from .children import ChildHandle, ChildTable
 from .policy import DEFAULT_POLICY_PATH
 from .spawn import Spawner
@@ -109,6 +109,7 @@ class Runner:
         self.stop_kill_s = stop_kill_s
         self._stop_tasks: set[asyncio.Task] = set()
         self._probes: set[asyncio.Task] = set()  # tools/list probes: not in the child table
+        self._rpcs: set[asyncio.Task] = set()  # in-flight rpc bridges (die with the session)
         self.run_id = uuid.uuid4().hex
         self.children = ChildTable(on_exit=self._on_child_exit)
 
@@ -240,6 +241,8 @@ class Runner:
             await self._do_signal(sess, msg, op)
         elif op == "probe":
             await self._do_probe(sess, msg)
+        elif op == "rpc":
+            self._start_rpc(sess, msg)
         else:
             await self._error(sess, msg, "unsupported", f"op {op} not implemented", with_token=True)
         return True
@@ -374,8 +377,49 @@ class Runner:
             if handle is not None:
                 await _kill_and_reap(handle)
 
+    # ---- rpc ---------------------------------------------------------------------
+
+    def _start_rpc(self, sess: Session, msg: dict) -> None:
+        """Run in a task: a tool call can take up to its timeout and must not stall the read
+        loop (heartbeats)."""
+        task = asyncio.get_running_loop().create_task(self._do_rpc(sess, msg))
+        self._rpcs.add(task)
+        task.add_done_callback(self._rpcs.discard)
+
+    async def _do_rpc(self, sess: Session, msg: dict) -> None:
+        child_id = msg.get("child_id")
+        rec = self.children.get(child_id) if isinstance(child_id, str) else None
+        if rec is None:
+            await self._error(
+                sess, msg, "unsupported", "unknown child", reason="unknown_child", with_token=True
+            )
+            return
+        proc = getattr(rec.handle, "proc", None)
+        if proc is None:
+            await self._error(sess, msg, "spawn_failed", "child has no stdio", with_token=True)
+            return
+        if rec.rpc is None:
+            rec.rpc = rpc.ChildRpc(proc)
+        timeout_s = rpc.clamp_timeout(msg.get("timeout_s"), float(DEFAULTS.invoke_timeout_s))
+        try:
+            result = await rec.rpc.call(msg.get("payload"), timeout_s)
+            await self._reply(sess, msg, result=result)
+        except asyncio.CancelledError:
+            raise
+        except FrameError as e:  # reply too large for one frame
+            await self._error(sess, msg, e.code, "tool result too large", with_token=True)
+        except PortunusError as e:
+            if e.code == "payload_too_large":
+                # stdout is desynchronised mid-line: the child cannot be reused.
+                with contextlib.suppress(ProcessLookupError):
+                    rec.handle.kill()
+            await self._error(sess, msg, e.code, e.message or "rpc failed", with_token=True)
+        except Exception:
+            log.exception("rpc failed")
+            await self._error(sess, msg, "upstream_crash", "rpc failed", with_token=True)
+
     async def _cancel_probes(self) -> None:
-        tasks = list(self._probes)
+        tasks = list(self._probes) + list(self._rpcs)
         for t in tasks:
             t.cancel()
         if tasks:

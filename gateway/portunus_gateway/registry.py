@@ -298,6 +298,30 @@ class Registry:
             await s.commit()
             return tool_view(tool)
 
+    # ---- invoke ------------------------------------------------------------------
+
+    async def start_payload(self, server_id: uuid.UUID) -> dict[str, Any]:
+        """The ``start`` payload for an invoke child of this server (``SlotManager`` shape).
+
+        Argv is re-validated (policy may have changed since create) and env literals are
+        decrypted just-in-time; the result goes straight to the runner and is never logged.
+        """
+        async with self._sf() as s:
+            server = await self._get_server(s, server_id)
+            if server.kind != "stdio":
+                raise RegistryError(400, "unsupported", "only stdio servers can be started")
+            command, args = server.command, list(server.args or [])
+            self._validate_argv(command, args)
+            env = await self._decrypt_env(s, server_id)
+            vault_version = server.vault_version
+        assert command is not None
+        return {
+            "argv": [command, *args],
+            "trailing_allowlist": [],
+            "env": env,
+            "vault_version": vault_version,
+        }
+
     # ---- probe -------------------------------------------------------------------
 
     async def probe(self, server_id: uuid.UUID, actor: str) -> dict[str, Any]:

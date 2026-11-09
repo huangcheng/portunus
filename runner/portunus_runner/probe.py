@@ -26,6 +26,8 @@ def _crash(message: str) -> PortunusError:
 
 
 class _Stdio:
+    OVERSIZE_CODE = "upstream_crash"  # code for a child line over the reader limit
+
     def __init__(self, proc: Any) -> None:
         self._proc = proc
         self._next_id = 0
@@ -55,7 +57,7 @@ class _Stdio:
             try:
                 line = await self._proc.stdout.readline()
             except (ValueError, asyncio.LimitOverrunError):
-                raise _crash("child sent an oversize line") from None
+                raise PortunusError(self.OVERSIZE_CODE, "child sent an oversize line") from None
             if not line:
                 raise _crash("child exited before answering")
             try:
