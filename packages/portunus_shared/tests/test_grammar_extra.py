@@ -1,0 +1,144 @@
+import os
+
+import pytest
+from portunus_shared import DEFAULTS, ERROR_CODES
+from portunus_shared.argv import ArgvError, validate_stdio_command
+
+NPX = "portunus_shared.argv.which"
+
+
+def _v(command, args, *, trailing=(), path=("/usr/bin",), binaries=()):
+    validate_stdio_command(
+        command,
+        list(args),
+        trailing_allowlist=list(trailing),
+        trusted_path=list(path),
+        binary_allowlist=list(binaries),
+    )
+
+
+@pytest.fixture
+def with_which(monkeypatch):
+    monkeypatch.setattr(NPX, lambda c, path=None: f"/usr/bin/{c}")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--ignore-scripts", "demo@1.2.3"],
+        ["--yes", "--ignore-scripts", "@scope/demo@10.20.30"],
+        ["-y", "--ignore-scripts", "demo@1.2.3", "positional"],
+    ],
+)
+def test_npx_ok(with_which, args):
+    _v("npx", args)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["demo@1.2.3"],  # missing --ignore-scripts
+        ["--ignore-scripts"],  # missing package
+        ["--ignore-scripts", "demo"],
+        ["--ignore-scripts", "demo@^1.2.3"],
+        ["--ignore-scripts", "demo@1.2"],
+        ["--ignore-scripts", "demo@1.2.3-beta"],
+        ["--ignore-scripts", "git+https://x/y.git"],
+        ["--ignore-scripts", "file:../x"],
+        ["--ignore-scripts", "https://x/y.tgz"],
+        ["--ignore-scripts", "demo@1.2.3", "--evil"],
+        ["--ignore-scripts", "a@1.2.3", "b@1.2.3", "-x"],
+        ["--ignore-scripts", "-y", "demo@1.2.3"],  # -y must precede
+        ["-y", "-y", "--ignore-scripts", "demo@1.2.3"],
+    ],
+)
+def test_npx_rejected(with_which, args):
+    with pytest.raises(ArgvError) as e:
+        _v("npx", args)
+    assert e.value.code == "spawn_rejected"
+
+
+def test_npx_trailing_flag_allowlisted(with_which):
+    _v("npx", ["--ignore-scripts", "demo@1.2.3", "--port"], trailing=["--port"])
+
+
+@pytest.mark.parametrize(
+    "args",
+    [[], ["pkg"], ["pkg>=1.0.0"], ["pkg==1.0"], ["pkg==1.0.0", "-x"], ["--from", "pkg==1.0.0"]],
+)
+def test_uvx_rejected(with_which, args):
+    with pytest.raises(ArgvError):
+        _v("uvx", args)
+
+
+def test_uvx_trailing(with_which):
+    _v("uvx", ["pkg==1.0.0", "serve"])
+    _v("uvx", ["pkg==1.0.0", "--flag"], trailing=["--flag"])
+
+
+def test_basename_not_found_in_trusted_path(monkeypatch):
+    monkeypatch.setattr(NPX, lambda c, path=None: None)
+    with pytest.raises(ArgvError):
+        _v("uvx", ["pkg==1.0.0"])
+
+
+def test_which_receives_trusted_path(monkeypatch):
+    seen = {}
+
+    def fake(c, path=None):
+        seen["path"] = path
+        return "/usr/bin/uvx"
+
+    monkeypatch.setattr(NPX, fake)
+    _v("uvx", ["pkg==1.0.0"], path=["/a", "/b"])
+    assert seen["path"] == os.pathsep.join(["/a", "/b"])
+
+
+def test_absolute_allowlisted(tmp_path):
+    exe = tmp_path / "srv"
+    exe.write_text("#!/bin/sh\n")
+    _v(str(exe), [], binaries=[str(exe)])
+    _v(str(exe), ["--ok"], trailing=["--ok"], binaries=[str(exe)])
+
+
+def test_absolute_symlink_realpath(tmp_path):
+    real = tmp_path / "real"
+    real.write_text("")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    _v(str(link), [], binaries=[str(real)])
+    with pytest.raises(ArgvError):
+        _v(str(link), [], binaries=[str(link.parent / "other")])
+
+
+def test_absolute_rejected(tmp_path):
+    exe = tmp_path / "srv"
+    exe.write_text("")
+    with pytest.raises(ArgvError):
+        _v(str(exe), [], binaries=[])
+    with pytest.raises(ArgvError):
+        _v(str(exe), ["extra"], binaries=[str(exe)])
+
+
+@pytest.mark.parametrize("cmd", ["bash", "sh", "node", "./npx", "npx/../sh", ""])
+def test_other_commands_rejected(with_which, cmd):
+    with pytest.raises(ArgvError):
+        _v(cmd, [])
+
+
+def test_error_codes_complete():
+    assert len(ERROR_CODES) == 18
+    assert {"spawn_rejected", "child_cap", "unsupported", "unauthorized"} <= ERROR_CODES
+
+
+def test_defaults():
+    assert (
+        DEFAULTS.invoke_timeout_s,
+        DEFAULTS.start_ack_s,
+        DEFAULTS.grace_s,
+        DEFAULTS.heartbeat_s,
+        DEFAULTS.max_children_per_key,
+        DEFAULTS.max_children_global,
+        DEFAULTS.max_probes,
+    ) == (60, 15, 30, 10, 32, 256, 2)
