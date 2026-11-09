@@ -1,0 +1,25 @@
+[project]
+name = "portunus-gateway"
+version = "0.1.0"
+description = "Portunus gateway: registry, vault, keys/grants, MCP front door"
+requires-python = ">=3.12"
+dependencies = [
+    "portunus-shared",
+    "cryptography>=43",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv.sources]
+portunus-shared = { path = "../packages/portunus_shared", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["portunus_gateway"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
