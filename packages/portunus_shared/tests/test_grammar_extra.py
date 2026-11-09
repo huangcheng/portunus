@@ -127,9 +127,37 @@ def test_other_commands_rejected(with_which, cmd):
         _v(cmd, [])
 
 
-def test_error_codes_complete():
-    assert len(ERROR_CODES) == 18
-    assert {"spawn_rejected", "child_cap", "unsupported", "unauthorized"} <= ERROR_CODES
+def test_error_codes_match_spec_6_4_exactly():
+    assert ERROR_CODES == frozenset(
+        {
+            "unauthorized",
+            "revoked",
+            "not_granted",
+            "server_disabled",
+            "tool_disabled",
+            "tool_missing",
+            "schema_mismatch",
+            "payload_too_large",
+            "upstream_timeout",
+            "upstream_crash",
+            "cancelled",
+            "auth_required",
+            "child_cap",
+            "rate_limited",
+            "runner_unavailable",
+            "spawn_rejected",
+            "spawn_failed",
+            "unsupported",
+        }
+    )
+
+
+def test_argv_error_code_is_always_spawn_rejected():
+    assert ArgvError("x").code == "spawn_rejected"
+    with pytest.raises(TypeError):
+        ArgvError("x", code="revoked")  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        ArgvError("x", "revoked")  # type: ignore[call-arg]
 
 
 def test_defaults():
@@ -141,4 +169,5 @@ def test_defaults():
         DEFAULTS.max_children_per_key,
         DEFAULTS.max_children_global,
         DEFAULTS.max_probes,
-    ) == (60, 15, 30, 10, 32, 256, 2)
+        DEFAULTS.probe_timeout_s,
+    ) == (60, 15, 30, 10, 32, 256, 2, 60)

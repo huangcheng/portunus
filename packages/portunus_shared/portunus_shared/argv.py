@@ -23,8 +23,8 @@ _BASENAMES = frozenset({"npx", "uvx"})
 class ArgvError(PortunusError):
     """Raised when a stdio command/argv violates the closed grammar."""
 
-    def __init__(self, message: str, code: str = "spawn_rejected") -> None:
-        super().__init__(code, message)
+    def __init__(self, message: str) -> None:
+        super().__init__("spawn_rejected", message)
 
 
 def _reject(message: str) -> ArgvError:
