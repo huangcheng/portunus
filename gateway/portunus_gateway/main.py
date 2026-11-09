@@ -8,6 +8,9 @@ Environment (see README): ``PORTUNUS_SECRETS_KEY``, ``PORTUNUS_PEPPER_FILE``,
 ``PORTUNUS_OPERATOR_PASSWORD``, ``PORTUNUS_SOCKET``, ``PORTUNUS_TOKEN_FILE`` (or
 ``PORTUNUS_TOKEN`` with ``PORTUNUS_DEV=1``), ``PORTUNUS_POLICY``, ``PORTUNUS_DATABASE_URL``,
 ``PORTUNUS_BIND``, ``PORTUNUS_DASHBOARD_DIR``, ``PORTUNUS_RUNNER_UID``, ``PORTUNUS_DEV``.
+
+Fleet (optional): ``PORTUNUS_RUNNERS`` replaces ``PORTUNUS_SOCKET``/``PORTUNUS_TOKEN_FILE`` with a
+comma-separated list of ``[site=]socket_path:token_file`` links, one per runner.
 """
 
 from __future__ import annotations
@@ -74,6 +77,72 @@ def load_runner_token(*, dev: bool) -> str:
     return token
 
 
+def parse_runner_links(raw: str) -> list[tuple[str | None, str, str]]:
+    """Parse ``PORTUNUS_RUNNERS``: comma-separated ``[site=]socket_path:token_file`` entries.
+
+    Returns ``(pinned_site | None, socket_path, token_file)``. Without ``site=`` the link's site
+    key is whatever the runner advertises on hello. Paths may not contain ``,`` or ``:``.
+    """
+    out: list[tuple[str | None, str, str]] = []
+    for part in (p.strip() for p in raw.split(",")):
+        if not part:
+            continue
+        site: str | None = None
+        if "=" in part:
+            site, _, part = part.partition("=")
+            site = site.strip()
+            if not site:
+                raise ConfigError("PORTUNUS_RUNNERS: empty site name before '='")
+        sock, sep, token_file = part.partition(":")
+        if not sep or not sock.strip() or not token_file.strip() or ":" in token_file:
+            raise ConfigError("PORTUNUS_RUNNERS entries must look like [site=]socket_path:token_file")
+        out.append((site, sock.strip(), token_file.strip()))
+    if not out:
+        raise ConfigError("PORTUNUS_RUNNERS is set but lists no runners")
+    return out
+
+
+def _read_token_file(path: str) -> str:
+    try:
+        token = Path(path).read_text().strip()
+    except OSError as e:
+        raise ConfigError(f"cannot read runner token file: {e.strerror}") from None
+    if not token:
+        raise ConfigError("runner token file is empty")
+    return token
+
+
+def build_runner_pool(*, dev: bool, heartbeat_s: float) -> tuple[RunnerPool, RunnerClient]:
+    """Pool from ``PORTUNUS_RUNNERS`` (fleet) or the single ``PORTUNUS_SOCKET`` (default).
+
+    Returns the pool and its first client (kept as ``app.state.runner`` for v1 callers).
+    """
+    uid = expected_runner_uid(dev=dev)
+    raw = os.environ.get("PORTUNUS_RUNNERS", "").strip()
+    pool = RunnerPool()
+    if not raw:
+        client = RunnerClient(
+            os.environ.get("PORTUNUS_SOCKET", DEFAULT_SOCKET),
+            load_runner_token(dev=dev),
+            heartbeat_s=heartbeat_s,
+            expected_uid=uid,
+        )
+        pool.add(client)
+        return pool, client
+    first: RunnerClient | None = None
+    for site, sock, token_file in parse_runner_links(raw):
+        client = RunnerClient(
+            sock, _read_token_file(token_file), heartbeat_s=heartbeat_s, expected_uid=uid
+        )
+        try:
+            pool.add(client, site_id=site)
+        except ValueError as e:
+            raise ConfigError(f"PORTUNUS_RUNNERS: {e}") from None
+        first = first or client
+    assert first is not None
+    return pool, first
+
+
 def load_policy_lists(path: str) -> tuple[list[str], list[str]]:
     """``(trusted_path, binary_allowlist)`` from the policy file shared with the runner.
 
@@ -125,15 +194,7 @@ def create_gateway_app() -> FastAPI:
     )
 
     heartbeat_s = _env_float("PORTUNUS_HEARTBEAT_S", DEFAULTS.heartbeat_s)
-    client = RunnerClient(
-        os.environ.get("PORTUNUS_SOCKET", DEFAULT_SOCKET),
-        load_runner_token(dev=dev),
-        heartbeat_s=heartbeat_s,
-        expected_uid=expected_runner_uid(dev=dev),
-    )
-    # Pool of one for the single-socket deployment; more links can be added without touching
-    # slots/registry/omni, which only ever address a runner through the pool.
-    pool = RunnerPool([client])
+    pool, client = build_runner_pool(dev=dev, heartbeat_s=heartbeat_s)
 
     # The Omni gate verifies keys through the module-level store (keys.verify_agent_token);
     # SlotManager/Omni get the same object injected so revokes/grants cannot diverge.
@@ -178,7 +239,11 @@ def create_gateway_app() -> FastAPI:
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, object]:
-        return {"ok": True, "runner_connected": pool.any_connected()}
+        return {
+            "ok": True,
+            "runner_connected": pool.any_connected(),
+            "runners_connected": sum(1 for e in pool.connected()),
+        }
 
     dist = Path(os.environ.get("PORTUNUS_DASHBOARD_DIR") or default_dashboard_dir())
     if (dist / "index.html").is_file():

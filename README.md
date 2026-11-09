@@ -98,6 +98,8 @@ PORTUNUS_URL=http://localhost:8080 PORTUNUS_OPERATOR_PASSWORD=... E2E_COMMAND=/a
 | `PORTUNUS_OPERATOR_PASSWORD` | gateway | yes | Operator password (only an argon2id hash is kept in memory) |
 | `PORTUNUS_TOKEN_FILE` | both | yes | Shared secret sent on every gateway->runner frame. `PORTUNUS_TOKEN` accepted in dev only |
 | `PORTUNUS_SOCKET` | both | no | Runner Unix socket (default `/run/portunus/runner.sock`) |
+| `PORTUNUS_SITE_ID`, `PORTUNUS_REGIONS` | runner | no | Fleet metadata advertised on hello: a site name (default `local`) and comma-separated region labels (default `local`) |
+| `PORTUNUS_RUNNERS` | gateway | no | Fleet: comma-separated `[site=]socket_path:token_file` links, replacing `PORTUNUS_SOCKET`/`PORTUNUS_TOKEN_FILE` (see Fleet) |
 | `PORTUNUS_POLICY` | both | no | `runner-policy.json` (default `/etc/portunus/runner-policy.json`): `trusted_path`, `binary_allowlist`. The gateway pre-validates with it; the runner re-validates before every exec |
 | `PORTUNUS_DATABASE_URL` | gateway | no | Default `sqlite+aiosqlite:///./data/portunus.db`; Postgres: `postgresql+asyncpg://...` |
 | `PORTUNUS_BIND` | gateway | no | `host:port` (default `127.0.0.1:8080`) |
@@ -132,8 +134,8 @@ the children keep none.
   (`gateway/portunus_gateway/remote.py`, with its SSRF controls) is not yet wired into the registry
   or Omni; `remote` servers are refused at invoke time with `unsupported`.
 - Dev mode (and the default compose stack) does not enforce the child privilege drop.
-- Single gateway worker and single runner only (multi-site fleet is a follow-on; see
-  `docs/superpowers/specs/2026-11-09-portunus-fleet-design.md`).
+- Single gateway worker. Multiple runners are optional and local-socket only (see Fleet below); there is no
+  remote/TLS runner transport yet.
 - **v1 ships the stdio Omni path only.** `remote.py` exists and is tested in isolation but is not wired
   into the `Registry` or Omni; `remote` servers cannot be invoked in v1.
 
@@ -146,7 +148,20 @@ Known follow-ups (documented gaps, not implemented in v1):
 - Cancel-operation API/tool for in-flight invocations.
 - 30-day audit log retention/pruning: audit rows are kept indefinitely.
 - Remote MCP OAuth/PKCE (and wiring the remote proxy in, see above).
-- Multi-site runners with soft region affinity (fleet v1.1 plan under `docs/superpowers/plans/`).
+- Remote (TLS) runner links and automatic re-homing of children off a dead site.
+
+## Fleet (optional)
+
+By default one gateway talks to one runner. Several runners can be pooled on one host: give each runner a
+`PORTUNUS_SITE_ID` and `PORTUNUS_REGIONS` (placeholders such as `site-a` / `region-a`), then list their
+sockets and token files in the gateway's `PORTUNUS_RUNNERS`
+(`site-a=/run/a.sock:/path/a.token,site-b=/run/b.sock:/path/b.token`; the `site=` prefix is optional).
+
+A server's `preferred_regions` is a soft preference: new children go to a live runner in a preferred region
+when there is one, otherwise to any live runner (a `preferred_miss`, logged and audited). A child stays on the
+site that started it, so if that site dies its invokes return `runner_unavailable` instead of silently moving.
+`scripts/e2e_two_runners.sh` exercises this locally (two runners, kill one, check fallback); it uses only
+temp sockets/secrets under `/tmp`. Design: `docs/superpowers/specs/2026-11-09-portunus-fleet-design.md`.
 
 ## Tests
 
