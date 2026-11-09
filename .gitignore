@@ -22,3 +22,7 @@ dashboard/dist/
 dashboard/.vite/
 /run/
 *.sock
+
+# Vault/pepper material must never be committed
+pepper
+*.pepper

@@ -24,3 +24,41 @@ def _clean_db():
     eng = create_engine(os.environ["PORTUNUS_DATABASE_URL"].replace("+aiosqlite", ""))
     Base.metadata.drop_all(eng)
     eng.dispose()
+
+
+@pytest.fixture
+def pepper_file(tmp_path, monkeypatch):
+    """Point ``PORTUNUS_PEPPER_FILE`` at a fresh random pepper (never committed)."""
+    import base64
+    import secrets
+
+    from portunus_gateway.config import PEPPER_FILE_ENV, clear_pepper_cache
+
+    path = tmp_path / "pepper"
+    path.write_text(base64.b64encode(secrets.token_bytes(32)).decode() + "\n")
+    monkeypatch.setenv(PEPPER_FILE_ENV, str(path))
+    clear_pepper_cache()
+    yield path
+    clear_pepper_cache()
+
+
+@pytest.fixture
+async def db():
+    """Create the schema on the test SQLite DB (``_clean_db`` drops it afterwards)."""
+    from portunus_gateway.db.models import Base
+    from portunus_gateway.db.session import engine
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+
+
+@pytest.fixture
+def authz(db):
+    """Fresh in-process authz store bound as the module singleton for the test."""
+    from portunus_gateway import authz as authz_mod
+
+    old = authz_mod.authz_store
+    authz_mod.authz_store = authz_mod.AuthzStore()
+    yield authz_mod.authz_store
+    authz_mod.authz_store = old

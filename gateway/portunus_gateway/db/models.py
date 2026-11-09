@@ -120,6 +120,8 @@ class AgentKey(Base):
     # Bumped on revoke; in-flight state tagged with an older generation is invalid.
     generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # NULL = never expires. SQLite returns naive values on read; treat naive as UTC.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _created_at()
 
 
