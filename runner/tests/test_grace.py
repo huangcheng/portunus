@@ -448,3 +448,54 @@ async def test_no_token_in_reply_to_garbage_frame(make_server, sock_path):
     rep = await asyncio.wait_for(read_frame(r), 2.0)
     assert rep["ok"] is False and "token" not in rep and TOKEN not in str(rep)
     w.close()
+
+
+async def test_hello_reply_advertises_fleet_metadata(make_server, sock_path):
+    await make_server(
+        site_id="site-a", regions=["region-a", "region-b"], egress_class="standard", capacity=4
+    )
+    c = await connect(sock_path)
+    reply = await c.hello()
+    assert reply["ok"] is True
+    assert reply["site_id"] == "site-a"
+    assert reply["regions"] == ["region-a", "region-b"]
+    assert reply["egress_class"] == "standard"
+    assert reply["capacity"] == 4
+    c.close()
+
+
+async def test_hello_reply_defaults_to_local_site(make_server, sock_path):
+    await make_server()
+    c = await connect(sock_path)
+    reply = await c.hello()
+    assert reply["site_id"] == "local" and reply["regions"] == ["local"]
+    assert "egress_class" not in reply and "capacity" not in reply
+    c.close()
+
+
+def test_fleet_env_parsing(monkeypatch):
+    from portunus_runner.main import fleet_from_env
+
+    for k in ("PORTUNUS_SITE_ID", "PORTUNUS_REGIONS", "PORTUNUS_EGRESS_CLASS", "PORTUNUS_CAPACITY"):
+        monkeypatch.delenv(k, raising=False)
+    assert fleet_from_env() == {"site_id": "local", "regions": ["local"]}
+    monkeypatch.setenv("PORTUNUS_SITE_ID", "site-a")
+    monkeypatch.setenv("PORTUNUS_REGIONS", " region-a, region-b ,,")
+    monkeypatch.setenv("PORTUNUS_EGRESS_CLASS", "standard")
+    monkeypatch.setenv("PORTUNUS_CAPACITY", "8")
+    assert fleet_from_env() == {
+        "site_id": "site-a",
+        "regions": ["region-a", "region-b"],
+        "egress_class": "standard",
+        "capacity": 8,
+    }
+    monkeypatch.setenv("PORTUNUS_CAPACITY", "many")
+    with pytest.raises(ValueError):
+        fleet_from_env()
+
+
+def test_runner_rejects_empty_site_or_regions():
+    with pytest.raises(ValueError):
+        RunnerServer(socket_path="/tmp/x.sock", token=TOKEN, dev=True, site_id="")
+    with pytest.raises(ValueError):
+        RunnerServer(socket_path="/tmp/x.sock", token=TOKEN, dev=True, regions=[])

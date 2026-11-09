@@ -16,7 +16,7 @@ import socket
 import struct
 import sys
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,6 +40,9 @@ SpawnFn = Callable[[dict], Awaitable[ChildHandle]]
 
 # Gap threshold = 3 heartbeat intervals (10s heartbeat -> 30s gap, spec §6.1).
 GAP_FACTOR = 3
+
+# v1 runners (and unconfigured v2 runners) belong to this single placeholder site/region.
+DEFAULT_SITE_ID = "local"
 
 
 def peer_cred(sock: Any) -> tuple[int | None, int]:
@@ -91,9 +94,27 @@ class Runner:
         policy_path: str = DEFAULT_POLICY_PATH,
         drop_privs: bool = False,
         stop_kill_s: float = 5.0,
+        site_id: str = DEFAULT_SITE_ID,
+        regions: Sequence[str] = (DEFAULT_SITE_ID,),
+        egress_class: str | None = None,
+        capacity: int | None = None,
     ) -> None:
         if not token:
             raise ValueError("token required")
+        if not (isinstance(site_id, str) and site_id.strip()):
+            raise ValueError("site_id must be a non-empty string")
+        regions = [r.strip() for r in regions if isinstance(r, str) and r.strip()]
+        if not regions:
+            raise ValueError("regions must contain at least one non-empty name")
+        if capacity is not None and (
+            isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 0
+        ):
+            raise ValueError("capacity must be a non-negative integer")
+        # Fleet metadata advertised on the hello reply (soft region affinity; informational).
+        self.site_id = site_id.strip()
+        self.regions = regions
+        self.egress_class = egress_class or None
+        self.capacity = capacity
         if not dev and expected_uid is None:
             raise ValueError("expected_uid required outside dev mode")
         self._token = token
@@ -261,7 +282,14 @@ class Runner:
         sess.conn_id = conn_id
         sess.authenticated = True
         sess.last_heartbeat = asyncio.get_running_loop().time()
-        await self._reply(sess, msg, run_id=self.run_id, wire_version=wire.WIRE_VERSION)
+        fleet: dict[str, Any] = {"site_id": self.site_id, "regions": list(self.regions)}
+        if self.egress_class is not None:
+            fleet["egress_class"] = self.egress_class
+        if self.capacity is not None:
+            fleet["capacity"] = self.capacity
+        await self._reply(
+            sess, msg, run_id=self.run_id, wire_version=wire.WIRE_VERSION, **fleet
+        )
         return True
 
     async def _do_start(self, sess: Session, msg: dict) -> None:

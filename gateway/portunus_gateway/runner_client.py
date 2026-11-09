@@ -43,6 +43,24 @@ from portunus_shared.wire import WIRE_VERSION, validate_message
 log = logging.getLogger("portunus.gateway.runner")
 
 DEFAULT_SOCKET = "/run/portunus/runner.sock"
+DEFAULT_SITE_ID = "local"  # v1 runners advertise no fleet metadata: they are the one local site
+
+
+def _fleet_from_hello(reply: dict) -> tuple[str, list[str], str | None, int | None]:
+    """Parse fleet metadata off a hello reply; absent/malformed fields fall back to v1 defaults."""
+    site = reply.get("site_id")
+    site_id = site.strip() if isinstance(site, str) and site.strip() else DEFAULT_SITE_ID
+    raw = reply.get("regions")
+    regions = (
+        [r.strip() for r in raw if isinstance(r, str) and r.strip()]
+        if isinstance(raw, list)
+        else []
+    ) or [DEFAULT_SITE_ID]
+    egress = reply.get("egress_class")
+    egress_class = egress if isinstance(egress, str) and egress else None
+    cap = reply.get("capacity")
+    capacity = cap if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 0 else None
+    return site_id, regions, egress_class, capacity
 
 
 class RunnerRequestError(PortunusError):
@@ -136,6 +154,11 @@ class RunnerClient:
 
         self.conn_seq = 0
         self.run_id: str | None = None
+        # Fleet metadata from the runner's hello reply (v1 compat defaults until/unless advertised).
+        self.site_id: str = DEFAULT_SITE_ID
+        self.regions: list[str] = [DEFAULT_SITE_ID]
+        self.egress_class: str | None = None
+        self.capacity: int | None = None
         self._conn: _Conn | None = None
         self._pending: dict[str, asyncio.Future] = {}
         self._task: asyncio.Task | None = None
@@ -304,6 +327,7 @@ class RunnerClient:
             log.info("runner handshake failed: %s", e)
             return False
         self.run_id = reply.get("run_id")
+        self.site_id, self.regions, self.egress_class, self.capacity = _fleet_from_hello(reply)
         self.conn_seq += 1
         conn = _Conn(writer, conn_id, self.conn_seq)
         self._conn = conn

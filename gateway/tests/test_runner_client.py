@@ -30,8 +30,16 @@ def sock_path():
 
 
 class FakeRunnerServer:
-    def __init__(self, path: str, *, token: str = TOKEN, hello_ok: bool = True) -> None:
+    def __init__(
+        self,
+        path: str,
+        *,
+        token: str = TOKEN,
+        hello_ok: bool = True,
+        hello_fields: dict | None = None,
+    ) -> None:
         self.path = path
+        self.hello_fields = hello_fields or {}  # extra fleet metadata on the hello reply
         self.token = token
         self.hello_ok = hello_ok
         self.frames: list[dict] = []  # post-hello frames received
@@ -78,7 +86,9 @@ class FakeRunnerServer:
             if not self.hello_ok:
                 writer.close()
                 return
-            await self.send(self.reply(hello, run_id="run-1", wire_version=1))
+            await self.send(
+                self.reply(hello, run_id="run-1", wire_version=1, **self.hello_fields)
+            )
             while True:
                 msg = await read_frame(reader)
                 self.frames.append(msg)
@@ -344,3 +354,55 @@ async def test_slot_manager_runner_down(sock_path, authz):
     with pytest.raises(PortunusError) as ei:
         await sm.reserve_and_start(uuid.UUID(int=1), "k", {"argv": ["npx"]})
     assert ei.value.code == "runner_unavailable"
+
+
+async def test_hello_records_site_and_regions(sock_path):
+    srv = FakeRunnerServer(
+        sock_path,
+        hello_fields={
+            "site_id": "site-a",
+            "regions": ["region-a", "region-b"],
+            "egress_class": "standard",
+            "capacity": 8,
+        },
+    )
+    await srv.start()
+    async with running(make_client(sock_path)) as c:
+        await c.wait_connected(2)
+        assert c.site_id == "site-a"
+        assert c.regions == ["region-a", "region-b"]
+        assert c.egress_class == "standard"
+        assert c.capacity == 8
+    await srv.close()
+
+
+async def test_v1_runner_without_fleet_fields_gets_defaults(sock_path):
+    srv = FakeRunnerServer(sock_path)  # hello reply carries no fleet fields
+    await srv.start()
+    async with running(make_client(sock_path)) as c:
+        assert (c.site_id, c.regions) == ("local", ["local"])  # defaults before connect too
+        await c.wait_connected(2)
+        assert c.site_id == "local"
+        assert c.regions == ["local"]
+        assert c.egress_class is None and c.capacity is None
+        assert (await c.inventory())["children"] == []
+    await srv.close()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"site_id": "", "regions": []},
+        {"site_id": 7, "regions": "region-a"},
+        {"site_id": None, "regions": [1, ""], "capacity": True, "egress_class": 5},
+        {"capacity": -1},
+    ],
+)
+async def test_malformed_fleet_fields_fall_back_to_defaults(sock_path, fields):
+    srv = FakeRunnerServer(sock_path, hello_fields=fields)
+    await srv.start()
+    async with running(make_client(sock_path)) as c:
+        await c.wait_connected(2)
+        assert c.site_id == "local" and c.regions == ["local"]
+        assert c.egress_class is None and c.capacity is None
+    await srv.close()

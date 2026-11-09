@@ -14,7 +14,7 @@ import sys
 from portunus_shared import DEFAULTS
 
 from .policy import DEFAULT_POLICY_PATH
-from .session import Runner
+from .session import DEFAULT_SITE_ID, Runner
 
 DEFAULT_SOCKET = "/run/portunus/runner.sock"
 
@@ -73,6 +73,22 @@ def _load_token() -> str:
     return token
 
 
+def fleet_from_env() -> dict:
+    """Fleet metadata kwargs for ``Runner`` from env (defaults: single ``local`` site)."""
+    site_id = os.environ.get("PORTUNUS_SITE_ID", "").strip() or DEFAULT_SITE_ID
+    regions = [
+        r.strip() for r in os.environ.get("PORTUNUS_REGIONS", "").split(",") if r.strip()
+    ] or [DEFAULT_SITE_ID]
+    out: dict = {"site_id": site_id, "regions": regions}
+    egress = os.environ.get("PORTUNUS_EGRESS_CLASS", "").strip()
+    if egress:
+        out["egress_class"] = egress
+    cap = os.environ.get("PORTUNUS_CAPACITY", "").strip()
+    if cap:
+        out["capacity"] = int(cap)  # ValueError -> "runner config error"
+    return out
+
+
 def _expected_uid() -> int | None:
     raw = os.environ.get("PORTUNUS_GATEWAY_UID")
     if raw:
@@ -95,6 +111,7 @@ async def amain() -> None:
             expected_uid=_expected_uid(),
             policy_path=os.environ.get("PORTUNUS_POLICY", DEFAULT_POLICY_PATH),
             drop_privs=os.environ.get("PORTUNUS_DROP_PRIVS") == "1",
+            **fleet_from_env(),
         )
     except ValueError as e:
         raise SystemExit(f"runner config error: {e}") from e
