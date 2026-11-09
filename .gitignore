@@ -26,3 +26,7 @@ dashboard/.vite/
 # Vault/pepper material must never be committed
 pepper
 *.pepper
+
+# Compose-local material
+secrets/
+deploy/runner-policy.json

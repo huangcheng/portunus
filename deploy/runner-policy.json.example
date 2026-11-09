@@ -1,0 +1,4 @@
+{
+  "trusted_path": ["/usr/local/bin", "/usr/bin", "/bin"],
+  "binary_allowlist": []
+}

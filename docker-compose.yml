@@ -1,0 +1,87 @@
+# Portunus quickstart stack. Default = DEV/evaluation mode (PORTUNUS_DEV=1): the runner does not
+# drop privileges, so MCP children run as the runner's uid. See README "Production".
+#
+#   scripts/init_env.sh            # writes .env, secrets/pepper, secrets/runner.token
+#   cp deploy/runner-policy.json.example deploy/runner-policy.json
+#   docker compose up --build      # dashboard + API + /mcp on http://localhost:8080
+#   docker compose --profile postgres up --build   # same, but gateway uses Postgres
+#
+# The sqlite path is the default; to use Postgres set in .env:
+#   WITH_POSTGRES=1
+#   PORTUNUS_DATABASE_URL=postgresql+asyncpg://portunus:portunus@postgres:5432/portunus
+
+x-common: &common
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile
+    args:
+      WITH_POSTGRES: ${WITH_POSTGRES:-0}
+  image: portunus:local
+  restart: unless-stopped
+  user: "10001:10001"
+
+services:
+  portunus-runner:
+    <<: *common
+    command: ["portunus-runner"]
+    environment:
+      PORTUNUS_DEV: ${PORTUNUS_DEV:-1}
+      PORTUNUS_SOCKET: /run/portunus/runner.sock
+      PORTUNUS_TOKEN_FILE: /run/secrets/runner_token
+      PORTUNUS_POLICY: /etc/portunus/runner-policy.json
+      PORTUNUS_GATEWAY_UID: "10001"
+      PORTUNUS_DROP_PRIVS: ${PORTUNUS_DROP_PRIVS:-0}
+    volumes:
+      - run:/run/portunus
+      - ./deploy/runner-policy.json:/etc/portunus/runner-policy.json:ro
+    secrets: [runner_token]
+    # No published ports: the runner is reachable only through the shared socket volume.
+
+  portunus:
+    <<: *common
+    depends_on: [portunus-runner]
+    ports:
+      - "${PORTUNUS_PORT:-8080}:8080"
+    environment:
+      PORTUNUS_DEV: ${PORTUNUS_DEV:-1}
+      PORTUNUS_SECRETS_KEY: ${PORTUNUS_SECRETS_KEY:?run scripts/init_env.sh}
+      PORTUNUS_OPERATOR_PASSWORD: ${PORTUNUS_OPERATOR_PASSWORD:?run scripts/init_env.sh}
+      PORTUNUS_PEPPER_FILE: /run/secrets/pepper
+      PORTUNUS_TOKEN_FILE: /run/secrets/runner_token
+      PORTUNUS_SOCKET: /run/portunus/runner.sock
+      PORTUNUS_POLICY: /etc/portunus/runner-policy.json
+      PORTUNUS_RUNNER_UID: "10001"
+      PORTUNUS_DATABASE_URL: ${PORTUNUS_DATABASE_URL:-sqlite+aiosqlite:////var/lib/portunus/portunus.db}
+      PORTUNUS_TRUSTED_PROXIES: ${PORTUNUS_TRUSTED_PROXIES:-}
+    volumes:
+      - run:/run/portunus
+      - data:/var/lib/portunus
+      - ./deploy/runner-policy.json:/etc/portunus/runner-policy.json:ro
+    secrets: [pepper, runner_token]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    profiles: [postgres]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: portunus
+      POSTGRES_PASSWORD: portunus
+      POSTGRES_DB: portunus
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  run:
+  data:
+  pgdata:
+
+secrets:
+  pepper:
+    file: ./secrets/pepper
+  runner_token:
+    file: ./secrets/runner.token

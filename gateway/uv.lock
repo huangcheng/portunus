@@ -710,6 +710,7 @@ dependencies = [
     { name = "mcp" },
     { name = "portunus-shared" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -730,6 +731,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=2.3.0" },
     { name = "portunus-shared", editable = "../packages/portunus_shared" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]
 
 [package.metadata.requires-dev]
