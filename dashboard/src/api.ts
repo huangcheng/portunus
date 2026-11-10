@@ -37,13 +37,24 @@ async function call<T>(method: string, path: string, body?: unknown, headers: Re
   return data as T;
 }
 
-// Sensitive actions: ask for the password, trade it for a short-lived step-up token.
-async function withStepUp<T>(fn: (h: Record<string, string>) => Promise<T>): Promise<T> {
-  const password = window.prompt("Re-enter operator password to confirm");
-  if (!password) throw new ApiError(0, "cancelled", "cancelled");
-  const { token } = await call<{ token: string }>("POST", "/auth/step-up", { password });
-  return fn({ "X-Step-Up-Token": token });
-}
+export type OAuthConfig = {
+  authorize_url: string;
+  token_url: string;
+  client_id: string;
+  scopes: string[];
+  configured: boolean;
+};
+
+export type UpdateServerBody = {
+  preferred_regions?: string[];
+  oauth?: {
+    authorize_url: string;
+    token_url: string;
+    client_id: string;
+    scopes: string[];
+  } | null;
+  oauth_client_secret?: string | null;
+};
 
 export type Server = {
   id: string;
@@ -53,6 +64,10 @@ export type Server = {
   enabled: boolean;
   command: string | null;
   args: string[] | null;
+  url: string | null;
+  oauth: OAuthConfig | null;
+  has_auth: boolean;
+  preferred_regions: string[];
   env_names: string[];
 };
 export type Tool = { id: string; name: string; description: string | null; enabled: boolean };
@@ -62,7 +77,26 @@ export type Key = {
   created_at: string;
   expires_at: string | null;
   revoked_at: string | null;
+  has_secret: boolean;
   server_ids: string[];
+};
+
+export type CreateServerBody = {
+  name: string;
+  slug: string;
+  kind: "stdio" | "remote";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  preferred_regions?: string[];
+  oauth?: {
+    authorize_url: string;
+    token_url: string;
+    client_id: string;
+    scopes: string[];
+  } | null;
+  oauth_client_secret?: string | null;
 };
 
 export const api = {
@@ -76,18 +110,20 @@ export const api = {
   },
   logout: () => call<void>("POST", "/auth/logout"),
   servers: () => call<Server[]>("GET", "/servers"),
-  createServer: (b: { name: string; slug: string; command: string; args: string[]; env: Record<string, string> }) =>
-    call<Server>("POST", "/servers", { ...b, kind: "stdio" }),
+  createServer: (b: CreateServerBody) => call<Server>("POST", "/servers", b),
+  updateServer: (id: string, b: UpdateServerBody) => call<Server>("PATCH", `/servers/${id}`, b),
   probe: (id: string) => call<unknown>("POST", `/servers/${id}/probe`),
   tools: (id: string) => call<Tool[]>("GET", `/servers/${id}/tools`),
   setServerEnabled: (id: string, enabled: boolean) =>
-    withStepUp((h) => call<Server>("POST", `/servers/${id}/enable`, { enabled }, h)),
-  setToolEnabled: (id: string, enabled: boolean) =>
-    withStepUp((h) => call<Tool>("POST", `/tools/${id}/enable`, { enabled }, h)),
+    call<Server>("POST", `/servers/${id}/enable`, { enabled }),
+  setBearerToken: (id: string, token: string) =>
+    call<Server>("POST", `/servers/${id}/auth/token`, { token }),
+  oauthStart: (id: string, redirect_uri: string) =>
+    call<{ authorize_url: string; state: string }>("POST", `/servers/${id}/oauth/start`, { redirect_uri }),
   keys: () => call<Key[]>("GET", "/keys"),
   mintKey: (label: string) => call<Key & { token: string }>("POST", "/keys", { label: label || null }),
-  revokeKey: (id: string) => withStepUp((h) => call<Key>("POST", `/keys/${id}/revoke`, undefined, h)),
+  revealKey: (id: string) => call<{ token: string }>("GET", `/keys/${id}/secret`),
+  deleteKey: (id: string) => call<void>("DELETE", `/keys/${id}`),
   grant: (key: string, server: string) => call<Key>("PUT", `/keys/${key}/grants/${server}`),
-  ungrant: (key: string, server: string) =>
-    withStepUp((h) => call<Key>("DELETE", `/keys/${key}/grants/${server}`, undefined, h)),
+  ungrant: (key: string, server: string) => call<Key>("DELETE", `/keys/${key}/grants/${server}`),
 };

@@ -29,6 +29,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db.models import AuditEvent, Server, Tool, VaultEntry
+from .oauth import (
+    AUTH_HEADER_NAME,
+    OAUTH_CLIENT_SECRET_NAME,
+    OAuthError,
+    oauth_public_view,
+    validate_oauth_config,
+)
 from .runner_client import RunnerRequestError
 from .runner_pool import RunnerPool
 from .vault import Vault, VaultError
@@ -40,7 +47,12 @@ MAX_PREFERRED_REGIONS = 16
 PROBE_TRANSPORT_SLACK_S = 5  # the runner enforces timeout_s; leave room for its reply
 _REGION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", re.ASCII)
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
+# HTTP header names for remote vault entries (token / custom headers).
+_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", re.ASCII)
 _FORBIDDEN_ENV_PREFIXES = ("PORTUNUS_", "LD_", "DYLD_")  # runner rejects these too
+_FORBIDDEN_HEADERS = frozenset(
+    {"host", "content-length", "transfer-encoding", "connection", "upgrade", "te", "trailer"}
+)
 _RUNNER_STATUS = {
     "runner_unavailable": 503,
     "upstream_timeout": 504,
@@ -48,6 +60,7 @@ _RUNNER_STATUS = {
     "spawn_failed": 502,
     "upstream_crash": 502,
     "payload_too_large": 502,
+    "auth_required": 401,
     "child_cap": 429,
 }
 
@@ -92,6 +105,43 @@ def validate_env(env: dict[str, str]) -> dict[str, str]:
     return dict(env)
 
 
+def validate_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Vault-backed request headers for remote servers (Authorization, X-*, …)."""
+    if not isinstance(headers, dict) or len(headers) > MAX_ENV_ENTRIES:
+        raise RegistryError(422, "invalid_env", "headers must be an object of string literals")
+    total = 0
+    out: dict[str, str] = {}
+    for k, v in headers.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise RegistryError(422, "invalid_env", "headers must map strings to strings")
+        if not _HEADER_NAME.fullmatch(k) or k.lower() in _FORBIDDEN_HEADERS:
+            raise RegistryError(422, "invalid_env", f"invalid header name {k!r}")
+        if k.lower().startswith("portunus."):
+            raise RegistryError(422, "invalid_env", f"header name not allowed: {k}")
+        if "\r" in v or "\n" in v or "\x00" in v:
+            raise RegistryError(422, "invalid_env", "invalid header value")
+        total += len(k) + len(v)
+        out[k] = v
+    if total > MAX_ENV_BYTES:
+        raise RegistryError(422, "invalid_env", "headers too large")
+    return out
+
+
+def validate_remote_url(url: str | None) -> str:
+    if not isinstance(url, str) or not url.strip():
+        raise RegistryError(422, "invalid_url", "remote server needs a url")
+    url = url.strip()
+    if len(url) > 2048:
+        raise RegistryError(422, "invalid_url", "url too long")
+    # Full SSRF checks run at probe/invoke time; create only rejects obvious junk.
+    low = url.lower()
+    if not (low.startswith("https://") or low.startswith("http://")):
+        raise RegistryError(422, "invalid_url", "url must be http(s)")
+    if "\x00" in url or "\r" in url or "\n" in url:
+        raise RegistryError(422, "invalid_url", "invalid url")
+    return url
+
+
 def validate_regions(regions: Any) -> list[str]:
     """Normalize a ``preferred_regions`` list: strict names, de-duplicated, order preserved."""
     if not isinstance(regions, list) or len(regions) > MAX_PREFERRED_REGIONS:
@@ -106,6 +156,8 @@ def validate_regions(regions: Any) -> list[str]:
 
 
 def server_view(server: Server, env_names: list[str]) -> dict[str, Any]:
+    # Hide reserved vault names from the operator UI.
+    public_names = sorted(n for n in env_names if not n.lower().startswith("portunus."))
     return {
         "id": str(server.id),
         "name": server.name,
@@ -115,9 +167,11 @@ def server_view(server: Server, env_names: list[str]) -> dict[str, Any]:
         "command": server.command,
         "args": list(server.args or []),
         "url": server.url,
+        "oauth": oauth_public_view(server.oauth if isinstance(server.oauth, dict) else None),
+        "has_auth": any(n.lower() == AUTH_HEADER_NAME.lower() for n in env_names),
         "preferred_regions": list(server.preferred_regions or []),
         "vault_version": server.vault_version,
-        "env_names": sorted(env_names),  # names only, never values
+        "env_names": public_names,  # names only, never values
         "created_at": server.created_at.isoformat() if server.created_at else None,
     }
 
@@ -173,6 +227,7 @@ class Registry:
         trusted_path: list[str],
         binary_allowlist: list[str],
         slots: Any = None,
+        remote: Any = None,
         probe_timeout_s: int = DEFAULTS.probe_timeout_s,
         max_probes: int = DEFAULTS.max_probes,
     ) -> None:
@@ -183,6 +238,7 @@ class Registry:
         self.trusted_path = list(trusted_path)
         self.binary_allowlist = list(binary_allowlist)
         self.slots = slots  # SlotManager (disable_server) once wired by the app
+        self.remote = remote  # RemoteProxy once wired; required for remote probe/invoke
         self.probe_timeout_s = probe_timeout_s
         self.max_probes = max_probes
         self._probing: set[uuid.UUID] = set()
@@ -220,59 +276,110 @@ class Registry:
         env: dict[str, str],
         actor: str,
         preferred_regions: list[str] | None = None,
+        url: str | None = None,
+        oauth: dict[str, Any] | None = None,
+        oauth_client_secret: str | None = None,
     ) -> dict[str, Any]:
-        if kind != "stdio":
-            raise RegistryError(400, "unsupported", f"server kind {kind!r} is not supported yet")
-        self._validate_argv(command, args)
-        env = validate_env(env)
+        if kind not in ("stdio", "remote"):
+            raise RegistryError(400, "unsupported", f"server kind {kind!r} is not supported")
         regions = validate_regions(preferred_regions or [])
-        server = Server(
-            id=uuid.uuid4(),
-            name=name,
-            slug=slug,
-            kind="stdio",
-            enabled=False,
-            command=command,
-            args=list(args),
-            preferred_regions=regions,
-            vault_version=1 if env else 0,
-        )
-        entries = []
-        for key, value in env.items():
-            entry_id = uuid.uuid4()
-            version = self.vault.current_version
-            blob = self.vault.seal(
-                value.encode(), vault_entry_id=str(entry_id), key_version=version
+        try:
+            oauth_cfg = validate_oauth_config(oauth)
+        except OAuthError as e:
+            raise RegistryError(e.status, e.code, e.message) from e
+        secrets: dict[str, str]
+        if kind == "stdio":
+            self._validate_argv(command, args)
+            secrets = validate_env(env)
+            if url or oauth_cfg or oauth_client_secret:
+                raise RegistryError(422, "invalid_request", "stdio servers do not take url/oauth")
+            server = Server(
+                id=uuid.uuid4(),
+                name=name,
+                slug=slug,
+                kind="stdio",
+                enabled=False,
+                command=command,
+                args=list(args),
+                preferred_regions=regions,
+                vault_version=1 if secrets else 0,
             )
-            entries.append(
-                VaultEntry(
-                    id=entry_id,
-                    server_id=server.id,
-                    name=key,
-                    ciphertext=blob,
-                    key_version=version,
-                )
+        else:
+            if command or args:
+                raise RegistryError(422, "invalid_request", "remote servers do not take command/args")
+            remote_url = validate_remote_url(url)
+            secrets = validate_headers(env)
+            if oauth_client_secret is not None:
+                if not isinstance(oauth_client_secret, str) or "\x00" in oauth_client_secret:
+                    raise RegistryError(422, "invalid_oauth", "invalid oauth_client_secret")
+                if oauth_client_secret:
+                    secrets = {**secrets, OAUTH_CLIENT_SECRET_NAME: oauth_client_secret}
+            server = Server(
+                id=uuid.uuid4(),
+                name=name,
+                slug=slug,
+                kind="remote",
+                enabled=False,
+                url=remote_url,
+                oauth=oauth_cfg,
+                preferred_regions=regions,
+                vault_version=1 if secrets else 0,
             )
+        entries = [self._seal_entry(server.id, key, value) for key, value in secrets.items()]
         async with self._sf() as s:
             try:
                 s.add(server)
                 await s.flush()  # server row first: vault entries reference it
                 s.add_all(entries)
-                s.add(self._audit(actor, "server.create", server.id, {"slug": server.slug}))
+                s.add(
+                    self._audit(
+                        actor,
+                        "server.create",
+                        server.id,
+                        {"slug": server.slug, "kind": server.kind},
+                    )
+                )
                 await s.commit()
             except IntegrityError:
                 await s.rollback()
                 raise RegistryError(409, "conflict", "slug already in use") from None
-        return server_view(server, list(env))
+        return server_view(server, list(secrets))
 
     async def update_server(
-        self, server_id: uuid.UUID, *, preferred_regions: list[str], actor: str
+        self,
+        server_id: uuid.UUID,
+        *,
+        actor: str,
+        preferred_regions: list[str] | None = None,
+        oauth: dict[str, Any] | None = None,
+        oauth_client_secret: str | None = None,
     ) -> dict[str, Any]:
-        regions = validate_regions(preferred_regions)
+        if preferred_regions is None and oauth is None and oauth_client_secret is None:
+            raise RegistryError(422, "invalid_request", "no fields to update")
+        regions = validate_regions(preferred_regions) if preferred_regions is not None else None
+        try:
+            oauth_cfg = validate_oauth_config(oauth) if oauth is not None else None
+        except OAuthError as e:
+            raise RegistryError(e.status, e.code, e.message) from e
+        if oauth_client_secret is not None:
+            if not isinstance(oauth_client_secret, str) or "\x00" in oauth_client_secret:
+                raise RegistryError(422, "invalid_oauth", "invalid oauth_client_secret")
         async with self._sf() as s:
             server = await self._get_server(s, server_id)
-            server.preferred_regions = regions
-            s.add(self._audit(actor, "server.update", server_id, {"preferred_regions": regions}))
+            if (oauth is not None or oauth_client_secret is not None) and server.kind != "remote":
+                raise RegistryError(422, "invalid_request", "stdio servers do not take oauth")
+            audit: dict[str, Any] = {}
+            if regions is not None:
+                server.preferred_regions = regions
+                audit["preferred_regions"] = regions
+            if oauth is not None:
+                # Empty object clears oauth; non-empty replaces config.
+                server.oauth = oauth_cfg
+                audit["oauth"] = bool(oauth_cfg)
+            if oauth_client_secret:
+                await self._upsert_vault(s, server, OAUTH_CLIENT_SECRET_NAME, oauth_client_secret)
+                audit["oauth_client_secret"] = True
+            s.add(self._audit(actor, "server.update", server_id, audit or None))
             await s.commit()
             names = await self._env_names(s, server_id)
             return server_view(server, names)
@@ -378,34 +485,130 @@ class Registry:
     async def _probe(self, server_id: uuid.UUID, actor: str) -> dict[str, Any]:
         async with self._sf() as s:
             server = await self._get_server(s, server_id)
-            if server.kind != "stdio":
-                raise RegistryError(400, "unsupported", "only stdio servers can be probed")
+            kind = server.kind
             command, args = server.command, list(server.args or [])
-            self._validate_argv(command, args)  # policy may have changed since create
-            env = await self._decrypt_env(s, server_id)
             preferred_regions = list(server.preferred_regions or [])
-        assert command is not None
+            if kind == "stdio":
+                self._validate_argv(command, args)  # policy may have changed since create
+                env = await self._decrypt_env(s, server_id)
+            elif kind == "remote":
+                if not server.url:
+                    raise RegistryError(422, "invalid_url", "remote server needs a url")
+                env = {}
+            else:
+                raise RegistryError(400, "unsupported", f"server kind {kind!r} cannot be probed")
 
-        timeout_s = self.probe_timeout_s
-        try:
-            decision = self.pool.pick(preferred_regions)
-            if decision is None:
-                raise RunnerRequestError("runner_unavailable", "runner not connected", sent=False)
-            reply = await self.pool.request(
-                decision.site_id,
-                "probe",
-                timeout=timeout_s + PROBE_TRANSPORT_SLACK_S,
-                probe_id=uuid.uuid4().hex,
-                server_id=str(server_id),
-                argv=[command, *args],
-                trailing_allowlist=[],
-                env=env,
-                timeout_s=timeout_s,
-            )
-        except RunnerRequestError as e:
-            raise RegistryError(_RUNNER_STATUS.get(e.code, 502), e.code, e.message) from e
-        incoming = _normalize_tools(reply.get("tools"))
+        audit_extra: dict[str, Any] = {}
+        if kind == "stdio":
+            assert command is not None
+            timeout_s = self.probe_timeout_s
+            try:
+                decision = self.pool.pick(preferred_regions)
+                if decision is None:
+                    raise RunnerRequestError("runner_unavailable", "runner not connected", sent=False)
+                reply = await self.pool.request(
+                    decision.site_id,
+                    "probe",
+                    timeout=timeout_s + PROBE_TRANSPORT_SLACK_S,
+                    probe_id=uuid.uuid4().hex,
+                    server_id=str(server_id),
+                    argv=[command, *args],
+                    trailing_allowlist=[],
+                    env=env,
+                    timeout_s=timeout_s,
+                )
+            except RunnerRequestError as e:
+                raise RegistryError(_RUNNER_STATUS.get(e.code, 502), e.code, e.message) from e
+            incoming = _normalize_tools(reply.get("tools"))
+            audit_extra = {
+                "site_id": decision.site_id,
+                "preferred_miss": decision.preferred_miss,
+            }
+        else:
+            if self.remote is None:
+                raise RegistryError(503, "unsupported", "remote proxy is not configured")
+            try:
+                raw_tools = await self.remote.probe(server_id)
+            except PortunusError as e:
+                raise RegistryError(_RUNNER_STATUS.get(e.code, 502), e.code, e.message) from e
+            incoming = _normalize_tools(raw_tools)
 
+        return await self._commit_probe(server_id, actor, incoming, audit_extra)
+
+    async def set_bearer_token(self, server_id: uuid.UUID, token: str, actor: str) -> dict[str, Any]:
+        """Paste-token: store ``Authorization`` in the vault (step-up required at the API)."""
+        if not isinstance(token, str) or not token.strip() or "\x00" in token:
+            raise RegistryError(422, "invalid_request", "token required")
+        token = token.strip()
+        value = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+        async with self._sf() as s:
+            server = await self._get_server(s, server_id)
+            if server.kind != "remote":
+                raise RegistryError(400, "unsupported", "only remote servers take a bearer token")
+            await self._upsert_vault(s, server, AUTH_HEADER_NAME, value)
+            s.add(self._audit(actor, "server.auth_token", server_id, None))
+            await s.commit()
+            names = await self._env_names(s, server_id)
+            return server_view(server, names)
+
+    async def store_authorization_header(
+        self, server_id: uuid.UUID, authorization: str, actor: str, *, action: str = "server.oauth"
+    ) -> dict[str, Any]:
+        """Persist a full Authorization header value after OAuth exchange."""
+        if not isinstance(authorization, str) or not authorization.strip() or "\x00" in authorization:
+            raise RegistryError(422, "invalid_oauth", "missing access token")
+        async with self._sf() as s:
+            server = await self._get_server(s, server_id)
+            if server.kind != "remote":
+                raise RegistryError(400, "unsupported", "only remote servers support oauth")
+            await self._upsert_vault(s, server, AUTH_HEADER_NAME, authorization.strip())
+            s.add(self._audit(actor, action, server_id, None))
+            await s.commit()
+            names = await self._env_names(s, server_id)
+            return server_view(server, names)
+
+    async def read_oauth_client_secret(self, server_id: uuid.UUID) -> str | None:
+        async with self._sf() as s:
+            await self._get_server(s, server_id)
+            row = (
+                await s.execute(
+                    select(VaultEntry).where(
+                        VaultEntry.server_id == server_id,
+                        VaultEntry.name == OAUTH_CLIENT_SECRET_NAME,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            try:
+                return self.vault.open(
+                    bytes(row.ciphertext),
+                    vault_entry_id=str(row.id),
+                    key_version=row.key_version,
+                ).decode()
+            except (VaultError, UnicodeDecodeError):
+                raise RegistryError(500, "vault_error", "cannot decrypt oauth client secret") from None
+
+    async def remote_oauth_config(self, server_id: uuid.UUID) -> dict[str, Any]:
+        async with self._sf() as s:
+            server = await self._get_server(s, server_id)
+            if server.kind != "remote":
+                raise RegistryError(400, "unsupported", "only remote servers support oauth")
+            try:
+                cfg = validate_oauth_config(server.oauth)
+            except OAuthError as e:
+                raise RegistryError(e.status, e.code, e.message) from e
+            if cfg is None:
+                raise RegistryError(422, "invalid_oauth", "server has no oauth config")
+            return cfg
+
+    async def _commit_probe(
+        self,
+        server_id: uuid.UUID,
+        actor: str,
+        incoming: list[dict[str, Any]],
+        audit_extra: dict[str, Any],
+    ) -> dict[str, Any]:
         async with self._sf() as s:
             await self._get_server(s, server_id)  # deleted while probing -> 404
             existing = {
@@ -427,7 +630,7 @@ class Registry:
                             description=item["description"],
                             schema=item["schema"],
                             schema_hash=digest,
-                            enabled=False,  # new tools are never enabled by a probe
+                            enabled=True,
                         )
                     )
                     added += 1
@@ -435,7 +638,10 @@ class Registry:
                     tool.description = item["description"]
                     tool.schema = item["schema"]
                     tool.schema_hash = digest
-                    tool.enabled = False  # drift: operator must re-approve
+                    tool.enabled = True
+                    changed.append(tool.upstream_name)
+                elif not tool.enabled:
+                    tool.enabled = True
                     changed.append(tool.upstream_name)
             seen = {i["name"] for i in incoming}
             missing = sorted(n for n in existing if n not in seen)
@@ -449,8 +655,7 @@ class Registry:
                         "added": added,
                         "changed": changed,
                         "missing": missing,
-                        "site_id": decision.site_id,
-                        "preferred_miss": decision.preferred_miss,
+                        **audit_extra,
                     },
                 )
             )
@@ -474,6 +679,38 @@ class Registry:
         }
 
     # ---- helpers -----------------------------------------------------------------
+
+    def _seal_entry(self, server_id: uuid.UUID, name: str, value: str) -> VaultEntry:
+        entry_id = uuid.uuid4()
+        version = self.vault.current_version
+        blob = self.vault.seal(value.encode(), vault_entry_id=str(entry_id), key_version=version)
+        return VaultEntry(
+            id=entry_id,
+            server_id=server_id,
+            name=name,
+            ciphertext=blob,
+            key_version=version,
+        )
+
+    async def _upsert_vault(
+        self, s: AsyncSession, server: Server, name: str, value: str
+    ) -> None:
+        row = (
+            await s.execute(
+                select(VaultEntry).where(
+                    VaultEntry.server_id == server.id, VaultEntry.name == name
+                )
+            )
+        ).scalar_one_or_none()
+        version = self.vault.current_version
+        if row is None:
+            s.add(self._seal_entry(server.id, name, value))
+        else:
+            row.ciphertext = self.vault.seal(
+                value.encode(), vault_entry_id=str(row.id), key_version=version
+            )
+            row.key_version = version
+        server.vault_version = int(server.vault_version or 0) + 1
 
     @staticmethod
     async def _get_server(s: AsyncSession, server_id: uuid.UUID) -> Server:

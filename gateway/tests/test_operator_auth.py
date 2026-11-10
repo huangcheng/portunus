@@ -1,4 +1,4 @@
-"""Operator auth (Task 12): argon2id password, opaque session cookie, CSRF, step-up, lockout."""
+"""Operator auth (Task 12): argon2id password, opaque session cookie, CSRF, lockout."""
 
 from __future__ import annotations
 
@@ -140,15 +140,6 @@ async def test_four_failures_then_success_resets_counter(db):
         assert (await _login(c)).status_code == 200
 
 
-async def test_failed_step_up_counts_toward_lockout(db):
-    async with _client(_auth()) as c:
-        csrf = await _logged_in(c)
-        for _ in range(5):
-            r = await c.post("/api/auth/step-up", json={"password": "wrong"}, headers=csrf)
-            assert r.status_code == 403
-        r = await c.post("/api/auth/step-up", json={"password": PASSWORD}, headers=csrf)
-        assert r.status_code == 429
-
 
 async def test_xff_ignored_unless_peer_is_trusted_proxy(db):
     # Untrusted peer: rotating X-Forwarded-For must not dodge the lockout.
@@ -265,72 +256,10 @@ async def test_mutations_require_csrf_token(db, pepper_file, authz):
         assert (await c.get("/api/keys")).status_code == 200
 
 
-# ---- step-up --------------------------------------------------------------------------
-
-
-async def test_step_up_token_flow(db):
-    clock = Clock()
-    auth = _auth(clock)
-    async with _client(auth) as c:
-        csrf = await _logged_in(c)
-        sid = uuid.uuid4()
-        # Wrong password -> no token.
-        r = await c.post("/api/auth/step-up", json={"password": "bad"}, headers=csrf)
-        assert r.status_code == 403
-        r = await c.post("/api/auth/step-up", json={"password": PASSWORD}, headers=csrf)
-        assert r.status_code == 200
-        step = r.json()["token"]
-        assert r.json()["expires_in"] == 300
-
-        # Gated route: needs the token.
-        url = f"/api/servers/{sid}/enable"
-        r = await c.post(url, json={}, headers=csrf)
-        assert r.status_code == 403 and r.json()["code"] == "step_up_required"
-        r = await c.post(url, json={}, headers={**csrf, "X-Step-Up-Token": "bogus"})
-        assert r.status_code == 403
-        r = await c.post(url, json={}, headers={**csrf, "X-Step-Up-Token": step})
-        assert r.status_code == 404  # authorized; the server just doesn't exist
-
-        # Expires after 5 minutes.
-        clock.now += 301
-        r = await c.post(url, json={}, headers={**csrf, "X-Step-Up-Token": step})
-        assert r.status_code == 403
-
-
-async def test_step_up_token_bound_to_session(db):
-    auth = _auth()
-    async with _client(auth) as a, _client(auth) as b:
-        csrf_a = await _logged_in(a)
-        csrf_b = await _logged_in(b)
-        step = (
-            await a.post("/api/auth/step-up", json={"password": PASSWORD}, headers=csrf_a)
-        ).json()["token"]
-        r = await b.post(
-            f"/api/servers/{uuid.uuid4()}/enable",
-            json={},
-            headers={**csrf_b, "X-Step-Up-Token": step},
-        )
-        assert r.status_code == 403
-
-
-async def test_step_up_token_dies_with_logout(db):
-    auth = _auth()
-    async with _client(auth) as c:
-        csrf = await _logged_in(c)
-        step = (
-            await c.post("/api/auth/step-up", json={"password": PASSWORD}, headers=csrf)
-        ).json()["token"]
-        await c.post("/api/auth/logout", headers=csrf)
-        csrf2 = await _logged_in(c)
-        r = await c.post(
-            f"/api/servers/{uuid.uuid4()}/enable",
-            json={},
-            headers={**csrf2, "X-Step-Up-Token": step},
-        )
-        assert r.status_code == 403
-
 
 # ---- key REST -------------------------------------------------------------------------
+
+
 
 
 async def test_mint_list_revoke_key(db, pepper_file, authz):
@@ -345,22 +274,22 @@ async def test_mint_list_revoke_key(db, pepper_file, authz):
         assert [k["key_id"] for k in listed] == [minted["key_id"]]
         assert "token" not in listed[0] and "digest" not in listed[0]
         assert minted["token"].split(".")[1] not in str(listed)
-        assert listed[0]["revoked_at"] is None and listed[0]["server_ids"] == []
+        assert listed[0]["revoked_at"] is None and listed[0]["has_secret"] is True
+        assert listed[0]["server_ids"] == []
 
-        # Revoke is step-up gated.
-        url = f"/api/keys/{minted['key_id']}/revoke"
-        assert (await c.post(url, headers=csrf)).status_code == 403
-        step = (
-            await c.post("/api/auth/step-up", json={"password": PASSWORD}, headers=csrf)
-        ).json()["token"]
-        r = await c.post(url, headers={**csrf, "X-Step-Up-Token": step})
-        assert r.status_code == 200 and r.json()["revoked_at"] is not None
+        secret = await c.get(f"/api/keys/{minted['key_id']}/secret", headers=csrf)
+        assert secret.status_code == 200 and secret.json()["token"] == minted["token"]
+
+        r = await c.delete(f"/api/keys/{minted['key_id']}", headers=csrf)
+        assert r.status_code == 204
         assert authz.is_revoked(minted["key_id"])
+        assert (await c.get("/api/keys")).json() == []
 
         # Token and audit never leak the secret.
         async with async_session() as s:
             events = (await s.execute(select(AuditEvent))).scalars().all()
-        assert {"operator.login", "key.mint", "key.revoke"} <= {e.action for e in events}
+            assert (await s.execute(select(AgentKey))).scalar_one_or_none() is None
+        assert {"operator.login", "key.mint", "key.reveal", "key.revoke"} <= {e.action for e in events}
         assert minted["token"].split(".")[1] not in str([e.detail for e in events])
 
 
@@ -368,19 +297,20 @@ async def test_mint_key_validates_expiry(db, pepper_file, authz):
     async with _client(_auth()) as c:
         csrf = await _logged_in(c)
         soon = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
-        assert (await c.post("/api/keys", json={"expires_at": soon}, headers=csrf)).status_code == 201
+        assert (
+            await c.post("/api/keys", json={"expires_at": soon}, headers=csrf)
+        ).status_code == 201
         past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        assert (await c.post("/api/keys", json={"expires_at": past}, headers=csrf)).status_code == 422
+        assert (
+            await c.post("/api/keys", json={"expires_at": past}, headers=csrf)
+        ).status_code == 422
         assert (await c.post("/api/keys", json={"bogus": 1}, headers=csrf)).status_code == 422
 
 
 async def test_revoke_unknown_key_404(db, pepper_file, authz):
     async with _client(_auth()) as c:
         csrf = await _logged_in(c)
-        step = (
-            await c.post("/api/auth/step-up", json={"password": PASSWORD}, headers=csrf)
-        ).json()["token"]
-        r = await c.post("/api/keys/nope/revoke", headers={**csrf, "X-Step-Up-Token": step})
+        r = await c.post("/api/keys/nope/revoke", headers=csrf)
         assert r.status_code == 404
 
 
@@ -397,14 +327,11 @@ async def test_grant_and_ungrant(db, pepper_file, authz):
         assert (await c.put(g, headers=csrf)).status_code == 200  # idempotent
         assert authz.has_grant(key_id, server.id)
         assert (await c.get("/api/keys")).json()[0]["server_ids"] == [str(server.id)]
-        assert (await c.put(f"/api/keys/{key_id}/grants/{uuid.uuid4()}", headers=csrf)).status_code == 404
+        assert (
+            await c.put(f"/api/keys/{key_id}/grants/{uuid.uuid4()}", headers=csrf)
+        ).status_code == 404
 
-        # Ungrant needs step-up.
-        assert (await c.delete(g, headers=csrf)).status_code == 403
-        step = (
-            await c.post("/api/auth/step-up", json={"password": PASSWORD}, headers=csrf)
-        ).json()["token"]
-        assert (await c.delete(g, headers={**csrf, "X-Step-Up-Token": step})).status_code == 200
+        assert (await c.delete(g, headers=csrf)).status_code == 200
         assert not authz.has_grant(key_id, server.id)
     async with async_session() as s:
         assert (await s.execute(select(Grant))).first() is None

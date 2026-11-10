@@ -26,6 +26,9 @@ SERVER_SRC = textwrap.dedent(
             print(json.dumps({"jsonrpc": "2.0", "id": i, "result": {
                 "protocolVersion": msg["params"]["protocolVersion"], "capabilities": {},
                 "serverInfo": {"name": "t", "version": "1"}}}), flush=True)
+        elif m == "server/discover":
+            print(json.dumps({"jsonrpc": "2.0", "id": i,
+                              "error": {"code": -32601, "message": "Method not found"}}), flush=True)
         elif m == "notifications/initialized":
             inited = True
         elif m == "tools/call":

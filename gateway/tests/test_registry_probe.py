@@ -21,7 +21,7 @@ import httpx
 import pytest
 from portunus_gateway.db.models import AuditEvent, Server, VaultEntry
 from portunus_gateway.db.session import async_session
-from portunus_gateway.operator_api import create_app, require_operator, require_step_up
+from portunus_gateway.operator_api import create_app, require_operator
 from portunus_gateway.registry import Registry
 from portunus_gateway.runner_client import RunnerClient, RunnerRequestError
 from portunus_gateway.vault import Vault
@@ -43,7 +43,6 @@ def _app(registry: Registry, *, authed: bool = True):
     app = create_app(registry)
     if authed:
         app.dependency_overrides[require_operator] = lambda: "test-operator"
-        app.dependency_overrides[require_step_up] = lambda: "test-operator"
     return app
 
 
@@ -117,7 +116,7 @@ def _body(slug="fix", **over):
     return body
 
 
-async def test_probe_lists_tools_disabled(real):
+async def test_probe_lists_tools_enabled(real):
     client, _registry, srv = real
     r = await client.post("/api/servers", json=_body())
     assert r.status_code == 201
@@ -128,7 +127,7 @@ async def test_probe_lists_tools_disabled(real):
     assert pr.status_code == 200, pr.text
     tools = (await client.get(f"/api/servers/{sid}/tools")).json()
     assert {t["name"] for t in tools} == {"alpha", "beta"}
-    assert tools and all(t["enabled"] is False for t in tools)
+    assert tools and all(t["enabled"] is True for t in tools)
     assert all(t["schema_hash"] and isinstance(t["schema"], dict) for t in tools)
     assert pr.json()["added"] == 2
     # the probe child is gone and never became an invoke child
@@ -230,13 +229,23 @@ async def test_create_duplicate_slug_conflicts_and_slug_casefolds(real):
     assert r.status_code == 409
 
 
-async def test_create_remote_not_supported_yet(real):
+async def test_create_remote_server(real):
     client, _registry, _srv = real
     r = await client.post(
-        "/api/servers", json={"name": "r", "slug": "r", "kind": "remote", "url": "https://x.test"}
+        "/api/servers",
+        json={
+            "name": "Remote",
+            "slug": "remote-demo",
+            "kind": "remote",
+            "url": "https://mcp.example.com/mcp",
+            "env": {"Authorization": "Bearer paste-me"},
+        },
     )
-    assert r.status_code == 400
-    assert r.json()["code"] == "unsupported"
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["kind"] == "remote" and body["url"] == "https://mcp.example.com/mcp"
+    assert body["has_auth"] is True and body["enabled"] is False
+    assert "Authorization" in body["env_names"]
 
 
 async def test_create_bad_slug(real):
@@ -248,34 +257,24 @@ async def test_create_bad_slug(real):
 # ---- enable ---------------------------------------------------------------------------
 
 
-async def test_enable_server_and_tool(real):
+async def test_enable_server(real):
     client, _registry, _srv = real
     sid = (await client.post("/api/servers", json=_body())).json()["id"]
     await client.post(f"/api/servers/{sid}/probe")
-    tools = (await client.get(f"/api/servers/{sid}/tools")).json()
-    alpha = next(t for t in tools if t["name"] == "alpha")
 
     er = await client.post(f"/api/servers/{sid}/enable")
     assert er.status_code == 200 and er.json()["enabled"] is True
-    tr = await client.post(f"/api/tools/{alpha['id']}/enable")
-    assert tr.status_code == 200 and tr.json()["enabled"] is True
-
     tools = {t["name"]: t["enabled"] for t in (await client.get(f"/api/servers/{sid}/tools")).json()}
-    assert tools == {"alpha": True, "beta": False}  # other tools stay disabled
+    assert tools == {"alpha": True, "beta": True}
 
 
-async def test_disable_server_and_tool(real):
+async def test_disable_server(real):
     client, _registry, _srv = real
     sid = (await client.post("/api/servers", json=_body())).json()["id"]
     await client.post(f"/api/servers/{sid}/probe")
-    tid = (await client.get(f"/api/servers/{sid}/tools")).json()[0]["id"]
     await client.post(f"/api/servers/{sid}/enable")
-    await client.post(f"/api/tools/{tid}/enable")
     assert (
         await client.post(f"/api/servers/{sid}/enable", json={"enabled": False})
-    ).json()["enabled"] is False
-    assert (
-        await client.post(f"/api/tools/{tid}/enable", json={"enabled": False})
     ).json()["enabled"] is False
 
 
@@ -284,7 +283,6 @@ async def test_unknown_ids_404(real):
     missing = uuid.uuid4()
     assert (await client.post(f"/api/servers/{missing}/probe")).status_code == 404
     assert (await client.post(f"/api/servers/{missing}/enable")).status_code == 404
-    assert (await client.post(f"/api/tools/{missing}/enable")).status_code == 404
     assert (await client.get(f"/api/servers/{missing}/tools")).status_code == 404
     assert (await client.post("/api/servers/not-a-uuid/probe")).status_code == 422
 
@@ -312,7 +310,6 @@ async def test_operator_auth_stub_denies_by_default(real):
             ("post", "/api/servers"),
             ("post", f"/api/servers/{uuid.uuid4()}/probe"),
             ("post", f"/api/servers/{uuid.uuid4()}/enable"),
-            ("post", f"/api/tools/{uuid.uuid4()}/enable"),
             ("get", f"/api/servers/{uuid.uuid4()}/tools"),
             ("get", "/api/servers"),
         ]:
@@ -392,13 +389,11 @@ async def test_probe_request_shape(scripted):
     assert "child_id" not in call  # ephemeral probe, never an invoke child
 
 
-async def test_reprobe_keeps_enabled_and_disables_changed_schema(scripted):
+async def test_reprobe_keeps_all_tools_enabled(scripted):
     client, _registry, runner = scripted
     sid = await _mk(client)
     await client.post(f"/api/servers/{sid}/probe")
     by_name = {t["name"]: t for t in (await client.get(f"/api/servers/{sid}/tools")).json()}
-    for t in by_name.values():
-        await client.post(f"/api/tools/{t['id']}/enable")
 
     # beta unchanged, alpha schema changed, gamma new, nothing else missing
     runner.tools = [
@@ -413,10 +408,10 @@ async def test_reprobe_keeps_enabled_and_disables_changed_schema(scripted):
     assert r.json()["missing"] == []
 
     now = {t["name"]: t for t in (await client.get(f"/api/servers/{sid}/tools")).json()}
-    assert now["beta"]["enabled"] is True  # unchanged -> still enabled
-    assert now["alpha"]["enabled"] is False  # schema drift -> must be re-approved
+    assert now["beta"]["enabled"] is True
+    assert now["alpha"]["enabled"] is True
     assert now["alpha"]["schema_hash"] != by_name["alpha"]["schema_hash"]
-    assert now["gamma"]["enabled"] is False  # new tools stay disabled
+    assert now["gamma"]["enabled"] is True
     assert now["alpha"]["id"] == by_name["alpha"]["id"]  # same row
 
     runner.tools = [_tool("beta")]

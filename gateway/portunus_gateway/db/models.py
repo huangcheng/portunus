@@ -18,6 +18,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     false,
+    true,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, validates
 
@@ -71,6 +72,8 @@ class Server(Base):
     command: Mapped[str | None] = mapped_column(String(1024))  # stdio
     args: Mapped[list[str] | None] = mapped_column(JSON)  # stdio argv (literals)
     url: Mapped[str | None] = mapped_column(String(2048))  # remote
+    # Operator OAuth config for remotes (authorize/token/client_id/scopes). Secrets stay in vault.
+    oauth: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Soft scheduling affinity: runner regions to try first. Empty = any live runner.
     preferred_regions: Mapped[list[str]] = mapped_column(
         JSON, default=list, server_default="[]"
@@ -94,7 +97,7 @@ class Tool(Base):
     description: Mapped[str | None] = mapped_column(Text)
     schema: Mapped[dict[str, Any]] = mapped_column(JSON)
     schema_hash: Mapped[str] = mapped_column(String(128))
-    enabled: Mapped[bool] = mapped_column(default=False, server_default=false())
+    enabled: Mapped[bool] = mapped_column(default=True, server_default=true())
     created_at: Mapped[datetime] = _created_at()
 
 
@@ -113,7 +116,11 @@ class VaultEntry(Base):
 
 
 class AgentKey(Base):
-    """Agent credential ``pm-<key_id>.<secret>``; only HMAC digest of secret is stored."""
+    """Agent credential ``pm-<key_id>.<secret>``.
+
+    ``digest`` is the HMAC of the secret (auth path). ``secret_ciphertext`` holds the vault-sealed
+    full token for operator reveal. Soft-revoke rows are purged; delete removes the key entirely.
+    """
 
     __tablename__ = "agent_keys"
 
@@ -121,11 +128,13 @@ class AgentKey(Base):
     key_id: Mapped[str] = mapped_column(String(64), unique=True)
     digest: Mapped[bytes] = mapped_column(LargeBinary(32))
     label: Mapped[str | None] = mapped_column(String(200))
-    # Bumped on revoke; in-flight state tagged with an older generation is invalid.
+    # Legacy soft-revoke column; new deletes remove the row. Kept for in-flight/migration.
     generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # NULL = never expires. SQLite returns naive values on read; treat naive as UTC.
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    secret_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)  # nonce || ct+tag
+    secret_key_version: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = _created_at()
 
 

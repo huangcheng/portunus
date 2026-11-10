@@ -80,7 +80,7 @@ async def test_reload_bumps_generation_when_state_changes(pepper_file, db):
     assert st.generation > g0
 
 
-async def test_revoke_bumps_generation_has_grant_readable_verify_fails(pepper_file, authz):
+async def test_revoke_deletes_grants_marks_revoked_verify_fails(pepper_file, authz):
     token, row = await mint_agent_key(expires_at=None)
     sid = await _server()
     await _grant(row.key_id, sid)
@@ -92,19 +92,22 @@ async def test_revoke_bumps_generation_has_grant_readable_verify_fails(pepper_fi
 
     assert authz.generation > before
     assert authz.is_revoked(row.key_id)
-    # Grants stay readable (callers must consult is_revoked / verify); they are not silently dropped.
-    assert authz.has_grant(row.key_id, sid)
+    # Hard delete cascades grants; reload drops them from the snapshot.
+    assert not authz.has_grant(row.key_id, sid)
     with pytest.raises(AuthError) as e:
         await verify_agent_token(token)
-    assert e.value.code == "revoked"
+    assert e.value.code == "unauthorized"
 
 
-async def test_revoked_state_survives_reload(pepper_file, authz):
+async def test_revoked_state_survives_reload_in_process(pepper_file, authz):
     _, row = await mint_agent_key(expires_at=None)
     await revoke_key(row.key_id)
+    await authz.reload_from_db()
+    assert authz.is_revoked(row.key_id)
+    # A fresh process has no DB soft-revoke row after hard delete.
     fresh = AuthzStore()
     await fresh.reload_from_db()
-    assert fresh.is_revoked(row.key_id)
+    assert not fresh.is_revoked(row.key_id)
 
 
 async def test_reload_never_unrevokes_in_memory_state(pepper_file, db):
@@ -116,11 +119,12 @@ async def test_reload_never_unrevokes_in_memory_state(pepper_file, db):
     assert st.is_revoked(row.key_id)
 
 
-async def test_revoke_idempotent_does_not_bump_again(pepper_file, authz):
+async def test_revoke_second_call_raises(pepper_file, authz):
     _, row = await mint_agent_key(expires_at=None)
     await revoke_key(row.key_id)
     g = authz.generation
-    await revoke_key(row.key_id)
+    with pytest.raises(AuthError):
+        await revoke_key(row.key_id)
     assert authz.generation == g
 
 
@@ -193,3 +197,18 @@ async def test_interleaved_grant_and_ungrant_reloads_converge(pepper_file, db):
 
 def test_module_singleton_exists():
     assert isinstance(authz_mod.authz_store, AuthzStore)
+
+
+async def test_ensure_full_grants_meshes_all_keys_and_servers(pepper_file, db):
+    _, a = await mint_agent_key(expires_at=None)
+    _, b = await mint_agent_key(expires_at=None)
+    s1, s2 = await _server("one"), await _server("two")
+    await _grant(a.key_id, s1)  # partial mesh already present
+
+    added = await authz_mod.ensure_full_grants()
+    assert added == 3  # a→s2, b→s1, b→s2
+    assert await authz_mod.ensure_full_grants() == 0  # idempotent
+
+    st = authz_mod.authz_store
+    for kid in (a.key_id, b.key_id):
+        assert st.has_grant(kid, s1) and st.has_grant(kid, s2)

@@ -394,7 +394,7 @@ async def test_omni_rpc_goes_to_the_slots_site(pool, manager, site_a, site_b, au
     )
     sid = uuid.uuid4()
     grant(authz, "k1", sid)
-    server = SimpleNamespace(id=sid, enabled=True)
+    server = SimpleNamespace(id=sid, enabled=True, kind="stdio")
     tool = SimpleNamespace(upstream_name="alpha")
     other = uuid.uuid4()  # load site A so the scheduler sends the invoke child to B
     grant(authz, "k1", other)

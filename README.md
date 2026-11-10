@@ -80,14 +80,12 @@ PORTUNUS_URL=http://localhost:8080 PORTUNUS_OPERATOR_PASSWORD=... E2E_COMMAND=/a
 ## Using it
 
 1. Open `http://localhost:8080`, log in with the operator password.
-2. **Servers:** register an stdio server (`npx` + `--ignore-scripts pkg@1.2.3`, `uvx` + `pkg==1.2.3`,
-   or an allowlisted absolute path), put secrets in `env` (stored encrypted, never returned),
-   **Probe** it, then enable the tools you approve and the server itself (re-enter your password:
-   sensitive actions need step-up).
+2. **Servers:** register an stdio or remote server, put secrets in `env` / vault headers (encrypted, never
+   returned), **Probe** it, then enable the server. Probed tools are available immediately.
 3. **Keys:** mint an agent key (shown once), grant it servers.
 4. Point the agent at `http://HOST:8080/mcp` with `Authorization: Bearer pm-...`. The agent sees four
    tools: `portunus_discover_servers`, `portunus_discover_tools`, `portunus_get_tool_schema`,
-   `portunus_invoke_tool`. Newly probed tools are **disabled** until you enable them.
+   `portunus_invoke_tool`.
 
 ## Environment variables
 
@@ -130,16 +128,13 @@ the children keep none.
 
 ## Limitations
 
-- The e2e script and compose cover **stdio** servers. The remote-MCP proxy module
-  (`gateway/portunus_gateway/remote.py`, with its SSRF controls) is not yet wired into the registry
-  or Omni; `remote` servers are refused at invoke time with `unsupported`.
 - Dev mode (and the default compose stack) does not enforce the child privilege drop.
 - Single gateway worker. Multiple runners are optional and local-socket only (see Fleet below); there is no
-  remote/TLS runner transport yet.
-- **v1 ships the stdio Omni path only.** `remote.py` exists and is tested in isolation but is not wired
-  into the `Registry` or Omni; `remote` servers cannot be invoked in v1.
+  native remote/TLS runner transport yet (SSH tunnels are an ops choice).
+- Remote MCP OAuth is operator-driven code+PKCE with explicit authorize/token URLs (no Dynamic Client
+  Registration / protected-resource metadata discovery yet). Paste-token always works.
 
-Known follow-ups (documented gaps, not implemented in v1):
+Known follow-ups (documented gaps):
 
 - Vault key rotation endpoint (re-seal under the newest key version); rotate by editing `PORTUNUS_SECRETS_KEY`
   keyring and re-saving each server's env manually.
@@ -147,8 +142,8 @@ Known follow-ups (documented gaps, not implemented in v1):
   disabled, or the runner/gateway restarts.
 - Cancel-operation API/tool for in-flight invocations.
 - 30-day audit log retention/pruning: audit rows are kept indefinitely.
-- Remote MCP OAuth/PKCE (and wiring the remote proxy in, see above).
 - Remote (TLS) runner links and automatic re-homing of children off a dead site.
+- MCP OAuth discovery (RFC 9728) and refresh-token rotation.
 
 ## Fleet (optional)
 

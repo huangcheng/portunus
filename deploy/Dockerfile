@@ -33,7 +33,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 # Install uv via pip (avoids ghcr.io, which is slow/unreliable on some networks).
 ARG PIP_INDEX
-RUN pip install --no-cache-dir ${PIP_INDEX:+-i ${PIP_INDEX}} uv \
+RUN pip install --no-cache-dir ${PIP_INDEX:+-i ${PIP_INDEX}} "uv==0.9.30" \
     && ln -sf /usr/local/bin/uv /usr/local/bin/uvx
 
 ARG WITH_POSTGRES=0

@@ -1,9 +1,8 @@
 """Operator REST API: servers and tools (spec §8 dashboard back end).
 
 Authentication lives in :mod:`operator_auth`. ``require_operator`` (session cookie + CSRF on
-mutations) and ``require_step_up`` (extra ``X-Step-Up-Token`` for sensitive actions) fail closed
-when no :class:`OperatorAuth` is attached to the app. Tests may replace either through
-``app.dependency_overrides``. Both yield the operator identity recorded in the audit log.
+mutations) fails closed when no :class:`OperatorAuth` is attached to the app. Tests may
+replace it through ``app.dependency_overrides``. Yields the operator identity for the audit log.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select
 
@@ -23,11 +22,10 @@ from .db.models import AgentKey, AuditEvent, Grant, Server
 from .operator_auth import (
     OPERATOR,
     SESSION_COOKIE,
-    STEP_UP_HEADER,
-    STEP_UP_TTL_SECONDS,
     CsrfError,
     OperatorAuth,
 )
+from .oauth import OAuthError, OAuthStore, exchange_code
 from .registry import Registry, RegistryError
 
 SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
@@ -53,15 +51,6 @@ async def require_operator(request: Request) -> str:
     return OPERATOR
 
 
-async def require_step_up(request: Request, actor: str = Depends(require_operator)) -> str:
-    """``require_operator`` plus a live step-up token bound to this session."""
-    auth = _auth(request)
-    if not auth.verify_step_up(
-        request.state.operator_session_id, request.headers.get(STEP_UP_HEADER)
-    ):
-        raise RegistryError(403, "step_up_required", "re-enter your password to continue")
-    return actor
-
 
 def get_registry(request: Request) -> Registry:
     return request.app.state.registry
@@ -78,18 +67,34 @@ class CreateServer(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     url: str | None = Field(default=None, max_length=2048)
     preferred_regions: list[str] = Field(default_factory=list)
+    oauth: dict[str, Any] | None = None
+    oauth_client_secret: str | None = Field(default=None, max_length=4096)
 
 
 class UpdateServer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    preferred_regions: list[str]
+    preferred_regions: list[str] | None = None
+    oauth: dict[str, Any] | None = None
+    oauth_client_secret: str | None = Field(default=None, max_length=4096)
 
 
 class EnableBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
+
+
+class BearerTokenBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=1, max_length=8192)
+
+
+class OAuthStartBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    redirect_uri: str = Field(min_length=1, max_length=2048)
 
 
 router = APIRouter(prefix="/api")
@@ -101,7 +106,7 @@ async def create_server(
     actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
-    return await registry.create_server(
+    view = await registry.create_server(
         name=body.name,
         slug=body.slug,
         kind=body.kind,
@@ -110,7 +115,12 @@ async def create_server(
         env=body.env,
         actor=actor,
         preferred_regions=body.preferred_regions,
+        url=body.url,
+        oauth=body.oauth,
+        oauth_client_secret=body.oauth_client_secret,
     )
+    await authz.ensure_full_grants()
+    return view
 
 
 @router.patch("/servers/{server_id}")
@@ -121,7 +131,11 @@ async def update_server(
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     return await registry.update_server(
-        server_id, preferred_regions=body.preferred_regions, actor=actor
+        server_id,
+        actor=actor,
+        preferred_regions=body.preferred_regions,
+        oauth=body.oauth,
+        oauth_client_secret=body.oauth_client_secret,
     )
 
 
@@ -151,24 +165,82 @@ async def probe_server(
     return await registry.probe(server_id, actor)
 
 
+@router.post("/servers/{server_id}/auth/token")
+async def set_server_token(
+    server_id: uuid.UUID,
+    body: BearerTokenBody,
+    actor: str = Depends(require_operator),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    """Paste a bearer token (or full ``Authorization`` value) into the vault."""
+    return await registry.set_bearer_token(server_id, body.token, actor)
+
+
+@router.post("/servers/{server_id}/oauth/start")
+async def oauth_start(
+    request: Request,
+    server_id: uuid.UUID,
+    body: OAuthStartBody,
+    actor: str = Depends(require_operator),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    """Begin OAuth code+PKCE; returns the authorize URL the operator should open."""
+    cfg = await registry.remote_oauth_config(server_id)
+    store: OAuthStore = request.app.state.oauth
+    started = store.start(
+        server_id=server_id,
+        authorize_url=cfg["authorize_url"],
+        token_url=cfg["token_url"],
+        client_id=cfg["client_id"],
+        scopes=list(cfg.get("scopes") or []),
+        redirect_uri=body.redirect_uri.strip(),
+    )
+    await _audit(registry, actor, "server.oauth_start", str(server_id), {})
+    return started
+
+
+@router.get("/oauth/callback")
+async def oauth_callback(
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+) -> Response:
+    """Browser redirect target after the upstream IdP; stores the token then closes the window."""
+    registry: Registry = request.app.state.registry
+    store: OAuthStore = request.app.state.oauth
+    if error:
+        return HTMLResponse(
+            f"<html><body><p>OAuth error: {error}</p><script>window.close()</script></body></html>",
+            status_code=400,
+        )
+    try:
+        pending = store.pop(state)
+        secret = await registry.read_oauth_client_secret(pending.server_id)
+        authorization = await exchange_code(pending, code, client_secret=secret)
+        await registry.store_authorization_header(
+            pending.server_id, authorization, actor="oauth-callback"
+        )
+    except (RegistryError, OAuthError) as e:
+        return HTMLResponse(
+            f"<html><body><p>{e.message or e.code}</p><script>window.close()</script></body></html>",
+            status_code=e.status,
+        )
+    return HTMLResponse(
+        "<html><body><p>Connected. You can close this window.</p>"
+        "<script>window.opener&&window.opener.postMessage({portunusOauth:'ok'},'*');"
+        "window.close()</script></body></html>"
+    )
+
+
 @router.post("/servers/{server_id}/enable")
 async def enable_server(
     server_id: uuid.UUID,
     body: EnableBody | None = None,
-    actor: str = Depends(require_step_up),
+    actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     return await registry.set_server_enabled(server_id, (body or EnableBody()).enabled, actor)
-
-
-@router.post("/tools/{tool_id}/enable")
-async def enable_tool(
-    tool_id: uuid.UUID,
-    body: EnableBody | None = None,
-    actor: str = Depends(require_step_up),
-    registry: Registry = Depends(get_registry),
-) -> dict[str, Any]:
-    return await registry.set_tool_enabled(tool_id, (body or EnableBody()).enabled, actor)
 
 
 # ---- auth routes ------------------------------------------------------------------------
@@ -228,19 +300,6 @@ async def logout(request: Request, actor: str = Depends(require_operator)) -> Re
     return out
 
 
-@router.post("/auth/step-up")
-async def step_up(body: PasswordBody, request: Request, actor: str = Depends(require_operator)):
-    auth = _auth(request)
-    ok, retry_after = await auth.check_password(auth.client_ip(request), body.password)
-    if retry_after:
-        return _locked(retry_after)
-    if not ok:
-        raise RegistryError(403, "invalid_password", "invalid password")
-    token = auth.issue_step_up(request.state.operator_session_id)
-    await auth.audit(actor, "operator.step_up")
-    return {"token": token, "expires_in": STEP_UP_TTL_SECONDS}
-
-
 # ---- agent keys + grants ----------------------------------------------------------------
 
 
@@ -266,6 +325,7 @@ def _key_view(row: AgentKey, server_ids: list[uuid.UUID]) -> dict[str, Any]:
         "created_at": _iso(row.created_at),
         "expires_at": _iso(row.expires_at),
         "revoked_at": _iso(row.revoked_at),
+        "has_secret": row.secret_ciphertext is not None and row.secret_key_version is not None,
         "server_ids": sorted(str(s) for s in server_ids),
     }
 
@@ -293,10 +353,13 @@ async def mint_key(
 ) -> dict[str, Any]:
     if body.expires_at is not None and _utc(body.expires_at) <= datetime.now(timezone.utc):
         raise RegistryError(422, "invalid_request", "expires_at must be in the future")
-    token, row = await keys.mint_agent_key(expires_at=body.expires_at, label=body.label)
+    token, row = await keys.mint_agent_key(
+        expires_at=body.expires_at, label=body.label, vault=registry.vault
+    )
+    await authz.ensure_full_grants()
     await _audit(registry, actor, "key.mint", row.key_id, {"label": body.label})
-    # The only time the full token is ever returned.
-    return {**_key_view(row, []), "token": token}
+    view = await _key_row_view(registry, row.key_id)
+    return {**view, "token": token}
 
 
 @router.get("/keys")
@@ -305,19 +368,40 @@ async def list_keys(
     registry: Registry = Depends(get_registry),
 ) -> list[dict[str, Any]]:
     async with registry.session_factory() as s:
-        rows = (await s.execute(select(AgentKey).order_by(AgentKey.created_at))).scalars().all()
+        rows = (
+            await s.execute(
+                select(AgentKey)
+                .where(AgentKey.revoked_at.is_(None))
+                .order_by(AgentKey.created_at)
+            )
+        ).scalars().all()
         grants: dict[str, list[uuid.UUID]] = {}
         for key_id, server_id in await s.execute(select(Grant.key_id, Grant.server_id)):
             grants.setdefault(key_id, []).append(server_id)
     return [_key_view(r, grants.get(r.key_id, [])) for r in rows]
 
 
-@router.post("/keys/{key_id}/revoke")
+@router.get("/keys/{key_id}/secret")
+async def reveal_key_secret(
+    key_id: str,
+    actor: str = Depends(require_operator),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, str]:
+    try:
+        token = await keys.reveal_agent_token(key_id, registry.vault)
+    except keys.AuthError:
+        raise RegistryError(404, "not_found", "key not found") from None
+    await _audit(registry, actor, "key.reveal", key_id, {})
+    return {"token": token}
+
+
+@router.post("/keys/{key_id}/revoke", status_code=204)
+@router.delete("/keys/{key_id}", status_code=204)
 async def revoke_key(
     key_id: str,
-    actor: str = Depends(require_step_up),
+    actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
-) -> dict[str, Any]:
+) -> None:
     try:
         await keys.revoke_key(key_id)
     except keys.AuthError:
@@ -325,7 +409,6 @@ async def revoke_key(
     if registry.slots is not None:
         registry.slots.revoke_key(key_id)  # children -> pending_stop
     await _audit(registry, actor, "key.revoke", key_id, {})
-    return await _key_row_view(registry, key_id)
 
 
 @router.put("/keys/{key_id}/grants/{server_id}")
@@ -354,7 +437,7 @@ async def grant_server(
 async def ungrant_server(
     key_id: str,
     server_id: uuid.UUID,
-    actor: str = Depends(require_step_up),
+    actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     async with registry.session_factory() as s:
@@ -371,6 +454,7 @@ def create_app(registry: Registry, auth: OperatorAuth | None = None) -> FastAPI:
     app = FastAPI(title="Portunus gateway", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.registry = registry
     app.state.auth = auth
+    app.state.oauth = OAuthStore()
     app.include_router(router)
 
     @app.exception_handler(RegistryError)

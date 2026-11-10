@@ -11,7 +11,7 @@ Never commit:
 
 - `.env`, `.env.*` (except a placeholder `.env.example` with fake values)
 - `secrets/`, pepper files, runner tokens, vault keyrings
-- Operator passwords, agent keys (`pm-…`), session cookies, step-up tokens
+- Operator passwords, agent keys (`pm-…`), session cookies
 - Private hostnames, inventory, deploy runbooks, or personal automation that names real accounts
 - CI secrets, cloud credentials, or TLS private keys
 

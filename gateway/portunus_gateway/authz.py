@@ -19,8 +19,41 @@ import uuid
 
 from sqlalchemy import select
 
-from portunus_gateway.db.models import AgentKey, Grant
+from portunus_gateway.db.models import AgentKey, Grant, Server
 from portunus_gateway.db.session import async_session
+
+
+async def ensure_full_grants() -> int:
+    """Grant every active key every server (single-operator default).
+
+    Returns the number of grant rows inserted. Reloads the in-memory authz snapshot when
+    anything was added.
+    """
+    async with async_session() as session:
+        key_ids = list(
+            (
+                await session.execute(select(AgentKey.key_id).where(AgentKey.revoked_at.is_(None)))
+            ).scalars()
+        )
+        server_ids = list((await session.execute(select(Server.id))).scalars())
+        existing = {
+            (k, sid)
+            for k, sid in (await session.execute(select(Grant.key_id, Grant.server_id))).all()
+        }
+        added = 0
+        for key_id in key_ids:
+            for server_id in server_ids:
+                if (key_id, server_id) in existing:
+                    continue
+                session.add(Grant(key_id=key_id, server_id=server_id))
+                added += 1
+        if added:
+            await session.commit()
+        else:
+            await session.rollback()
+    if added:
+        await authz_store.reload_from_db()
+    return added
 
 
 class AuthzStore:

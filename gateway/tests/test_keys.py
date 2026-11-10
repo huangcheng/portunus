@@ -28,7 +28,7 @@ async def test_mint_and_verify(pepper_file, db):
     assert (await verify_agent_token(token)).key_id == row.key_id
 
 
-async def test_only_digest_is_stored(pepper_file, db):
+async def test_only_digest_is_stored_without_vault(pepper_file, db):
     token, row = await mint_agent_key(expires_at=None)
     secret = token.split(".")[1]
     async with async_session() as s:
@@ -36,6 +36,20 @@ async def test_only_digest_is_stored(pepper_file, db):
     assert len(stored.digest) == 32
     assert secret.encode() not in stored.digest and stored.digest != base64.urlsafe_b64decode(secret + "=")
     assert row.key_id == stored.key_id
+    assert stored.secret_ciphertext is None
+
+
+async def test_vault_seals_recoverable_secret(pepper_file, db):
+    import os
+
+    from portunus_gateway.keys import reveal_agent_token
+    from portunus_gateway.vault import Vault
+
+    vault = Vault({1: os.urandom(32)})
+    token, row = await mint_agent_key(expires_at=None, vault=vault)
+    assert row.secret_ciphertext and row.secret_key_version == 1
+    assert token.encode() not in row.secret_ciphertext
+    assert await reveal_agent_token(row.key_id, vault) == token
 
 
 async def test_tokens_are_unique(pepper_file, db):
@@ -48,31 +62,23 @@ async def test_label_is_stored(pepper_file, db):
     assert row.label == "ci-bot"
 
 
-async def test_revoke_fails_verify(pepper_file, db):
+async def test_revoke_deletes_row_and_fails_verify(pepper_file, db, authz):
     token, row = await mint_agent_key(expires_at=None)
     await revoke_key(row.key_id)
+    async with async_session() as s:
+        assert (await s.execute(select(AgentKey))).scalar_one_or_none() is None
+    assert authz.is_revoked(row.key_id)
     with pytest.raises(AuthError) as e:
         await verify_agent_token(token)
-    assert e.value.code == "revoked"
+    assert e.value.code == "unauthorized"
 
 
-async def test_revoke_sets_revoked_at_and_bumps_row_generation(pepper_file, db):
+async def test_revoke_second_time_raises(pepper_file, db, authz):
     _, row = await mint_agent_key(expires_at=None)
     await revoke_key(row.key_id)
-    async with async_session() as s:
-        stored = (await s.execute(select(AgentKey))).scalar_one()
-    assert stored.revoked_at is not None and stored.generation == row.generation + 1
-
-
-async def test_revoke_is_idempotent_and_keeps_first_timestamp(pepper_file, db):
-    _, row = await mint_agent_key(expires_at=None)
-    await revoke_key(row.key_id)
-    async with async_session() as s:
-        first = (await s.execute(select(AgentKey))).scalar_one()
-    await revoke_key(row.key_id)
-    async with async_session() as s:
-        second = (await s.execute(select(AgentKey))).scalar_one()
-    assert second.revoked_at == first.revoked_at and second.generation == first.generation
+    with pytest.raises(AuthError) as e:
+        await revoke_key(row.key_id)
+    assert e.value.code == "unauthorized"
 
 
 async def test_revoke_unknown_key_raises(pepper_file, db):
@@ -119,7 +125,7 @@ async def test_wrong_secret_is_unauthorized(pepper_file, db):
     assert e.value.code == "unauthorized"
 
 
-async def test_wrong_secret_on_revoked_key_does_not_leak_revocation(pepper_file, db):
+async def test_wrong_secret_on_deleted_key_is_unauthorized(pepper_file, db, authz):
     token, row = await mint_agent_key(expires_at=None)
     await revoke_key(row.key_id)
     forged = token[:-1] + ("A" if token[-1] != "A" else "B")
@@ -173,12 +179,12 @@ async def test_expiry_read_back_naive_from_sqlite_still_compares(pepper_file, db
     assert stored.expires_at is not None
 
 
-async def test_revoked_beats_expired(pepper_file, db):
+async def test_deleted_key_is_unauthorized_even_if_expired(pepper_file, db, authz):
     token, row = await mint_agent_key(expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
     await revoke_key(row.key_id)
     with pytest.raises(AuthError) as e:
         await verify_agent_token(token)
-    assert e.value.code == "revoked"
+    assert e.value.code == "unauthorized"
 
 
 def test_auth_error_is_portunus_error():

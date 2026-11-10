@@ -30,6 +30,8 @@ pepper
 # Compose-local material
 secrets/
 deploy/runner-policy.json
+# Host-only gateway compose (SWR build-args + tunnel mounts); not in repo.
+docker-compose.gateway.yml
 
 # Local ops / personal automation (never commit)
 inventory/

@@ -314,8 +314,69 @@ async def test_session_flow_initialize_initialized_call_delete():
     out = await c.call_tool("alpha", {"q": "hi"})
     assert json.loads(out["content"][0]["text"]) == {"name": "alpha", "arguments": {"q": "hi"}}
     methods = [json.loads(r.content).get("method") if r.content else r.method for r in seen]
-    assert methods == ["initialize", "notifications/initialized", "tools/call", "DELETE"]
-    assert seen[2].headers["mcp-session-id"] == "sess-1"
+    # Auto-negotiate probes server/discover, then falls back to the handshake session.
+    assert methods == [
+        "server/discover",
+        "initialize",
+        "notifications/initialized",
+        "tools/call",
+        "DELETE",
+    ]
+    assert seen[3].headers["mcp-session-id"] == "sess-1"
+
+
+async def test_modern_2026_discover_skips_handshake():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "DELETE":
+            return httpx.Response(200)
+        msg = json.loads(request.content)
+        mid, method = msg.get("id"), msg.get("method")
+        if mid is None:
+            return httpx.Response(202)
+        if method == "server/discover":
+            assert request.headers["mcp-protocol-version"] == "2026-07-28"
+            assert request.headers["mcp-method"] == "server/discover"
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": mid,
+                    "result": {
+                        "supportedVersions": ["2026-07-28"],
+                        "capabilities": {"tools": {}},
+                        "resultType": "complete",
+                    },
+                },
+            )
+        if method == "tools/call":
+            assert request.headers["mcp-protocol-version"] == "2026-07-28"
+            assert request.headers["mcp-method"] == "tools/call"
+            assert request.headers["mcp-name"] == "alpha"
+            assert "mcp-session-id" not in request.headers
+            meta = (msg.get("params") or {}).get("_meta") or {}
+            assert meta.get("io.modelcontextprotocol/protocolVersion") == "2026-07-28"
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": mid,
+                    "result": {
+                        "content": [{"type": "text", "text": "ok"}],
+                        "resultType": "complete",
+                    },
+                },
+            )
+        return httpx.Response(
+            200, json={"jsonrpc": "2.0", "id": mid, "error": {"code": -32601}}
+        )
+
+    out = await client("https://mcp.example.com/mcp", handler=handler).call_tool("alpha", {})
+    assert out["content"][0]["text"] == "ok"
+    methods = [json.loads(r.content).get("method") for r in seen if r.content]
+    assert methods == ["server/discover", "tools/call"]
 
 
 async def test_list_tools_follows_pagination():
@@ -327,6 +388,10 @@ async def test_list_tools_follows_pagination():
         msg = json.loads(request.content)
         if msg.get("id") is None:
             return httpx.Response(202)
+        if msg["method"] == "server/discover":
+            return httpx.Response(
+                200, json={"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601}}
+            )
         if msg["method"] == "initialize":
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": msg["id"], "result": {}})
         cur = (msg.get("params") or {}).get("cursor")
@@ -345,6 +410,12 @@ async def test_sse_response_is_parsed():
         msg = json.loads(request.content)
         if msg.get("id") is None:
             return httpx.Response(202)
+        if msg["method"] == "server/discover":
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                json={"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601}},
+            )
         result = {} if msg["method"] == "initialize" else {"tools": TOOLS}
         note = {"jsonrpc": "2.0", "method": "notifications/message", "params": {}}
         body = (
@@ -577,14 +648,21 @@ async def loopback_mcp_server(seen_headers: list[dict[str, str]]):
                 if mid is None:
                     status = "202 Accepted"
                 else:
-                    if msg["method"] == "initialize":
-                        result: dict = {"protocolVersion": "2025-03-26"}
-                        extra = "Mcp-Session-Id: loop-1\r\n"
-                    elif msg["method"] == "tools/list":
-                        result = {"tools": TOOLS}
+                    if msg["method"] == "server/discover":
+                        payload = json.dumps(
+                            {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601}}
+                        ).encode()
                     else:
-                        result = {"content": [{"type": "text", "text": "pong"}]}
-                    payload = json.dumps({"jsonrpc": "2.0", "id": mid, "result": result}).encode()
+                        if msg["method"] == "initialize":
+                            result: dict = {"protocolVersion": "2025-03-26"}
+                            extra = "Mcp-Session-Id: loop-1\r\n"
+                        elif msg["method"] == "tools/list":
+                            result = {"tools": TOOLS}
+                        else:
+                            result = {"content": [{"type": "text", "text": "pong"}]}
+                        payload = json.dumps(
+                            {"jsonrpc": "2.0", "id": mid, "result": result}
+                        ).encode()
             writer.write(
                 f"HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra}"
                 f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()

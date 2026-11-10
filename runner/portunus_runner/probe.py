@@ -4,7 +4,8 @@ A probe is dashboard/scheduler-only: the child lives in the ``probe`` namespace 
 child table, the invoke singleton and the per-key/global caps -- and is always killed and reaped
 when the probe ends (result, error, timeout, cancellation or session loss).
 
-Transport is the MCP stdio framing: one JSON-RPC message per line.
+Transport is the MCP stdio framing: one JSON-RPC message per line. Prefers MCP ``2026-07-28``
+(``server/discover``) and falls back to the initialize handshake for older servers.
 """
 
 from __future__ import annotations
@@ -15,7 +16,10 @@ from typing import Any
 
 from portunus_shared import PortunusError
 
-PROTOCOL_VERSION = "2025-06-18"
+MODERN_PROTOCOL_VERSION = "2026-07-28"
+HANDSHAKE_PROTOCOL_VERSION = "2025-11-25"
+PROTOCOL_VERSION = HANDSHAKE_PROTOCOL_VERSION  # legacy alias
+CLIENT_INFO = {"name": "portunus-probe", "version": "1"}
 MAX_PAGES = 50
 MAX_TOOLS = 2000
 MAX_RESULT_BYTES = 4 * 1024 * 1024  # stays under the 5MiB wire frame with envelope room
@@ -25,12 +29,30 @@ def _crash(message: str) -> PortunusError:
     return PortunusError("upstream_crash", message)
 
 
+class MethodError(PortunusError):
+    """JSON-RPC error from a child; ``jsonrpc_code`` is the numeric code when present."""
+
+    def __init__(self, method: str, jsonrpc_code: int | None, text: Any) -> None:
+        super().__init__("upstream_crash", f"{method} failed: {str(text)[:200]}")
+        self.jsonrpc_code = jsonrpc_code
+
+
 class _Stdio:
     OVERSIZE_CODE = "upstream_crash"  # code for a child line over the reader limit
 
-    def __init__(self, proc: Any) -> None:
+    def __init__(self, proc: Any, *, client_info: dict[str, str] | None = None) -> None:
         self._proc = proc
         self._next_id = 0
+        self.modern = False
+        self.protocol = MODERN_PROTOCOL_VERSION
+        self.client_info = dict(client_info or CLIENT_INFO)
+
+    def _client_meta(self) -> dict[str, Any]:
+        return {
+            "io.modelcontextprotocol/protocolVersion": self.protocol,
+            "io.modelcontextprotocol/clientInfo": dict(self.client_info),
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }
 
     async def _write(self, obj: dict) -> None:
         data = json.dumps(obj, separators=(",", ":")).encode() + b"\n"
@@ -49,9 +71,15 @@ class _Stdio:
     async def call(self, method: str, params: dict | None = None) -> Any:
         self._next_id += 1
         mid = self._next_id
+        wire_params = dict(params or {})
+        if self.modern:
+            meta = wire_params.get("_meta")
+            if not isinstance(meta, dict):
+                meta = {}
+            wire_params["_meta"] = {**meta, **self._client_meta()}
         msg: dict[str, Any] = {"jsonrpc": "2.0", "id": mid, "method": method}
-        if params is not None:
-            msg["params"] = params
+        if wire_params or params is not None:
+            msg["params"] = wire_params
         await self._write(msg)
         while True:
             try:
@@ -79,29 +107,59 @@ class _Stdio:
             if "error" in reply:
                 err = reply["error"]
                 text = err.get("message") if isinstance(err, dict) else None
-                raise PortunusError("upstream_crash", f"{method} failed: {str(text)[:200]}")
+                code = err.get("code") if isinstance(err, dict) else None
+                raise MethodError(method, code if isinstance(code, int) else None, text)
             return reply.get("result")
 
 
+async def _legacy_handshake(rpc: _Stdio) -> None:
+    rpc.modern = False
+    rpc.protocol = HANDSHAKE_PROTOCOL_VERSION
+    init = await rpc.call(
+        "initialize",
+        {
+            "protocolVersion": HANDSHAKE_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": dict(rpc.client_info),
+        },
+    )
+    if not isinstance(init, dict):
+        raise _crash("malformed initialize result")
+    proto = init.get("protocolVersion")
+    if isinstance(proto, str) and proto:
+        rpc.protocol = proto
+    await rpc.notify("notifications/initialized")
+
+
+async def connect_stdio(rpc: _Stdio) -> None:
+    """Negotiate protocol: ``server/discover`` first, else initialize handshake."""
+    rpc.modern = True
+    rpc.protocol = MODERN_PROTOCOL_VERSION
+    try:
+        result = await rpc.call("server/discover", {})
+    except MethodError as e:
+        # Unknown method / invalid request → older peer; anything else is fatal.
+        if e.jsonrpc_code not in (-32601, -32600, None):
+            raise
+        await _legacy_handshake(rpc)
+        return
+    if not isinstance(result, dict):
+        raise _crash("malformed server/discover result")
+    versions = result.get("supportedVersions") or result.get("supported_versions")
+    if isinstance(versions, list) and versions and MODERN_PROTOCOL_VERSION not in versions:
+        await _legacy_handshake(rpc)
+        return
+
+
 async def list_tools(proc: Any, timeout_s: float) -> list[dict]:
-    """Run initialize + tools/list (all pages) against ``proc`` within ``timeout_s``.
+    """Run connect + tools/list (all pages) against ``proc`` within ``timeout_s``.
 
     Raises ``upstream_timeout`` / ``upstream_crash`` / ``payload_too_large``.
     """
     try:
         async with asyncio.timeout(timeout_s):
             rpc = _Stdio(proc)
-            init = await rpc.call(
-                "initialize",
-                {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {"name": "portunus-probe", "version": "1"},
-                },
-            )
-            if not isinstance(init, dict):
-                raise _crash("malformed initialize result")
-            await rpc.notify("notifications/initialized")
+            await connect_stdio(rpc)
 
             tools: list[dict] = []
             cursor: str | None = None
@@ -119,9 +177,7 @@ async def list_tools(proc: Any, timeout_s: float) -> list[dict]:
                 if not isinstance(cursor, str):
                     raise _crash("malformed nextCursor")
             else:
-                raise _crash("tools/list pagination did not terminate")
+                raise _crash("tools/list pagination too long")
+            return tools
     except TimeoutError:
         raise PortunusError("upstream_timeout", "probe timed out") from None
-    if len(json.dumps(tools, separators=(",", ":"))) > MAX_RESULT_BYTES:
-        raise PortunusError("payload_too_large", "tools/list result too large")
-    return tools

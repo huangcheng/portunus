@@ -44,7 +44,11 @@ from .registry import RegistryError
 from .vault import Vault, VaultError
 
 LOOPBACK_ALLOWLIST_ENV = "PORTUNUS_REMOTE_LOOPBACK_ALLOWLIST"
-PROTOCOL_VERSION = "2025-03-26"
+# Prefer the current MCP revision; fall back to the newest initialize-handshake revision.
+MODERN_PROTOCOL_VERSION = "2026-07-28"
+HANDSHAKE_PROTOCOL_VERSION = "2025-11-25"
+PROTOCOL_VERSION = HANDSHAKE_PROTOCOL_VERSION  # legacy alias for tests / docs
+CLIENT_INFO = {"name": "portunus-gateway", "version": "0.1.0"}
 MAX_TOOL_PAGES = 50
 _REDIRECT_STATUSES = frozenset({307, 308})  # method + body preserving
 _HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", re.ASCII)
@@ -52,7 +56,10 @@ _FORBIDDEN_HEADERS = frozenset(
     {"host", "content-length", "transfer-encoding", "connection", "upgrade", "te", "trailer"}
 )
 # Headers that survive a cross-origin redirect: protocol plumbing, never credentials.
-_CROSS_ORIGIN_KEEP = frozenset({"accept", "content-type", "mcp-protocol-version"})
+_CROSS_ORIGIN_KEEP = frozenset(
+    {"accept", "content-type", "mcp-protocol-version", "mcp-method", "mcp-name"}
+)
+_METHODS_WITH_NAME = frozenset({"tools/call", "resources/read", "prompts/get"})
 
 Resolver = Callable[[str, int], Awaitable[list[str]]]
 
@@ -166,8 +173,9 @@ def _is_ip_literal(host: str) -> bool:
 class RemoteClient:
     """One remote MCP server: ``list_tools`` (probe) and ``call_tool`` (invoke).
 
-    Each operation is a short-lived MCP session: initialize, notifications/initialized, the
-    request, then a best-effort session DELETE. ``headers`` are credentials / custom headers.
+    Negotiates MCP ``2026-07-28`` via ``server/discover`` when the peer supports it; otherwise
+    falls back to the initialize handshake (short-lived session + best-effort DELETE).
+    ``headers`` are credentials / custom headers.
     """
 
     def __init__(
@@ -231,7 +239,7 @@ class RemoteClient:
                     timeout=httpx.Timeout(self.policy.timeout_s),
                 ) as http:
                     session = _Session(self, http)
-                    await session.initialize()
+                    await session.connect()
                     try:
                         return await op(session)
                     finally:
@@ -384,18 +392,33 @@ class _Session:
         self.c = client
         self.http = http
         self.session_id: str | None = None
-        self.protocol = PROTOCOL_VERSION
+        self.protocol = MODERN_PROTOCOL_VERSION
+        self.modern = False
         self._next_id = 0
 
-    def _headers(self) -> dict[str, str]:
+    def _client_meta(self) -> dict[str, Any]:
+        return {
+            "io.modelcontextprotocol/protocolVersion": self.protocol,
+            "io.modelcontextprotocol/clientInfo": dict(CLIENT_INFO),
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }
+
+    def _headers(self, *, method: str | None = None, params: dict[str, Any] | None = None) -> dict[str, str]:
         h = {
             "accept": "application/json, text/event-stream",
             "content-type": "application/json",
             **self.c._headers,
         }
+        if self.modern or self.session_id:
+            h["mcp-protocol-version"] = self.protocol
+        if self.modern and method:
+            h["mcp-method"] = method
+            if method in _METHODS_WITH_NAME and isinstance(params, dict):
+                name = params.get("name") or params.get("uri")
+                if isinstance(name, str) and name:
+                    h["mcp-name"] = name
         if self.session_id:
             h["mcp-session-id"] = self.session_id
-            h["mcp-protocol-version"] = self.protocol
         return h
 
     @staticmethod
@@ -408,19 +431,62 @@ class _Session:
         if code not in (200, 202):
             raise PortunusError("upstream_crash", f"remote server returned HTTP {code}")
 
-    async def _post(self, message: dict[str, Any]) -> tuple[httpx.Response, bytes]:
+    async def _post(
+        self, message: dict[str, Any], *, method: str | None = None, params: dict[str, Any] | None = None
+    ) -> tuple[httpx.Response, bytes]:
         body = json.dumps(message, separators=(",", ":")).encode()
-        response, data = await self.c.send(self.http, "POST", body=body, headers=self._headers())
+        response, data = await self.c.send(
+            self.http, "POST", body=body, headers=self._headers(method=method, params=params)
+        )
         self._check_status(response)
         return response, data
 
-    async def initialize(self) -> None:
+    async def connect(self) -> None:
+        """Prefer ``server/discover`` (2026-07-28); fall back to initialize handshake."""
+        if await self._try_modern_discover():
+            return
+        await self._legacy_initialize()
+
+    async def _try_modern_discover(self) -> bool:
+        self.modern = True
+        self.protocol = MODERN_PROTOCOL_VERSION
+        self._next_id += 1
+        mid = self._next_id
+        params = {"_meta": self._client_meta()}
+        response, data = await self._post(
+            {"jsonrpc": "2.0", "id": mid, "method": "server/discover", "params": params},
+            method="server/discover",
+            params=params,
+        )
+        msg = _extract_response(response, data, mid)
+        if "error" in msg:
+            err = msg["error"] if isinstance(msg["error"], dict) else {}
+            code = err.get("code")
+            # Only unknown/invalid method means "pre-2026 peer"; transport errors must surface.
+            if code not in (-32601, -32600):
+                raise PortunusError("upstream_crash", f"upstream JSON-RPC error {code}")
+            self.modern = False
+            return False
+        result = msg.get("result")
+        if not isinstance(result, dict):
+            self.modern = False
+            return False
+        versions = result.get("supportedVersions") or result.get("supported_versions")
+        if isinstance(versions, list) and MODERN_PROTOCOL_VERSION not in versions and versions:
+            # Peer answered discover but does not list the modern revision — stay legacy.
+            self.modern = False
+            return False
+        return True
+
+    async def _legacy_initialize(self) -> None:
+        self.modern = False
+        self.protocol = HANDSHAKE_PROTOCOL_VERSION
         result = await self.rpc(
             "initialize",
             {
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": HANDSHAKE_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "portunus-gateway", "version": "0.1.0"},
+                "clientInfo": dict(CLIENT_INFO),
             },
         )
         proto = result.get("protocolVersion")
@@ -429,10 +495,18 @@ class _Session:
         await self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     async def rpc(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        wire_params = dict(params)
+        if self.modern:
+            meta = wire_params.get("_meta")
+            if not isinstance(meta, dict):
+                meta = {}
+            wire_params["_meta"] = {**meta, **self._client_meta()}
         self._next_id += 1
         mid = self._next_id
         response, data = await self._post(
-            {"jsonrpc": "2.0", "id": mid, "method": method, "params": params}
+            {"jsonrpc": "2.0", "id": mid, "method": method, "params": wire_params},
+            method=method,
+            params=wire_params,
         )
         if method == "initialize":
             sid = response.headers.get("mcp-session-id")
@@ -448,7 +522,7 @@ class _Session:
         return result
 
     async def close(self) -> None:
-        if not self.session_id:
+        if self.modern or not self.session_id:
             return
         with contextlib.suppress(Exception):  # best effort; never mask the operation's outcome
             await self.c.send(self.http, "DELETE", body=None, headers=self._headers())
@@ -517,6 +591,9 @@ class RemoteProxy:
             headers: dict[str, str] = {}
             try:
                 for row in rows:
+                    # Reserved ``portunus.*`` vault names are not HTTP headers (e.g. oauth secret).
+                    if row.name.lower().startswith("portunus."):
+                        continue
                     plain = self.vault.open(
                         bytes(row.ciphertext),
                         vault_entry_id=str(row.id),

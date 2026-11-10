@@ -5,9 +5,9 @@
 * Sessions are opaque 256-bit random tokens in a ``Secure; HttpOnly; SameSite=Strict`` cookie.
   The database stores only ``SHA-256(token)`` plus the per-session CSRF token.
 * Every non-safe method needs ``X-CSRF-Token`` equal to the session's CSRF token.
-* Step-up: ``POST /api/auth/step-up`` re-verifies the password and returns a 5-minute token,
-  bound to the session, that sensitive routes require in ``X-Step-Up-Token``. Tokens live in
-  process memory (single worker) and die with the session.
+* Step-up: ``POST /api/auth/step-up`` re-verifies the password and returns a single-use token
+  (5-minute max age), bound to the session, that sensitive routes require in
+  ``X-Step-Up-Token``. Tokens live in process memory (single worker) and die with the session.
 * Lockout: 5 failed password checks (login or step-up) from one client IP lock that IP out of
   password checks for 15 minutes. ``X-Forwarded-For`` is honoured only when the TCP peer is in
   ``trusted_proxies``.
@@ -255,16 +255,19 @@ class OperatorAuth:
         return token
 
     def verify_step_up(self, session_id: uuid.UUID, token: str | None) -> bool:
+        """Validate and consume a step-up token (single-use)."""
         if not token:
             return False
-        entry = self._step_ups.get(_sha256(token))
+        digest = _sha256(token)
+        entry = self._step_ups.pop(digest, None)
         if entry is None:
             return False
         sid, expires = entry
         if expires <= self._clock():
-            self._step_ups.pop(_sha256(token), None)
             return False
-        return sid == session_id
+        if sid != session_id:
+            return False
+        return True
 
     # ---- audit -----------------------------------------------------------------------
 

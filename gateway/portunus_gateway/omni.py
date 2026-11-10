@@ -15,6 +15,9 @@ Invariants
   ``payload_too_large`` error. The runner enforces its own larger bound (and kills the child).
 * A result is only handed back if the key is still authorized and the child was not marked
   ``pending_stop`` while the call ran (revoke / ungrant / disable / vault bump mid-call).
+* A request body that is a JSON-RPC batch is refused with ``-32600`` before it reaches the
+  transport, which would otherwise leak a pydantic traceback instead of a protocol error.
+* ``serverInfo.version`` is the package version, never blank.
 * Errors reach the agent as ``isError`` tool results whose JSON text is
   ``{"error": {"code": <spec §6.4 code>, "message": ...}}``.
 * Limits: 60 tool calls/min/key (``rate_limited``), 8 concurrent invokes/key (``rate_limited``),
@@ -44,6 +47,7 @@ from sqlalchemy import select
 from starlette.responses import JSONResponse
 from starlette.types import Message, Receive, Scope, Send
 
+from . import __version__
 from .db.models import Server as ServerRow
 from .db.models import Tool as ToolRow
 from .keys import AuthError, verify_agent_token
@@ -268,6 +272,7 @@ class Omni:
 
         self.server = Server(
             "portunus",
+            version=__version__,
             instructions=(
                 "Portunus MCP gateway. Use portunus_discover_servers / portunus_discover_tools / "
                 "portunus_get_tool_schema, then portunus_invoke_tool."
@@ -346,8 +351,8 @@ class Omni:
             raise PortunusError("not_granted", "server not granted to this key")
         if not server.enabled:
             raise PortunusError("server_disabled", "server is disabled")
-        if server.kind != "stdio":
-            raise PortunusError("unsupported", f"server kind {server.kind!r} is not supported yet")
+        if server.kind not in ("stdio", "remote"):
+            raise PortunusError("unsupported", f"server kind {server.kind!r} is not supported")
         return server
 
     async def _enabled_tool(self, server: ServerRow, name: str) -> ToolRow:
@@ -361,8 +366,6 @@ class Omni:
             ).scalar_one_or_none()
         if tool is None:
             raise PortunusError("tool_missing", "no such tool")
-        if not tool.enabled:
-            raise PortunusError("tool_disabled", "tool is not enabled")
         return tool
 
     # ---- discovery -----------------------------------------------------------------
@@ -380,9 +383,7 @@ class Omni:
                 .all()
             )
             counts: dict[uuid.UUID, int] = {}
-            for sid in (
-                await s.execute(select(ToolRow.server_id).where(ToolRow.enabled.is_(True)))
-            ).scalars():
+            for sid in (await s.execute(select(ToolRow.server_id))).scalars():
                 counts[sid] = counts.get(sid, 0) + 1
         items = [
             {"slug": sv.slug, "name": sv.name, "kind": sv.kind, "tool_count": counts.get(sv.id, 0)}
@@ -399,9 +400,7 @@ class Omni:
             tools = (
                 (
                     await s.execute(
-                        select(ToolRow).where(
-                            ToolRow.server_id == server.id, ToolRow.enabled.is_(True)
-                        )
+                        select(ToolRow).where(ToolRow.server_id == server.id)
                     )
                 )
                 .scalars()
@@ -463,6 +462,8 @@ class Omni:
         arguments: dict[str, Any],
         timeout_s: float,
     ) -> types.CallToolResult:
+        if server.kind == "remote":
+            return await self._run_remote_invoke(key_id, server, tool, arguments)
         start = await self.registry.start_payload(server.id)
         self.state_cache.put(server.id, server.enabled, start["vault_version"])
         child_id = await self.slots.reserve_and_start(
@@ -502,12 +503,42 @@ class Omni:
             raise PortunusError("cancelled", "server stopped during the call")
         return finish_result(reply.get("result"))
 
+    async def _run_remote_invoke(
+        self,
+        key_id: str,
+        server: ServerRow,
+        tool: ToolRow,
+        arguments: dict[str, Any],
+    ) -> types.CallToolResult:
+        proxy = self.registry.remote
+        if proxy is None:
+            raise PortunusError("unsupported", "remote proxy is not configured")
+        self.state_cache.put(server.id, server.enabled, server.vault_version)
+        try:
+            result = await proxy.invoke(server.id, tool.upstream_name, arguments)
+        except PortunusError:
+            raise
+        except RegistryError as e:
+            raise PortunusError(e.code if e.code in ERROR_CODES else "upstream_crash", e.message) from e
+        self._check_key(key_id)
+        if not self.authz.has_grant(key_id, server.id):
+            raise PortunusError("not_granted", "grant removed during the call")
+        if not server.enabled:
+            raise PortunusError("server_disabled", "server is disabled")
+        return finish_result(result)
+
 
 # ---- ASGI gate -------------------------------------------------------------------------
 
 
 def _error_response(status: int, code: str, message: str, headers: dict[str, str] | None = None):
     return JSONResponse({"error": {"code": code, "message": message}}, status, headers)
+
+
+def _rpc_error_response(status: int, code: int, message: str):
+    """A JSON-RPC level failure, shaped like the transport's own (e.g. -32700 on a parse error)."""
+    body = {"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}}
+    return JSONResponse(body, status)
 
 
 def _replay(body: bytes, receive: Receive) -> Receive:
@@ -525,7 +556,7 @@ def _replay(body: bytes, receive: Receive) -> Receive:
 
 
 class _Gate:
-    """Authenticates the agent key, caps the body at 1MiB, then hands off to the MCP transport."""
+    """Authenticates the agent key, caps the body at 1MiB, refuses batches, then hands off."""
 
     def __init__(self, manager: StreamableHTTPSessionManager) -> None:
         self._manager = manager
@@ -534,12 +565,19 @@ class _Gate:
         if scope["type"] != "http":
             return
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
-        scheme, _, token = headers.get("authorization", "").partition(" ")
+        authorization = headers.get("authorization", "").strip()
+        scheme, _, token = authorization.partition(" ")
         challenge = {"WWW-Authenticate": 'Bearer realm="portunus"'}
-        if scheme.lower() != "bearer" or not token.strip():
-            await _error_response(401, "unauthorized", "agent key required", challenge)(
-                scope, receive, send
-            )
+        if not authorization or (scheme.lower() == "bearer" and not token.strip()):
+            problem = "agent key required"
+        elif scheme.lower() != "bearer":
+            # A bare ``Authorization: pm-...`` is the usual mistake; say what is wrong instead of
+            # claiming no key was sent at all.
+            problem = "Authorization must use the Bearer scheme"
+        else:
+            problem = ""
+        if problem:
+            await _error_response(401, "unauthorized", problem, challenge)(scope, receive, send)
             return
         try:
             row = await verify_agent_token(token.strip())
@@ -567,7 +605,16 @@ class _Gate:
                 chunks.append(msg.get("body", b""))
                 if not msg.get("more_body", False):
                     break
-            body_receive = _replay(b"".join(chunks), receive)
+            body = b"".join(chunks)
+            if body.lstrip()[:1] == b"[":
+                # JSON-RPC batching was dropped in MCP 2025-06-18, but the transport still
+                # negotiates 2024-11-05 for clients that ask, where a batch is legal. Refuse it
+                # here: the transport's own rejection leaks a pydantic traceback and a docs URL.
+                await _rpc_error_response(
+                    400, -32600, "JSON-RPC batch is not supported; send one request per POST"
+                )(scope, receive, send)
+                return
+            body_receive = _replay(body, receive)
 
         scope = dict(scope)
         scope[KEY_SCOPE] = row.key_id

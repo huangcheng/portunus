@@ -16,7 +16,7 @@ from typing import Any
 
 from portunus_shared import PortunusError
 
-from .probe import PROTOCOL_VERSION, _crash, _Stdio
+from .probe import _crash, _Stdio, connect_stdio
 
 MAX_TIMEOUT_S = 600.0
 
@@ -27,23 +27,9 @@ class _RpcStdio(_Stdio):
 
 class ChildRpc:
     def __init__(self, proc: Any) -> None:
-        self._stdio = _RpcStdio(proc)
+        self._stdio = _RpcStdio(proc, client_info={"name": "portunus-invoke", "version": "1"})
         self._lock = asyncio.Lock()
         self._ready = False
-
-    async def _initialize(self) -> None:
-        init = await self._stdio.call(
-            "initialize",
-            {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "portunus-invoke", "version": "1"},
-            },
-        )
-        if not isinstance(init, dict):
-            raise _crash("malformed initialize result")
-        await self._stdio.notify("notifications/initialized")
-        self._ready = True
 
     async def call(self, payload: Any, timeout_s: float) -> dict:
         """Run the ``tools/call`` described by ``payload``; returns the child's result object."""
@@ -60,7 +46,8 @@ class ChildRpc:
             async with asyncio.timeout(timeout_s):
                 async with self._lock:
                     if not self._ready:
-                        await self._initialize()
+                        await connect_stdio(self._stdio)
+                        self._ready = True
                     result = await self._stdio.call("tools/call", params)
         except TimeoutError:
             raise PortunusError("upstream_timeout", "tools/call timed out") from None
@@ -73,4 +60,3 @@ def clamp_timeout(raw: Any, default: float) -> float:
     if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
         return min(float(raw), MAX_TIMEOUT_S)
     return default
-

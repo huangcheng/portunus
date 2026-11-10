@@ -57,14 +57,14 @@ async def test_server_tool_grant_roundtrip():
         assert srv.args == ["--ignore-scripts", "demo@1.0.0"]
         assert srv.enabled is False
         tool = (await s.execute(select(Tool))).scalar_one()
-        assert tool.server_id == srv.id and tool.schema == {} and tool.enabled is False
+        assert tool.server_id == srv.id and tool.schema == {} and tool.enabled is False  # explicit
         key = (await s.execute(select(AgentKey))).scalar_one()
         assert key.digest == b"\x00" * 32 and key.generation == 0 and key.revoked_at is None
         grant = (await s.execute(select(Grant))).scalar_one()
         assert (grant.key_id, grant.server_id) == (key.key_id, srv.id)
 
 
-async def test_defaults_are_disabled():
+async def test_defaults_server_off_tools_on():
     await _create_all()
     async with async_session() as s:
         srv = _server()
@@ -74,7 +74,7 @@ async def test_defaults_are_disabled():
         await s.commit()
         assert srv.enabled is False
         assert srv.vault_version == 0
-        assert (await s.execute(select(Tool))).scalar_one().enabled is False
+        assert (await s.execute(select(Tool))).scalar_one().enabled is True
 
 
 async def test_server_slug_unique_casefold():

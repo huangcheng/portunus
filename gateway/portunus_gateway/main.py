@@ -35,6 +35,7 @@ from .db.session import async_session
 from .omni import Omni, ServerStateCache
 from .operator_auth import INSECURE_COOKIE_ENV, OperatorAuth
 from .registry import Registry
+from .remote import RemoteProxy
 from .runner_client import RunnerClient
 from .runner_pool import RunnerPool
 from .slots import SlotManager
@@ -202,6 +203,7 @@ def create_gateway_app() -> FastAPI:
     cache = ServerStateCache()
     slots = SlotManager(pool, store, server_enabled=cache.enabled, vault_version=cache.vault_version)
     slots.attach(pool)
+    remote = RemoteProxy(async_session, vault)
     registry = Registry(
         async_session,
         vault,
@@ -209,6 +211,7 @@ def create_gateway_app() -> FastAPI:
         trusted_path=trusted_path,
         binary_allowlist=binary_allowlist,
         slots=slots,
+        remote=remote,
     )
     omni = Omni(
         session_factory=async_session,
@@ -228,6 +231,8 @@ def create_gateway_app() -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(a: FastAPI) -> AsyncIterator[None]:
         await store.reload_from_db()  # authz is rebuilt from the DB on start (spec §3)
+        # Single-operator: every active key may use every server.
+        await authz.ensure_full_grants()
         pool.start()
         try:
             async with inner_lifespan(a):

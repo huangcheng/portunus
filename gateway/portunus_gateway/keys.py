@@ -1,7 +1,8 @@
 """Agent keys: ``pm-<32 base64url key_id>.<43 base64url secret>``.
 
-Only ``HMAC-SHA256(key=pepper, msg=secret)`` is stored; the full token is returned exactly once at
-mint time. Failures raise :class:`AuthError` with the shared ``unauthorized`` / ``revoked`` codes.
+Verification stores only ``HMAC-SHA256(key=pepper, msg=secret)``. The full token is also sealed
+under the vault (AAD-bound to the key id) so operators can reveal it later. Delete removes the
+row and marks the id revoked in-process so in-flight work fails closed.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from portunus_gateway import authz
 from portunus_gateway.config import load_pepper
 from portunus_gateway.db.models import AgentKey
 from portunus_gateway.db.session import async_session
+from portunus_gateway.vault import Vault, VaultError
 from portunus_shared import PortunusError
 
 TOKEN_PREFIX = "pm-"
@@ -47,15 +49,63 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
-async def mint_agent_key(*, expires_at: datetime | None, label: str | None = None) -> tuple[str, AgentKey]:
-    """Create a key. Returns ``(full_token, row)``; the token cannot be recovered afterwards."""
+def _vault_entry_id(key_id: str) -> str:
+    return f"agent:{key_id}"
+
+
+async def mint_agent_key(
+    *,
+    expires_at: datetime | None,
+    label: str | None = None,
+    vault: Vault | None = None,
+) -> tuple[str, AgentKey]:
+    """Create a key. Returns ``(full_token, row)``.
+
+    When ``vault`` is provided the full token is sealed for later reveal; without a vault the
+    token is returned only once (legacy / unit tests that do not exercise reveal).
+    """
     key_id = _b64url(secrets.token_bytes(_KEY_ID_BYTES))
     secret = _b64url(secrets.token_bytes(_SECRET_BYTES))
-    row = AgentKey(key_id=key_id, digest=_digest(secret), label=label, expires_at=_as_utc(expires_at))
+    token = f"{TOKEN_PREFIX}{key_id}.{secret}"
+    ciphertext: bytes | None = None
+    key_version: int | None = None
+    if vault is not None:
+        key_version = vault.current_version
+        ciphertext = vault.seal(
+            token.encode("ascii"),
+            vault_entry_id=_vault_entry_id(key_id),
+            key_version=key_version,
+        )
+    row = AgentKey(
+        key_id=key_id,
+        digest=_digest(secret),
+        label=label,
+        expires_at=_as_utc(expires_at),
+        secret_ciphertext=ciphertext,
+        secret_key_version=key_version,
+    )
     async with async_session() as session:
         session.add(row)
         await session.commit()
-    return f"{TOKEN_PREFIX}{key_id}.{secret}", row
+    return token, row
+
+
+async def reveal_agent_token(key_id: str, vault: Vault) -> str:
+    """Decrypt the sealed full token for an active key."""
+    async with async_session() as session:
+        row = (await session.execute(select(AgentKey).where(AgentKey.key_id == key_id))).scalar_one_or_none()
+    if row is None or row.revoked_at is not None or authz.authz_store.is_revoked(key_id):
+        raise AuthError("unauthorized", "unknown agent key")
+    if row.secret_ciphertext is None or row.secret_key_version is None:
+        raise AuthError("unauthorized", "secret not recoverable")
+    try:
+        return vault.open(
+            row.secret_ciphertext,
+            vault_entry_id=_vault_entry_id(key_id),
+            key_version=row.secret_key_version,
+        ).decode("ascii")
+    except VaultError as e:
+        raise AuthError("unauthorized", "secret not recoverable") from e
 
 
 async def verify_agent_token(token: str) -> AgentKey:
@@ -83,13 +133,12 @@ async def verify_agent_token(token: str) -> AgentKey:
 
 
 async def revoke_key(key_id: str) -> None:
-    """Set ``revoked_at`` (first revoke wins), bump the row generation, bump the authz generation."""
+    """Hard-delete the key (grants cascade), mark it revoked in-process, reload grants."""
     async with async_session() as session:
         row = (await session.execute(select(AgentKey).where(AgentKey.key_id == key_id))).scalar_one_or_none()
         if row is None:
             raise AuthError("unauthorized", "unknown agent key")
-        if row.revoked_at is None:
-            row.revoked_at = datetime.now(timezone.utc)
-            row.generation += 1
-            await session.commit()
+        await session.delete(row)
+        await session.commit()
     authz.authz_store.mark_revoked(key_id)
+    await authz.authz_store.reload_from_db()

@@ -12,7 +12,7 @@ import pytest
 from portunus_gateway.db.models import AuditEvent, Server
 from portunus_gateway.db.session import async_session
 from portunus_gateway.omni import Omni
-from portunus_gateway.operator_api import create_app, require_operator, require_step_up
+from portunus_gateway.operator_api import create_app, require_operator
 from portunus_gateway.registry import Registry
 from portunus_gateway.runner_client import RunnerRequestError
 from portunus_gateway.runner_pool import RunnerPool
@@ -100,7 +100,6 @@ async def registry(db, pool, trusted_bin):
 async def http(registry):
     app = create_app(registry)
     app.dependency_overrides[require_operator] = lambda: "test-operator"
-    app.dependency_overrides[require_step_up] = lambda: "test-operator"
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as c:

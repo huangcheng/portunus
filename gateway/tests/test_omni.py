@@ -15,6 +15,7 @@ import httpx2
 import pytest
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
+from portunus_gateway import __version__ as gateway_version
 from portunus_gateway import keys
 from portunus_gateway.app import build_app
 from portunus_gateway.db.models import Grant, Tool
@@ -32,6 +33,8 @@ META = [
     "portunus_get_tool_schema",
     "portunus_invoke_tool",
 ]
+
+BASE_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 
 
 async def settle(cond, timeout=5.0):
@@ -58,9 +61,6 @@ class Stack:
         )
         sid = uuid.UUID(r["id"])
         await self.registry.probe(sid, "test")
-        for t in await self.registry.list_tools(sid):
-            if t["name"] in tools:
-                await self.registry.set_tool_enabled(uuid.UUID(t["id"]), True, "test")
         if enable:
             await self.registry.set_server_enabled(sid, True, "test")
         return sid
@@ -125,6 +125,7 @@ def make_stack_fixture(**omni_kw):
 
 stack = make_stack_fixture()
 fast_timeout_stack = make_stack_fixture(invoke_timeout_s=1)
+rate_stack = make_stack_fixture(rate_per_min=2)
 
 
 def payload(result):
@@ -168,7 +169,7 @@ async def test_requires_bearer_agent_key(stack):
             assert r.json()["error"]["code"] == "unauthorized"
         await keys.revoke_key(key_id)
         r = await hc.post("/mcp", json=body, headers=dict(headers, Authorization=f"Bearer {token}"))
-        assert r.status_code == 401 and r.json()["error"]["code"] == "revoked"
+        assert r.status_code == 401 and r.json()["error"]["code"] == "unauthorized"
 
 
 async def test_oversize_request_body_rejected(stack):
@@ -188,6 +189,85 @@ async def test_oversize_request_body_rejected(stack):
         )
     assert r.status_code == 413
     assert r.json()["error"]["code"] == "payload_too_large"
+
+
+async def test_initialize_reports_package_version(stack):
+    """``serverInfo.version`` must be a real version, not the transport's blank default."""
+    sid = await stack.add_server()
+    token, _ = await stack.add_key(sid)
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "t", "version": "0"},
+        },
+    }
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=stack.app), base_url="http://test"
+    ) as hc:
+        r = await hc.post(
+            "/mcp", json=body, headers=BASE_HEADERS | {"Authorization": f"Bearer {token}"}
+        )
+    info = r.json()["result"]["serverInfo"]
+    assert info["name"] == "portunus"
+    assert info["version"] == gateway_version
+    assert info["version"].strip()
+
+
+async def test_batch_request_refused_without_leaking_internals(stack):
+    """Batches are illegal in current MCP; refuse them cleanly instead of echoing a pydantic trace."""
+    sid = await stack.add_server()
+    token, _ = await stack.add_key(sid)
+    batch = [
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    ]
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=stack.app), base_url="http://test"
+    ) as hc:
+        r = await hc.post(
+            "/mcp", json=batch, headers=BASE_HEADERS | {"Authorization": f"Bearer {token}"}
+        )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == -32600
+    assert "batch" in r.json()["error"]["message"].lower()
+    leaked = r.text.lower()
+    for needle in ("pydantic", "validation error", "docs."):
+        assert needle not in leaked, leaked
+
+
+async def test_auth_scheme_mistake_is_reported_precisely(stack):
+    """A bare token is the common mistake; do not claim the request carried no key at all."""
+    sid = await stack.add_server()
+    token, _ = await stack.add_key(sid)
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=stack.app), base_url="http://test"
+    ) as hc:
+        bare = await hc.post("/mcp", json=body, headers=BASE_HEADERS | {"Authorization": token})
+        missing = await hc.post("/mcp", json=body, headers=BASE_HEADERS)
+        empty = await hc.post("/mcp", json=body, headers=BASE_HEADERS | {"Authorization": "Bearer "})
+    assert bare.status_code == 401
+    assert bare.json()["error"]["message"] == "Authorization must use the Bearer scheme"
+    assert missing.json()["error"]["message"] == "agent key required"
+    assert empty.json()["error"]["message"] == "agent key required"
+    for r in (bare, missing, empty):
+        assert r.json()["error"]["code"] == "unauthorized"
+        assert r.headers["www-authenticate"].startswith("Bearer")
+
+
+async def test_tool_calls_are_rate_limited_per_key(rate_stack):
+    """The 60 calls/min/key limit is real; without this test a no-op limiter looks fine."""
+    sid = await rate_stack.add_server()
+    token, _ = await rate_stack.add_key(sid)
+    async with rate_stack.client(token) as c:
+        assert payload(await c.call_tool("portunus_discover_servers", {}))["items"]
+        assert not (await c.call_tool("portunus_discover_servers", {})).is_error
+        over = await c.call_tool("portunus_discover_servers", {})
+    assert error_code(over) == "rate_limited"
 
 
 # ---- discovery ---------------------------------------------------------------------
@@ -308,21 +388,19 @@ async def test_invoke_requires_grant(stack):
     assert sid
 
 
-async def test_server_disabled_tool_disabled_tool_missing(stack):
-    sid = await stack.add_server(tools=("alpha",))  # beta stays disabled
+async def test_server_disabled_and_tool_missing(stack):
+    sid = await stack.add_server()
     off = await stack.add_server("off", enable=False)
     token, _ = await stack.add_key(sid, off)
     async with stack.client(token) as c:
-        call = lambda server, tool: c.call_tool(  # noqa: E731
-            "portunus_invoke_tool", {"server": server, "tool": tool}
-        )
-        assert error_code(await call("off", "alpha")) == "server_disabled"
-        assert error_code(await call("fix", "beta")) == "tool_disabled"
-        assert error_code(await call("fix", "nope")) == "tool_missing"
+        assert error_code(
+            await c.call_tool("portunus_invoke_tool", {"server": "off", "tool": "alpha"})
+        ) == "server_disabled"
+        assert error_code(
+            await c.call_tool("portunus_get_tool_schema", {"server": "fix", "tool": "nope"})
+        ) == "tool_missing"
         tools = payload(await c.call_tool("portunus_discover_tools", {"server": "fix"}))
-        assert [t["name"] for t in tools["items"]] == ["alpha"]  # disabled tools are hidden
-        res = await c.call_tool("portunus_get_tool_schema", {"server": "fix", "tool": "beta"})
-        assert error_code(res) == "tool_disabled"
+        assert [t["name"] for t in tools["items"]] == ["alpha", "beta"]
     assert stack.srv.children.empty()
 
 
