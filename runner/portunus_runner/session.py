@@ -337,6 +337,36 @@ class Runner:
             fleet["egress_class"] = self.egress_class
         if self.capacity is not None:
             fleet["capacity"] = self.capacity
+        fps: dict[str, str] = {}
+        try:
+            from pathlib import Path
+
+            from portunus_shared import package_fingerprint
+
+            try:
+                fps["portunus_runner"] = package_fingerprint(Path(__file__).resolve().parent)
+            except Exception:  # noqa: BLE001 — hello must succeed
+                log.warning("runner fingerprint failed", exc_info=True)
+            try:
+                import portunus_shared
+
+                fps["portunus_shared"] = package_fingerprint(
+                    Path(portunus_shared.__file__).resolve().parent
+                )
+            except Exception:  # noqa: BLE001
+                log.warning("shared fingerprint failed", exc_info=True)
+            try:
+                import portunus_skill_bridge
+
+                fps["portunus_skill_bridge"] = package_fingerprint(
+                    Path(portunus_skill_bridge.__file__).resolve().parent
+                )
+            except Exception:  # noqa: BLE001
+                log.warning("skill_bridge fingerprint failed", exc_info=True)
+        except Exception:  # noqa: BLE001
+            log.warning("fingerprint setup failed", exc_info=True)
+        if fps:
+            fleet["fingerprints"] = fps
         await self._reply(
             sess, msg, run_id=self.run_id, wire_version=wire.WIRE_VERSION, **fleet
         )

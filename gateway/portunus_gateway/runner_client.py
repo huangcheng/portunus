@@ -159,6 +159,11 @@ class RunnerClient:
         self.regions: list[str] = [DEFAULT_SITE_ID]
         self.egress_class: str | None = None
         self.capacity: int | None = None
+        self.fingerprints: dict[str, str] | None = None
+        self.connected_since: float | None = None  # monotonic when hello succeeded
+        self.last_heartbeat_at: float | None = None
+        self.last_disconnected_at: float | None = None
+        self.reconnects: int = 0
         self._conn: _Conn | None = None
         self._pending: dict[str, asyncio.Future] = {}
         self._task: asyncio.Task | None = None
@@ -328,6 +333,17 @@ class RunnerClient:
             return False
         self.run_id = reply.get("run_id")
         self.site_id, self.regions, self.egress_class, self.capacity = _fleet_from_hello(reply)
+        fps = reply.get("fingerprints")
+        self.fingerprints = (
+            {str(k): str(v) for k, v in fps.items() if isinstance(k, str) and isinstance(v, str)}
+            if isinstance(fps, dict)
+            else None
+        )
+        now = asyncio.get_running_loop().time()
+        if self.connected_since is not None:
+            self.reconnects += 1
+        self.connected_since = now
+        self.last_heartbeat_at = now
         self.conn_seq += 1
         conn = _Conn(writer, conn_id, self.conn_seq)
         self._conn = conn
@@ -338,6 +354,7 @@ class RunnerClient:
             await self._read_loop(conn, reader)
         finally:
             self._conn = None
+            self.last_disconnected_at = asyncio.get_running_loop().time()
             hb_task.cancel()
             up_task.cancel()
             for t in (hb_task, up_task):
@@ -367,6 +384,7 @@ class RunnerClient:
                 await self.request(
                     "heartbeat", timeout=self.heartbeat_s * 2, conn_seq=conn.seq
                 )
+                self.last_heartbeat_at = asyncio.get_running_loop().time()
             except RunnerRequestError:
                 conn.abort()  # reader sees EOF and reconnects
                 return

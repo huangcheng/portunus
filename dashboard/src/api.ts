@@ -149,6 +149,68 @@ export type CreateServerBody = {
   oauth_client_secret?: string | null;
 };
 
+export type FleetResponse = {
+  gateway: {
+    version: string;
+    started_at: string;
+    db_backend: string;
+    otel_export: boolean;
+    fingerprints?: Record<string, string>;
+    trace_url_template?: string | null;
+  };
+  runners: Array<{
+    site_id: string;
+    regions: string[];
+    egress_class?: string | null;
+    capacity?: number | null;
+    connected: boolean;
+    connected_since: string | null;
+    last_heartbeat_at: string | null;
+    last_disconnected_at: string | null;
+    reconnects: number;
+    children: number;
+    fingerprints?: Record<string, string> | null;
+    drift?: string[] | null;
+  }>;
+  children: Array<{
+    child_id: string;
+    server: { id: string | null; slug: string | null };
+    key_id: string | null;
+    site_id: string;
+    state: string;
+    preferred_miss: boolean;
+    pending_stop: boolean;
+  }>;
+};
+
+export type AuditEvent = {
+  id: string;
+  created_at: string | null;
+  actor: string;
+  action: string;
+  target: string | null;
+  detail: Record<string, unknown> | null;
+};
+
+export type ToolCallRow = {
+  id: string;
+  created_at: string | null;
+  trace_id: string;
+  key_id: string;
+  server_slug: string;
+  tool: string;
+  outcome: string;
+  site_id: string | null;
+  cold_start: boolean | null;
+  preferred_miss: boolean | null;
+  gateway_ms: number | null;
+  start_ms: number | null;
+  queue_ms: number | null;
+  init_ms: number | null;
+  upstream_ms: number | null;
+  result_bytes: number | null;
+};
+
 export const api = {
   apps: () => call<CatalogAppRow[]>("GET", "/apps"),
   createApp: (b: Omit<CatalogAppRow, "id">) => call<CatalogAppRow>("POST", "/apps", b),
@@ -190,4 +252,34 @@ export const api = {
   deleteKey: (id: string) => call<void>("DELETE", `/keys/${id}`),
   grant: (key: string, server: string) => call<Key>("PUT", `/keys/${key}/grants/${server}`),
   ungrant: (key: string, server: string) => call<Key>("DELETE", `/keys/${key}/grants/${server}`),
+  fleet: () => call<FleetResponse>("GET", "/fleet"),
+  audit: (q?: { limit?: number; before?: string; action?: string; target?: string }) => {
+    const p = new URLSearchParams();
+    if (q?.limit != null) p.set("limit", String(q.limit));
+    if (q?.before) p.set("before", q.before);
+    if (q?.action) p.set("action", q.action);
+    if (q?.target) p.set("target", q.target);
+    const qs = p.toString();
+    return call<{ items: AuditEvent[]; next: string | null }>("GET", `/audit${qs ? `?${qs}` : ""}`);
+  },
+  toolCalls: (q?: {
+    limit?: number;
+    before?: string;
+    server?: string;
+    outcome?: string;
+    key_id?: string;
+    site_id?: string;
+    trace_id?: string;
+  }) => {
+    const p = new URLSearchParams();
+    if (q?.limit != null) p.set("limit", String(q.limit));
+    if (q?.before) p.set("before", q.before);
+    if (q?.server) p.set("server", q.server);
+    if (q?.outcome) p.set("outcome", q.outcome);
+    if (q?.key_id) p.set("key_id", q.key_id);
+    if (q?.site_id) p.set("site_id", q.site_id);
+    if (q?.trace_id) p.set("trace_id", q.trace_id);
+    const qs = p.toString();
+    return call<{ items: ToolCallRow[]; next: string | null }>("GET", `/tool-calls${qs ? `?${qs}` : ""}`);
+  },
 };

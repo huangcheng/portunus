@@ -606,9 +606,80 @@ class Omni:
                             site_id=invoke_attrs.get("site_id"),
                             timing=portunus,
                         )
+                        # Pre-invoke rate_limited never reaches here (server/tool unset).
+                        if server and tool:
+                            await self._record_tool_call(
+                                trace_id=portunus["trace_id"],
+                                key_id=key_id,
+                                server_slug=server,
+                                tool=tool,
+                                outcome=outcome,
+                                invoke_attrs=invoke_attrs,
+                                gateway_ms=gateway_ms,
+                                result=result,
+                            )
                     return with_portunus_meta(result, portunus)
         finally:
             _invoke_attrs.reset(token)
+
+    async def _record_tool_call(
+        self,
+        *,
+        trace_id: str,
+        key_id: str,
+        server_slug: str,
+        tool: str,
+        outcome: str,
+        invoke_attrs: Mapping[str, Any],
+        gateway_ms: int,
+        result: types.CallToolResult,
+    ) -> None:
+        """Best-effort insert into ``tool_calls``; never affects the agent result."""
+        try:
+            from .db.models import ToolCall
+
+            meta = getattr(result, "meta", None)
+            content = getattr(result, "content", None)
+            # Size estimate without a full JSON dump of the CallToolResult.
+            try:
+                result_bytes = len(repr(content).encode()) if content is not None else None
+                if isinstance(meta, Mapping):
+                    result_bytes = (result_bytes or 0) + len(repr(meta).encode())
+            except Exception:  # noqa: BLE001
+                result_bytes = None
+            cold = invoke_attrs.get("cold_start")
+            pref = invoke_attrs.get("preferred_miss")
+            row = ToolCall(
+                trace_id=trace_id,
+                key_id=key_id,
+                server_slug=server_slug,
+                tool=tool,
+                outcome=outcome,
+                site_id=invoke_attrs.get("site_id")
+                if isinstance(invoke_attrs.get("site_id"), str)
+                else None,
+                cold_start=bool(cold) if isinstance(cold, bool) else None,
+                preferred_miss=bool(pref) if isinstance(pref, bool) else None,
+                gateway_ms=gateway_ms,
+                start_ms=invoke_attrs.get("start_ms")
+                if isinstance(invoke_attrs.get("start_ms"), int)
+                else None,
+                queue_ms=invoke_attrs.get("queue_ms")
+                if isinstance(invoke_attrs.get("queue_ms"), int)
+                else None,
+                init_ms=invoke_attrs.get("init_ms")
+                if isinstance(invoke_attrs.get("init_ms"), int)
+                else None,
+                upstream_ms=invoke_attrs.get("upstream_ms")
+                if isinstance(invoke_attrs.get("upstream_ms"), int)
+                else None,
+                result_bytes=result_bytes,
+            )
+            async with self._sf() as s:
+                s.add(row)
+                await s.commit()
+        except Exception:  # noqa: BLE001 — bookkeeping must not change the call result
+            log_calls.exception("tool_calls insert failed")
 
     # ---- authorization -------------------------------------------------------------
 
@@ -827,7 +898,12 @@ class Omni:
             if cold_start and preferred_miss:
                 tel.record_preferred_miss(server=server.slug)
         start_ms = _ms_since(t_start)
-        self._note_invoke(start_ms=start_ms, cold_start=cold_start, site_id=site_id)
+        self._note_invoke(
+            start_ms=start_ms,
+            cold_start=cold_start,
+            site_id=site_id,
+            preferred_miss=preferred_miss,
+        )
         if site_id is None:
             raise PortunusError("upstream_crash", "child exited before the call")
         rpc_attrs = {

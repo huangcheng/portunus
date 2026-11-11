@@ -993,21 +993,25 @@ class Registry:
                 if row is not None:
                     await s.delete(row)
                     server.vault_version = int(server.vault_version or 0) + 1
-            s.add(
-                self._audit(
-                    actor,
-                    "skill.auth",
-                    server_id,
-                    {
-                        "action": logical,
-                        "cli_action": cli_action,
-                        "logged_in": logged_in,
-                        "pending": pending,
-                        "site": site_id,
-                        "has_token": bool(token_val),
-                    },
+            # Skip noisy pending status polls (Connect polls every ~2s). Keep login start,
+            # terminal success/failure, logout, and non-status actions.
+            write_audit = not (logical == "status" and pending and not logged_in)
+            if write_audit:
+                s.add(
+                    self._audit(
+                        actor,
+                        "skill.auth",
+                        server_id,
+                        {
+                            "action": logical,
+                            "cli_action": cli_action,
+                            "logged_in": logged_in,
+                            "pending": pending,
+                            "site": site_id,
+                            "has_token": bool(token_val),
+                        },
+                    )
                 )
-            )
             await s.commit()
             names = await self._env_names(s, server_id)
 

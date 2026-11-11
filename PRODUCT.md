@@ -10,7 +10,7 @@ Solo operator of a private MCP gateway. Brief sessions to connect apps, probe to
 
 ## Product Purpose
 
-Portunus is the management plane for one MCP gateway: **Apps + Keys**. Apps are the unit of connection (well-known catalog and custom MCP endpoints); Keys authorize agents on `/mcp`. Success means completing those tasks without ambiguity or accidental writes. Single-operator console — not multi-tenant, billing, or teams UI.
+Portunus is the management plane for one MCP gateway: **Apps + Keys + Fleet + Logs**. Apps are the unit of connection (well-known catalog and custom MCP endpoints); Keys authorize agents on `/mcp`; Fleet shows runners and live children; Logs surfaces audit events and tool-call timing. Success means completing those tasks without ambiguity or accidental writes. Single-operator console — not multi-tenant, billing, or teams UI.
 
 ## Brand Personality
 

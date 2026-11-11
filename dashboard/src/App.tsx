@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { AppsPage } from "./AppsPage";
+import { FleetPage } from "./FleetPage";
 import { BrandMark, Icon } from "./icons/ui";
 import { KeysPage } from "./KeysPage";
 import { Login } from "./Login";
+import { LogsPage } from "./LogsPage";
 
-type View = "apps" | "keys";
+type View = "apps" | "keys" | "fleet" | "logs";
 
 async function copyText(text: string) {
   await navigator.clipboard.writeText(text);
@@ -81,6 +83,40 @@ function ApiEndpoints() {
   );
 }
 
+const VIEW_META: Record<
+  View,
+  { title: string; eyebrow: string; headline: string; description: string; index: string }
+> = {
+  apps: {
+    title: "Apps",
+    eyebrow: "Integration directory",
+    headline: "Your toolstack, connected.",
+    description: "One control plane for every tool your agents use.",
+    index: "01",
+  },
+  keys: {
+    title: "Agent keys",
+    eyebrow: "Access control",
+    headline: "Keys to your gateway.",
+    description: "Create, distribute, and revoke agent credentials from one secure inventory.",
+    index: "02",
+  },
+  fleet: {
+    title: "Fleet",
+    eyebrow: "Runtime inventory",
+    headline: "Runners under this gateway.",
+    description: "Sites, live children, and package drift — read-only operational truth.",
+    index: "03",
+  },
+  logs: {
+    title: "Logs",
+    eyebrow: "Event history",
+    headline: "What happened, when.",
+    description: "Operator audit trail and tool-call timing without arguments or results.",
+    index: "04",
+  },
+};
+
 function Shell({
   view,
   setView,
@@ -96,11 +132,7 @@ function Shell({
   onLogout: () => void;
   children: ReactNode;
 }) {
-  const title = view === "apps" ? "Apps" : "Agent keys";
-  const description =
-    view === "apps"
-      ? "One control plane for every tool your agents use."
-      : "Create, distribute, and revoke agent credentials from one secure inventory.";
+  const meta = VIEW_META[view];
 
   return (
     <div className="app-shell">
@@ -142,21 +174,49 @@ function Shell({
               </span>
               <span className="count">{keyCount ?? "—"}</span>
             </button>
+            <button
+              type="button"
+              className="nav-item"
+              aria-current={view === "fleet" ? "page" : undefined}
+              onClick={() => setView("fleet")}
+            >
+              <span className="nav-item-label">
+                <Icon name="layers" size={16} />
+                Fleet
+              </span>
+              <Icon name="arrow-up-right" size={13} className="nav-arrow" />
+            </button>
+            <button
+              type="button"
+              className="nav-item"
+              aria-current={view === "logs" ? "page" : undefined}
+              onClick={() => setView("logs")}
+            >
+              <span className="nav-item-label">
+                <Icon name="terminal" size={16} />
+                Logs
+              </span>
+              <Icon name="arrow-up-right" size={13} className="nav-arrow" />
+            </button>
           </nav>
           <div className="sidebar-note">
             <Icon name="layers" size={16} />
-            <p>One gateway.<br />Every tool in reach.</p>
+            <p>
+              One gateway.
+              <br />
+              Every tool in reach.
+            </p>
             <span>Apps in. Agents out.</span>
           </div>
         </div>
         <div className="sidebar-footer">
-          <div className="gateway-status">
+          <button type="button" className="gateway-status linkish" onClick={() => setView("fleet")}>
             <span className="gateway-status-label">Gateway status</span>
             <span className={`health ${runners && runners > 0 ? "ok" : ""}`}>
               <span className="dot" aria-hidden />
               <span>{runners == null ? "Checking runners" : `${runners} runner${runners === 1 ? "" : "s"} live`}</span>
             </span>
-          </div>
+          </button>
           <ApiEndpoints />
           <button type="button" className="ghost sidebar-signout" onClick={onLogout} aria-label="Sign out">
             <Icon name="logout" size={14} />
@@ -169,7 +229,7 @@ function Shell({
           <div className="breadcrumb">
             <span>Portunus</span>
             <Icon name="chevron-right" size={11} />
-            <strong>{title}</strong>
+            <strong>{meta.title}</strong>
           </div>
           <div className="environment-badge">
             <span className="environment-dot" aria-hidden />
@@ -179,12 +239,12 @@ function Shell({
         <main className="page-body" id="main-content" tabIndex={-1}>
           <div className={`page-intro ${view}`}>
             <div>
-              <p className="page-eyebrow">{view === "apps" ? "Integration directory" : "Access control"}</p>
-              <h1>{view === "apps" ? "Your toolstack, connected." : "Keys to your gateway."}</h1>
-              <p className="lede">{description}</p>
+              <p className="page-eyebrow">{meta.eyebrow}</p>
+              <h1>{meta.headline}</h1>
+              <p className="lede">{meta.description}</p>
             </div>
             <div className="page-intro-index" aria-hidden="true">
-              {view === "apps" ? "01" : "02"}
+              {meta.index}
             </div>
           </div>
           {children}
@@ -255,7 +315,10 @@ export function App() {
       keyCount={keyCount}
       onLogout={() => api.logout().finally(() => setAuthed(false))}
     >
-      {view === "apps" ? <AppsPage /> : <KeysPage />}
+      {view === "apps" ? <AppsPage /> : null}
+      {view === "keys" ? <KeysPage /> : null}
+      {view === "fleet" ? <FleetPage /> : null}
+      {view === "logs" ? <LogsPage /> : null}
     </Shell>
   );
 }

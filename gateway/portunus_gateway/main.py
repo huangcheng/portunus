@@ -15,6 +15,7 @@ comma-separated list of ``[site=]socket_path:token_file`` links, one per runner.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -232,7 +233,12 @@ def create_gateway_app() -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def lifespan(a: FastAPI) -> AsyncIterator[None]:
+        from datetime import datetime, timezone
+
+        from .retention import retention_loop
+
         setup_telemetry(service_version=gateway_version)
+        a.state.started_at = datetime.now(timezone.utc)
         await store.reload_from_db()  # authz is rebuilt from the DB on start (spec §3)
         # Single-operator: every active key may use every server.
         await authz.ensure_full_grants()
@@ -240,10 +246,16 @@ def create_gateway_app() -> FastAPI:
         if seeded:
             log.info("seeded %d catalog apps", seeded)
         pool.start()
+        stop = asyncio.Event()
+        retention_task = asyncio.create_task(retention_loop(stop), name="portunus-retention")
         try:
             async with inner_lifespan(a):
                 yield
         finally:
+            stop.set()
+            retention_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await retention_task
             await pool.close()
 
     app.router.lifespan_context = lifespan

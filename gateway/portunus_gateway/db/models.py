@@ -11,6 +11,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     MetaData,
@@ -169,9 +170,10 @@ class OperatorSession(Base):
 
 
 class AuditEvent(Base):
-    """Metadata-only audit record (30d retention is enforced by a later task)."""
+    """Metadata-only audit record (retention via PORTUNUS_AUDIT_RETENTION_DAYS)."""
 
     __tablename__ = "audit_events"
+    __table_args__ = (Index("ix_audit_events_created_at", "created_at"),)
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     created_at: Mapped[datetime] = _created_at()
@@ -179,6 +181,33 @@ class AuditEvent(Base):
     action: Mapped[str] = mapped_column(String(100))
     target: Mapped[str | None] = mapped_column(String(200))
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class ToolCall(Base):
+    """One ``portunus_invoke_tool`` outcome for the Logs page (no args/results)."""
+
+    __tablename__ = "tool_calls"
+    __table_args__ = (
+        Index("ix_tool_calls_created_at", "created_at"),
+        Index("ix_tool_calls_trace_id", "trace_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    created_at: Mapped[datetime] = _created_at()
+    trace_id: Mapped[str] = mapped_column(String(64))
+    key_id: Mapped[str] = mapped_column(String(64))
+    server_slug: Mapped[str] = mapped_column(String(100))
+    tool: Mapped[str] = mapped_column(String(200))
+    outcome: Mapped[str] = mapped_column(String(64))
+    site_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    cold_start: Mapped[bool | None] = mapped_column(nullable=True)
+    preferred_miss: Mapped[bool | None] = mapped_column(nullable=True)
+    gateway_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    start_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    queue_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    init_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    upstream_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    result_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class CatalogApp(Base):

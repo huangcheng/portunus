@@ -535,6 +535,162 @@ async def operator_status(
     }
 
 
+@router.get("/fleet")
+async def operator_fleet(
+    request: Request, actor: str = Depends(require_operator)
+) -> dict[str, Any]:
+    from .db.session import async_session
+    from .db.url import database_url
+    from .fleet import build_fleet
+
+    pool = getattr(request.app.state, "runner_pool", None)
+    registry = getattr(request.app.state, "registry", None)
+    slots = getattr(registry, "slots", None) if registry is not None else None
+    if pool is None:
+        raise RegistryError(503, "unsupported", "runner pool is not configured")
+    started = getattr(request.app.state, "started_at", None)
+    if not isinstance(started, datetime):
+        started = datetime.now(timezone.utc)
+    slug_map: dict[uuid.UUID, str] = {}
+    async with async_session() as s:
+        for sid, slug in (await s.execute(select(Server.id, Server.slug))).all():
+            slug_map[sid] = slug
+    return build_fleet(
+        pool=pool,
+        slots=slots,
+        started_at=started,
+        database_url=database_url(),
+        server_slug=slug_map,
+    )
+
+
+@router.get("/audit")
+async def list_audit(
+    request: Request,
+    actor: str = Depends(require_operator),
+    limit: int = 50,
+    before: str | None = None,
+    action: str | None = None,
+    target: str | None = None,
+) -> dict[str, Any]:
+    from .db.session import async_session
+
+    limit = max(1, min(int(limit), 200))
+    async with async_session() as s:
+        stmt = select(AuditEvent).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+        if action:
+            stmt = stmt.where(AuditEvent.action.startswith(action))
+        if target:
+            stmt = stmt.where(AuditEvent.target == target)
+        if before:
+            try:
+                ts_s, id_s = before.split("|", 1)
+                ts = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
+                bid = uuid.UUID(id_s)
+            except (ValueError, TypeError) as e:
+                raise RegistryError(422, "invalid_cursor", "bad before cursor") from e
+            stmt = stmt.where(
+                (AuditEvent.created_at < ts)
+                | ((AuditEvent.created_at == ts) & (AuditEvent.id < bid))
+            )
+        rows = (await s.execute(stmt.limit(limit + 1))).scalars().all()
+    page = rows[:limit]
+    nxt = None
+    if len(rows) > limit:
+        last = page[-1]
+        ts = last.created_at
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        nxt = f"{ts.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')}|{last.id}"
+    return {
+        "items": [
+            {
+                "id": str(r.id),
+                "created_at": _iso(r.created_at),
+                "actor": r.actor,
+                "action": r.action,
+                "target": r.target,
+                "detail": r.detail,
+            }
+            for r in page
+        ],
+        "next": nxt,
+    }
+
+
+@router.get("/tool-calls")
+async def list_tool_calls(
+    request: Request,
+    actor: str = Depends(require_operator),
+    limit: int = 50,
+    before: str | None = None,
+    server: str | None = None,
+    outcome: str | None = None,
+    key_id: str | None = None,
+    site_id: str | None = None,
+    trace_id: str | None = None,
+) -> dict[str, Any]:
+    from .db.models import ToolCall
+    from .db.session import async_session
+
+    limit = max(1, min(int(limit), 200))
+    async with async_session() as s:
+        stmt = select(ToolCall).order_by(ToolCall.created_at.desc(), ToolCall.id.desc())
+        if server:
+            stmt = stmt.where(ToolCall.server_slug == server.casefold())
+        if outcome:
+            stmt = stmt.where(ToolCall.outcome == outcome)
+        if key_id:
+            stmt = stmt.where(ToolCall.key_id == key_id)
+        if site_id:
+            stmt = stmt.where(ToolCall.site_id == site_id)
+        if trace_id:
+            stmt = stmt.where(ToolCall.trace_id == trace_id)
+        if before:
+            try:
+                ts_s, id_s = before.split("|", 1)
+                ts = datetime.fromisoformat(ts_s.replace("Z", "+00:00"))
+                bid = uuid.UUID(id_s)
+            except (ValueError, TypeError) as e:
+                raise RegistryError(422, "invalid_cursor", "bad before cursor") from e
+            stmt = stmt.where(
+                (ToolCall.created_at < ts) | ((ToolCall.created_at == ts) & (ToolCall.id < bid))
+            )
+        rows = (await s.execute(stmt.limit(limit + 1))).scalars().all()
+    page = rows[:limit]
+    nxt = None
+    if len(rows) > limit:
+        last = page[-1]
+        ts = last.created_at
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        nxt = f"{ts.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')}|{last.id}"
+    return {
+        "items": [
+            {
+                "id": str(r.id),
+                "created_at": _iso(r.created_at),
+                "trace_id": r.trace_id,
+                "key_id": r.key_id,
+                "server_slug": r.server_slug,
+                "tool": r.tool,
+                "outcome": r.outcome,
+                "site_id": r.site_id,
+                "cold_start": r.cold_start,
+                "preferred_miss": r.preferred_miss,
+                "gateway_ms": r.gateway_ms,
+                "start_ms": r.start_ms,
+                "queue_ms": r.queue_ms,
+                "init_ms": r.init_ms,
+                "upstream_ms": r.upstream_ms,
+                "result_bytes": r.result_bytes,
+            }
+            for r in page
+        ],
+        "next": nxt,
+    }
+
+
 @router.post("/auth/logout", status_code=204)
 async def logout(request: Request, actor: str = Depends(require_operator)) -> Response:
     auth = _auth(request)
