@@ -8,7 +8,8 @@ backend: json_cli
 
 auth:
   type: oauth_link
-  # Force Quark agent detection on headless Portunus runners.
+  # Force Quark agent detection on Connect auth. Tool calls also need
+  # OPENCLAW_CLI via catalog env_defaults (stdio vault) — login_env alone is not enough.
   login_env:
     OPENCLAW_CLI: "1"
   actions:

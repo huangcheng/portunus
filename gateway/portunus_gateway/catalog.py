@@ -221,6 +221,9 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "env_defaults": {
                 "SKILL_ROOT": QUARK_SKILL_ROOT,
                 "STATE_DIR": QUARK_STATE_DIR,
+                # Quark CLI agent-gate (-104) requires OpenClaw identity on every
+                # tool spawn, not only Connect login (login_env is auth-only).
+                "OPENCLAW_CLI": "1",
             },
         },
     },
@@ -496,7 +499,10 @@ class CatalogStore:
                 seed_auth = seed_manifest.get("auth") if isinstance(seed_manifest, dict) else None
                 live_auth = live_manifest.get("auth") if isinstance(live_manifest, dict) else None
                 auth_changed = seed_auth != live_auth
-                if (seed_names and seed_names != live_names) or auth_changed:
+                seed_defaults = spec.get("env_defaults") or {}
+                live_defaults = (row.spec or {}).get("env_defaults") or {}
+                defaults_changed = seed_defaults != live_defaults
+                if (seed_names and seed_names != live_names) or auth_changed or defaults_changed:
                     row.spec = spec
                     linked = (
                         await s.execute(

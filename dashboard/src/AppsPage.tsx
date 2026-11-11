@@ -985,7 +985,18 @@ function SkillBridgeManagePanel({
   const oauthOpts = oauthLink ? oauthLinkAuthOptions(app) : null;
 
   async function ensureServer(): Promise<Server> {
-    if (current) return current;
+    if (current) {
+      // Backfill catalog env_defaults (e.g. OPENCLAW_CLI) onto existing vaults.
+      const missing = Object.fromEntries(
+        Object.entries(envDefaults).filter(([k]) => !current.env_names.includes(k)),
+      );
+      if (Object.keys(missing).length) {
+        const updated = await api.updateServer(current.id, { env: missing });
+        setCurrent(updated);
+        return updated;
+      }
+      return current;
+    }
     const created = await api.createServer({
       name: app.name,
       slug: app.slug,
