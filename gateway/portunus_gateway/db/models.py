@@ -81,6 +81,13 @@ class Server(Base):
     )
     # Bumped on every vault change; children record it, reconcile compares it.
     vault_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Last successful tools/list probe (null until first success).
+    last_probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Last successful call or probe.
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Last failure that counts for derived status (see health.py).
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = _created_at()
 
     @validates("slug")

@@ -143,7 +143,12 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
     ),
 }
 _DESCRIPTIONS = {
-    "portunus_discover_servers": "List the MCP servers this key may use (paged).",
+    "portunus_discover_servers": (
+        "List the MCP servers this key may use (paged). Each item includes a derived "
+        "status (probing|ok|auth_required|unreachable), tool_count (null until the first "
+        "successful probe), and last_probe_at / last_ok_at / last_error_* timestamps. "
+        "An unreachable status reflects the last observation; a retry is allowed."
+    ),
     "portunus_discover_tools": "List the enabled tools of a granted server (paged).",
     "portunus_get_tool_schema": "Get the input schema and description of one tool.",
     "portunus_invoke_tool": "Invoke one tool of a granted server with arguments.",
@@ -652,45 +657,31 @@ class Omni:
     async def _discover_servers(self, key_id: str, args: dict[str, Any]) -> types.CallToolResult:
         query, cursor, limit = self._paging(args)
         async with self._sf() as s:
-            servers = (
+            servers = list(
                 (await s.execute(select(ServerRow).where(ServerRow.enabled.is_(True))))
                 .scalars()
                 .all()
             )
-            counts: dict[uuid.UUID, int] = {}
-            for sid in (
-                await s.execute(select(ToolRow.server_id).where(ToolRow.enabled.is_(True)))
-            ).scalars():
-                counts[sid] = counts.get(sid, 0) + 1
-            auth_sids = {
-                row
-                for row in (
-                    await s.execute(
-                        select(VaultEntry.server_id).where(
-                            VaultEntry.name == AUTH_HEADER_NAME
-                        )
-                    )
-                ).scalars()
-            }
-        items = []
-        for sv in sorted(servers, key=lambda x: x.slug):
-            if not self.authz.has_grant(key_id, sv.id):
-                continue
-            if query and query not in sv.slug.casefold() and query not in sv.name.casefold():
-                continue
-            status = "ok"
-            # Cheap readiness: OAuth remotes without a stored Authorization need reconnect.
-            if sv.kind == "remote" and sv.oauth and sv.id not in auth_sids:
-                status = "auth_required"
-            items.append(
-                {
-                    "slug": sv.slug,
-                    "name": sv.name,
-                    "kind": sv.kind,
-                    "tool_count": counts.get(sv.id, 0),
-                    "status": status,
-                }
+        granted = [
+            sv
+            for sv in sorted(servers, key=lambda x: x.slug)
+            if self.authz.has_grant(key_id, sv.id)
+            and (
+                not query
+                or query in sv.slug.casefold()
+                or query in sv.name.casefold()
             )
+        ]
+        health_map = await self.registry.health_by_server_ids(granted)
+        items = [
+            {
+                "slug": sv.slug,
+                "name": sv.name,
+                "kind": sv.kind,
+                **health_map[sv.id],
+            }
+            for sv in granted
+        ]
         return ok_result(_page(items, "slug", cursor, limit))
 
     async def _discover_tools(self, key_id: str, args: dict[str, Any]) -> types.CallToolResult:
@@ -743,14 +734,34 @@ class Omni:
         arguments = args.get("arguments", {})
         _validate(tool.schema, arguments, what="tool arguments")
         timeout_s = self.invoke_timeout_s
+        caller_shortened_timeout = False
         if "timeout_s" in args:
-            timeout_s = min(float(args["timeout_s"]), timeout_s)
+            requested = float(args["timeout_s"])
+            timeout_s = min(requested, timeout_s)
+            caller_shortened_timeout = requested < self.invoke_timeout_s
 
         if self.inflight(key_id) >= self.max_concurrent:
             raise PortunusError("rate_limited", f"over {self.max_concurrent} concurrent invokes")
         self._inflight[key_id] = self.inflight(key_id) + 1
         try:
-            return await self._run_invoke(key_id, server, tool, arguments, timeout_s)
+            try:
+                result = await self._run_invoke(key_id, server, tool, arguments, timeout_s)
+            except (PortunusError, RegistryError) as e:
+                await self.registry.record_outcome(
+                    server.id,
+                    e.code,
+                    message=e.message,
+                    caller_shortened_timeout=caller_shortened_timeout,
+                )
+                raise
+            code = _error_code_from_result(result)
+            await self.registry.record_outcome(
+                server.id,
+                code,
+                message="",
+                caller_shortened_timeout=caller_shortened_timeout,
+            )
+            return result
         finally:
             left = self.inflight(key_id) - 1
             if left > 0:

@@ -80,6 +80,8 @@ export type UpdateServerBody = {
   env?: Record<string, string>;
 };
 
+export type ServerStatus = "probing" | "ok" | "auth_required" | "unreachable";
+
 export type Server = {
   id: string;
   name: string;
@@ -94,6 +96,12 @@ export type Server = {
   has_skill_session?: boolean;
   preferred_regions: string[];
   env_names: string[];
+  status?: ServerStatus;
+  tool_count?: number | null;
+  last_probe_at?: string | null;
+  last_ok_at?: string | null;
+  last_error_code?: string | null;
+  last_error_at?: string | null;
 };
 
 export type SkillAuthResult = {

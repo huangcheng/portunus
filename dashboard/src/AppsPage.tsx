@@ -117,9 +117,16 @@ function oauthBodyFromApp(
   return body;
 }
 
-function toolsLabel(n: number | undefined): string | null {
+function toolsLabel(n: number | undefined | null): string | null {
   if (typeof n !== "number" || n <= 0) return null;
   return `${n} tool${n === 1 ? "" : "s"}`;
+}
+
+function healthPill(status: Server["status"] | undefined): { label: string; kind: string } | null {
+  if (status === "auth_required") return { label: "Needs auth", kind: "warn" };
+  if (status === "unreachable") return { label: "Unreachable", kind: "warn" };
+  if (status === "probing") return { label: "Probing", kind: "" };
+  return null;
 }
 
 function hostLabel(url: string | null | undefined): string | null {
@@ -471,8 +478,10 @@ function CatalogCard({
   onOpen: () => void;
 }) {
   const { active, configured } = appStatus(app, server);
-  const label = toolsLabel(toolCount);
+  const count = server?.tool_count ?? toolCount;
+  const label = toolsLabel(count);
   const paused = !!server && !server.enabled && (active || configured);
+  const health = !paused ? healthPill(server?.status) : null;
 
   return (
     <article
@@ -493,6 +502,8 @@ function CatalogCard({
           <span className="app-card-title">{app.label}</span>
           {paused ? (
             <span className="app-pill warn">Paused</span>
+          ) : health ? (
+            <span className={`app-pill ${health.kind}`}>{health.label}</span>
           ) : active ? (
             <span className="app-status-dot" title="Live for agents" />
           ) : configured ? (
@@ -501,8 +512,20 @@ function CatalogCard({
         </div>
         <p className="app-card-desc">{app.description}</p>
         <div className="app-card-meta">
-          <span className={`app-meta-item ${active && !paused ? "is-connected" : "muted"}`}>
-            {paused ? "Paused" : active ? "Connected" : configured ? "Needs authorization" : "Not connected"}
+          <span
+            className={`app-meta-item ${
+              !paused && !health && active ? "is-connected" : "muted"
+            }`}
+          >
+            {paused
+              ? "Paused"
+              : health
+                ? health.label
+                : active
+                  ? "Connected"
+                  : configured
+                    ? "Needs authorization"
+                    : "Not connected"}
           </span>
           {label && (
             <span className="app-meta-item">
@@ -542,13 +565,15 @@ function ConnectedCard({
   toolCount?: number;
   onOpen: () => void;
 }) {
-  const label = toolsLabel(toolCount);
+  const count = server.tool_count ?? toolCount;
+  const label = toolsLabel(count);
   const title = catalog?.label ?? server.name;
   const desc =
     catalog?.description ??
     (server.kind === "stdio"
       ? [server.command, ...(server.args ?? [])].filter(Boolean).join(" ") || server.slug
       : hostLabel(server.url) ?? "Custom MCP");
+  const health = server.enabled ? healthPill(server.status) : null;
 
   return (
     <article
@@ -567,16 +592,22 @@ function ConnectedCard({
       <div className="app-card-body">
         <div className="app-card-title-row">
           <span className="app-card-title">{title}</span>
-          {server.enabled ? (
-            <span className="app-status-dot" title="Live for agents" />
-          ) : (
+          {!server.enabled ? (
             <span className="app-pill warn">Paused</span>
+          ) : health ? (
+            <span className={`app-pill ${health.kind}`}>{health.label}</span>
+          ) : (
+            <span className="app-status-dot" title="Live for agents" />
           )}
         </div>
         <p className="app-card-desc">{desc}</p>
         <div className="app-card-meta">
-          <span className={`app-meta-item ${server.enabled ? "is-connected" : "muted"}`}>
-            {server.enabled ? "Connected" : "Paused"}
+          <span
+            className={`app-meta-item ${
+              server.enabled && !health ? "is-connected" : "muted"
+            }`}
+          >
+            {!server.enabled ? "Paused" : health ? health.label : "Connected"}
           </span>
           {label ? (
             <span className="app-meta-item">

@@ -16,12 +16,15 @@ Invariants
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 import uuid
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 # oauth_link browser_capture jobs live in runner memory — status polls must hit the same site.
@@ -29,11 +32,17 @@ _OAUTH_JOB_SITES: dict[str, tuple[str, float]] = {}  # job_id -> (site_id, expir
 _OAUTH_JOB_SITE_TTL_S = 300.0
 
 from portunus_shared import ALLOWED_PORTUNUS_ENV, DEFAULTS, PortunusError, validate_stdio_command
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db.models import AuditEvent, CatalogApp, Server, Tool, VaultEntry
+from .health import (
+    HealthFacts,
+    health_fields,
+    should_record_failure,
+    should_throttle_success,
+)
 from .oauth import (
     AUTH_HEADER_NAME,
     OAUTH_CLIENT_SECRET_NAME,
@@ -44,6 +53,8 @@ from .oauth import (
 from .runner_client import RunnerRequestError
 from .runner_pool import RunnerPool
 from .vault import Vault, VaultError
+
+log = logging.getLogger("portunus.gateway.registry")
 
 MAX_ENV_ENTRIES = 256  # mirrors the runner's bound
 MAX_ENV_BYTES = 128 * 1024
@@ -161,10 +172,12 @@ def validate_regions(regions: Any) -> list[str]:
     return out
 
 
-def server_view(server: Server, env_names: list[str]) -> dict[str, Any]:
+def server_view(
+    server: Server, env_names: list[str], *, health: dict[str, Any] | None = None
+) -> dict[str, Any]:
     # Hide reserved vault names from the operator UI.
     public_names = sorted(n for n in env_names if not n.lower().startswith("portunus."))
-    return {
+    out: dict[str, Any] = {
         "id": str(server.id),
         "name": server.name,
         "slug": server.slug,
@@ -182,6 +195,9 @@ def server_view(server: Server, env_names: list[str]) -> dict[str, Any]:
         "env_names": public_names,  # names only, never values
         "created_at": server.created_at.isoformat() if server.created_at else None,
     }
+    if health:
+        out.update(health)
+    return out
 
 
 def tool_view(tool: Tool) -> dict[str, Any]:
@@ -250,10 +266,228 @@ class Registry:
         self.probe_timeout_s = probe_timeout_s
         self.max_probes = max_probes
         self._probing: set[uuid.UUID] = set()
+        self._probe_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def session_factory(self) -> Callable[[], AsyncSession]:
         return self._sf
+
+    def is_probing(self, server_id: uuid.UUID) -> bool:
+        return server_id in self._probing
+
+    def any_runner_connected(self) -> bool:
+        return self.pool.any_connected()
+
+    # ---- health observations -----------------------------------------------------
+
+    async def _skill_bridge_slugs(self, s: AsyncSession) -> set[str]:
+        rows = (
+            await s.execute(
+                select(CatalogApp.slug).where(CatalogApp.connection == "skill_bridge")
+            )
+        ).scalars()
+        return {str(slug) for slug in rows}
+
+    async def _enabled_tool_counts(
+        self, s: AsyncSession, server_ids: list[uuid.UUID] | None = None
+    ) -> dict[uuid.UUID, int]:
+        stmt = (
+            select(Tool.server_id, func.count())
+            .where(Tool.enabled.is_(True))
+            .group_by(Tool.server_id)
+        )
+        if server_ids is not None:
+            if not server_ids:
+                return {}
+            stmt = stmt.where(Tool.server_id.in_(server_ids))
+        counts: dict[uuid.UUID, int] = {}
+        for sid, n in (await s.execute(stmt)).all():
+            counts[sid] = int(n)
+        return counts
+
+    def _facts_for(
+        self,
+        server: Server,
+        env_names: list[str],
+        *,
+        requires_skill_session: bool,
+        enabled_tool_count: int,
+    ) -> HealthFacts:
+        return HealthFacts(
+            kind=server.kind,
+            oauth=server.oauth if isinstance(server.oauth, dict) else None,
+            has_authorization=any(n.lower() == AUTH_HEADER_NAME.lower() for n in env_names),
+            requires_skill_session=requires_skill_session,
+            has_skill_session=any(n == "SKILL_SESSION" for n in env_names),
+            probing=self.is_probing(server.id),
+            runner_connected=self.any_runner_connected(),
+            last_probe_at=server.last_probe_at,
+            last_ok_at=server.last_ok_at,
+            last_error_code=server.last_error_code,
+            last_error_at=server.last_error_at,
+            enabled_tool_count=enabled_tool_count,
+        )
+
+    async def health_for_server(
+        self, server: Server, env_names: list[str], *, enabled_tool_count: int | None = None
+    ) -> dict[str, Any]:
+        async with self._sf() as s:
+            skill_slugs = await self._skill_bridge_slugs(s)
+            if enabled_tool_count is None:
+                counts = await self._enabled_tool_counts(s, [server.id])
+                enabled_tool_count = counts.get(server.id, 0)
+        facts = self._facts_for(
+            server,
+            env_names,
+            requires_skill_session=server.slug in skill_slugs,
+            enabled_tool_count=enabled_tool_count,
+        )
+        return health_fields(facts)
+
+    async def _enriched_view(self, server: Server, env_names: list[str]) -> dict[str, Any]:
+        health = await self.health_for_server(server, env_names)
+        return server_view(server, env_names, health=health)
+
+    async def record_outcome(
+        self,
+        server_id: uuid.UUID,
+        code: str | None,
+        *,
+        is_probe: bool = False,
+        message: str = "",
+        caller_shortened_timeout: bool = False,
+    ) -> None:
+        """Persist a call/probe observation. ``code is None`` means success.
+
+        Best-effort: DB failures are logged and swallowed so bookkeeping never
+        masks the invoke/probe outcome the caller already has.
+        """
+        try:
+            await self._record_outcome(
+                server_id,
+                code,
+                is_probe=is_probe,
+                message=message,
+                caller_shortened_timeout=caller_shortened_timeout,
+            )
+        except Exception:  # noqa: BLE001 — never fail the call/probe path
+            log.exception("record_outcome failed for %s code=%s", server_id, code)
+
+    async def _record_outcome(
+        self,
+        server_id: uuid.UUID,
+        code: str | None,
+        *,
+        is_probe: bool = False,
+        message: str = "",
+        caller_shortened_timeout: bool = False,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        if code is None:
+            async with self._sf() as s:
+                server = await s.get(Server, server_id)
+                if server is None:
+                    return
+                # Cheap early-out: already ok recently → writing last_ok_at cannot change status.
+                if (
+                    not is_probe
+                    and server.last_ok_at is not None
+                    and (server.last_error_at is None or server.last_ok_at >= server.last_error_at)
+                    and should_throttle_success(
+                        status_now="ok", last_ok_at=server.last_ok_at, now=now
+                    )
+                ):
+                    return
+                names = await self._env_names(s, server_id)
+                skill_slugs = await self._skill_bridge_slugs(s)
+                counts = await self._enabled_tool_counts(s, [server_id])
+                facts = self._facts_for(
+                    server,
+                    names,
+                    requires_skill_session=server.slug in skill_slugs,
+                    enabled_tool_count=counts.get(server_id, 0),
+                )
+                status_now = health_fields(facts)["status"]
+                if not is_probe and should_throttle_success(
+                    status_now=status_now, last_ok_at=server.last_ok_at, now=now
+                ):
+                    return
+                server.last_ok_at = now
+                if is_probe:
+                    server.last_probe_at = now
+                await s.commit()
+            return
+
+        if not should_record_failure(
+            code, message=message, caller_shortened_timeout=caller_shortened_timeout
+        ):
+            return
+        async with self._sf() as s:
+            server = await s.get(Server, server_id)
+            if server is None:
+                return
+            server.last_error_code = code
+            server.last_error_at = now
+            await s.commit()
+
+    async def health_by_server_ids(
+        self, servers: list[Server]
+    ) -> dict[uuid.UUID, dict[str, Any]]:
+        """Batch health fields for discovery / list views (one shared derivation)."""
+        if not servers:
+            return {}
+        ids = [sv.id for sv in servers]
+        async with self._sf() as s:
+            names: dict[uuid.UUID, list[str]] = {}
+            for sid, n in (
+                await s.execute(
+                    select(VaultEntry.server_id, VaultEntry.name).where(
+                        VaultEntry.server_id.in_(ids)
+                    )
+                )
+            ).all():
+                names.setdefault(sid, []).append(n)
+            skill_slugs = await self._skill_bridge_slugs(s)
+            counts = await self._enabled_tool_counts(s, ids)
+        out: dict[uuid.UUID, dict[str, Any]] = {}
+        for sv in servers:
+            facts = self._facts_for(
+                sv,
+                names.get(sv.id, []),
+                requires_skill_session=sv.slug in skill_slugs,
+                enabled_tool_count=counts.get(sv.id, 0),
+            )
+            out[sv.id] = health_fields(facts)
+        return out
+
+    async def clear_error_and_reprobe(self, server_id: uuid.UUID, actor: str) -> None:
+        """Credential change: clear last_error_* and schedule a probe."""
+        async with self._sf() as s:
+            server = await s.get(Server, server_id)
+            if server is None:
+                return
+            server.last_error_code = None
+            server.last_error_at = None
+            await s.commit()
+        self._schedule_probe(server_id, actor)
+
+    def _schedule_probe(self, server_id: uuid.UUID, actor: str) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _run() -> None:
+            try:
+                await self.probe(server_id, actor)
+            except RegistryError as e:
+                log.info("post-credential probe failed for %s: %s", server_id, e.code)
+            except Exception:  # noqa: BLE001 — never fail the credential write path
+                log.exception("post-credential probe crashed for %s", server_id)
+
+        task = loop.create_task(_run(), name=f"portunus-probe-{server_id}")
+        self._probe_tasks.add(task)
+        task.add_done_callback(self._probe_tasks.discard)
 
     # ---- argv --------------------------------------------------------------------
 
@@ -351,7 +585,7 @@ class Registry:
             except IntegrityError:
                 await s.rollback()
                 raise RegistryError(409, "conflict", "slug already in use") from None
-        return server_view(server, list(secrets))
+        return await self._enriched_view(server, list(secrets))
 
     async def update_server(
         self,
@@ -379,6 +613,7 @@ class Registry:
             if not isinstance(oauth_client_secret, str) or "\x00" in oauth_client_secret:
                 raise RegistryError(422, "invalid_oauth", "invalid oauth_client_secret")
         secrets = validate_env(env) if env is not None else None
+        creds_changed = bool(secrets) or bool(oauth_client_secret)
         async with self._sf() as s:
             server = await self._get_server(s, server_id)
             if (oauth is not None or oauth_client_secret is not None) and server.kind != "remote":
@@ -403,16 +638,24 @@ class Registry:
             s.add(self._audit(actor, "server.update", server_id, audit or None))
             await s.commit()
             names = await self._env_names(s, server_id)
-            return server_view(server, names)
+        if creds_changed:
+            await self.clear_error_and_reprobe(server_id, actor)
+        server = await self._load_server(server_id)
+        return await self._enriched_view(server, names)
 
     async def list_servers(self) -> list[dict[str, Any]]:
         async with self._sf() as s:
-            servers = (await s.execute(select(Server).order_by(Server.created_at))).scalars().all()
+            servers = list(
+                (await s.execute(select(Server).order_by(Server.created_at))).scalars().all()
+            )
             names: dict[uuid.UUID, list[str]] = {}
             rows = await s.execute(select(VaultEntry.server_id, VaultEntry.name))
             for sid, n in rows:
                 names.setdefault(sid, []).append(n)
-        return [server_view(sv, names.get(sv.id, [])) for sv in servers]
+        health_map = await self.health_by_server_ids(servers)
+        return [
+            server_view(sv, names.get(sv.id, []), health=health_map[sv.id]) for sv in servers
+        ]
 
     async def list_tools(self, server_id: uuid.UUID) -> list[dict[str, Any]]:
         async with self._sf() as s:
@@ -441,7 +684,7 @@ class Registry:
             )
             await s.commit()
             names = await self._env_names(s, server_id)
-            view = server_view(server, names)
+        view = await self._enriched_view(server, names)
         if not enabled and self.slots is not None:
             self.slots.disable_server(server_id)  # children -> pending_stop, killed when reachable
         return view
@@ -520,6 +763,9 @@ class Registry:
         self._probing.add(server_id)
         try:
             return await self._probe(server_id, actor)
+        except RegistryError as e:
+            await self.record_outcome(server_id, e.code, is_probe=True, message=e.message)
+            raise
         finally:
             self._probing.discard(server_id)
 
@@ -730,10 +976,12 @@ class Registry:
         if browser_capture and logical == "status" and job_val and (logged_in or not pending):
             _OAUTH_JOB_SITES.pop(job_val, None)
 
+        session_written = False
         async with self._sf() as s:
             server = await self._get_server(s, server_id)
             if logical in {"login", "status", "refresh", "relogin"} and logged_in:
                 await self._upsert_vault(s, server, "SKILL_SESSION", "1")
+                session_written = True
             if logical == "logout":
                 row = (
                     await s.execute(
@@ -762,6 +1010,9 @@ class Registry:
             )
             await s.commit()
             names = await self._env_names(s, server_id)
+
+        if session_written:
+            await self.clear_error_and_reprobe(server_id, actor)
 
         return {
             "action": logical,
@@ -845,7 +1096,9 @@ class Registry:
             s.add(self._audit(actor, "server.auth_token", server_id, None))
             await s.commit()
             names = await self._env_names(s, server_id)
-            return server_view(server, names)
+        await self.clear_error_and_reprobe(server_id, actor)
+        server = await self._load_server(server_id)
+        return await self._enriched_view(server, names)
 
     async def store_authorization_header(
         self, server_id: uuid.UUID, authorization: str, actor: str, *, action: str = "server.oauth"
@@ -861,7 +1114,9 @@ class Registry:
             s.add(self._audit(actor, action, server_id, None))
             await s.commit()
             names = await self._env_names(s, server_id)
-            return server_view(server, names)
+        await self.clear_error_and_reprobe(server_id, actor)
+        server = await self._load_server(server_id)
+        return await self._enriched_view(server, names)
 
     async def read_oauth_client_secret(self, server_id: uuid.UUID) -> str | None:
         async with self._sf() as s:
@@ -905,8 +1160,9 @@ class Registry:
         incoming: list[dict[str, Any]],
         audit_extra: dict[str, Any],
     ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
         async with self._sf() as s:
-            await self._get_server(s, server_id)  # deleted while probing -> 404
+            server = await self._get_server(s, server_id)  # deleted while probing -> 404
             existing = {
                 t.upstream_name: t
                 for t in (await s.execute(select(Tool).where(Tool.server_id == server_id)))
@@ -941,6 +1197,8 @@ class Registry:
                     changed.append(tool.upstream_name)
             seen = {i["name"] for i in incoming}
             missing = sorted(n for n in existing if n not in seen)
+            server.last_probe_at = now
+            server.last_ok_at = now
             s.add(
                 self._audit(
                     actor,
@@ -1014,6 +1272,10 @@ class Registry:
         if server is None:
             raise RegistryError(404, "not_found", "server not found")
         return server
+
+    async def _load_server(self, server_id: uuid.UUID) -> Server:
+        async with self._sf() as s:
+            return await self._get_server(s, server_id)
 
     @staticmethod
     async def _env_names(s: AsyncSession, server_id: uuid.UUID) -> list[str]:
