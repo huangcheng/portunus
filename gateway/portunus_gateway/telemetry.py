@@ -78,13 +78,26 @@ def setup_telemetry(*, service_version: str | None = None) -> None:
 
         try:
             tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
-            metric_readers = [PeriodicExportingMetricReader(OTLPMetricExporter())]
+            # Tempo accepts traces only. Set OTEL_METRICS_EXPORTER=none (or a dedicated
+            # OTEL_EXPORTER_OTLP_METRICS_ENDPOINT) when the shared endpoint is traces-only.
+            metrics_exporter = (os.environ.get("OTEL_METRICS_EXPORTER") or "").strip().lower()
+            metrics_endpoint = (os.environ.get("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") or "").strip()
+            metric_readers = []
+            if metrics_exporter != "none":
+                metric_kw = {}
+                if metrics_endpoint:
+                    metric_kw["endpoint"] = metrics_endpoint
+                metric_readers = [PeriodicExportingMetricReader(OTLPMetricExporter(**metric_kw))]
             meter_provider = MeterProvider(resource=resource, metric_readers=metric_readers)
             # Log host only — endpoint may embed userinfo credentials.
             host = endpoint.split("?")[0]
             if "@" in host:
                 host = host.split("@", 1)[-1]
-            log.info("OTLP export enabled endpoint=%s", host)
+            log.info(
+                "OTLP export enabled endpoint=%s metrics=%s",
+                host,
+                "off" if metrics_exporter == "none" and not metrics_endpoint else "on",
+            )
         except Exception:
             # Bad OTEL_* config must never block gateway startup.
             log.warning("OTLP exporter setup failed; continuing without export", exc_info=True)
