@@ -30,7 +30,7 @@ import logging
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from portunus_shared import DEFAULTS, PortunusError
 
@@ -38,6 +38,13 @@ from .runner_client import RunnerRequestError
 from .runner_pool import RunnerPool
 
 log = logging.getLogger("portunus.gateway.slots")
+
+
+class ReserveResult(NamedTuple):
+    """Outcome of ``reserve_and_start``: live child id and whether this call started it."""
+
+    child_id: str
+    cold_start: bool
 
 
 class _Authz(Protocol):
@@ -252,8 +259,11 @@ class SlotManager:
         start_payload: dict,
         *,
         preferred_regions: Iterable[str] = (),
-    ) -> str:
-        """Return the ``child_id`` of a live, authorized child for the pair (reusing one).
+    ) -> ReserveResult:
+        """Return a live, authorized child for the pair (reusing one when possible).
+
+        ``cold_start`` is False when an existing committed child is reused; True when this call
+        starts a new child.
 
         Raises ``revoked`` / ``not_granted`` / ``server_disabled`` (admission or lost a race),
         ``child_cap``, ``runner_unavailable`` (no live runner in the pool), ``spawn_rejected`` /
@@ -270,7 +280,7 @@ class SlotManager:
             if existing is not None:
                 if existing.state is SlotState.COMMITTED and not existing.pending_stop:
                     if not self._vault_stale(existing):
-                        return existing.child_id
+                        return ReserveResult(existing.child_id, cold_start=False)
                     self._mark_pending_stop(existing)
                 # Unresolved start or a child still being stopped: never double-spawn.
                 raise PortunusError(
@@ -301,7 +311,8 @@ class SlotManager:
                 slot.site_id,
                 slot.preferred_miss,
             )
-            return await self._start(slot, argv, trailing, env)
+            child_id = await self._start(slot, argv, trailing, env)
+            return ReserveResult(child_id, cold_start=True)
 
     async def _start(
         self, slot: Slot, argv: list[str], trailing: list[str], env: dict[str, str]

@@ -202,7 +202,7 @@ async def test_site_follows_hello_for_unpinned_client():
 async def test_start_pins_slot_to_picked_site(manager, site_a, site_b, authz):
     sid = uuid.uuid4()
     grant(authz, "k1", sid)
-    cid = await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-b"])
+    cid = (await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-b"])).child_id
     slot = manager.slot(cid)
     assert slot.site_id == "site-b" and slot.state is SlotState.COMMITTED
     assert manager.site_of(cid) == "site-b"
@@ -214,7 +214,7 @@ async def test_start_falls_back_when_preferred_site_down(manager, site_a, site_b
     site_b.connected = False
     sid = uuid.uuid4()
     grant(authz, "k1", sid)
-    cid = await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-b"])
+    cid = (await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-b"])).child_id
     assert manager.slot(cid).site_id == "site-a"
     assert manager.slot(cid).preferred_miss is True
 
@@ -253,8 +253,8 @@ async def test_stop_hits_owning_site_only(manager, site_a, site_b, authz):
     sa, sb = uuid.uuid4(), uuid.uuid4()
     grant(authz, "k1", sa)
     grant(authz, "k1", sb)
-    ca = await manager.reserve_and_start(sa, "k1", PAYLOAD, preferred_regions=["region-a"])
-    cb = await manager.reserve_and_start(sb, "k1", PAYLOAD, preferred_regions=["region-b"])
+    ca = (await manager.reserve_and_start(sa, "k1", PAYLOAD, preferred_regions=["region-a"])).child_id
+    cb = (await manager.reserve_and_start(sb, "k1", PAYLOAD, preferred_regions=["region-b"])).child_id
     manager.ungrant("k1", sb)
     await settle(lambda: manager.slot(cb) is None)
     assert site_b.kills() == [cb]
@@ -272,7 +272,7 @@ async def test_stop_waits_when_owning_site_is_down_even_if_other_is_up(
 ):
     sid = uuid.uuid4()
     grant(authz, "k1", sid)
-    cid = await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])
+    cid = (await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])).child_id
     site_a.connected = False
     manager.ungrant("k1", sid)
     await asyncio.sleep(0.2)
@@ -292,7 +292,7 @@ async def test_stop_waits_when_owning_site_is_down_even_if_other_is_up(
 async def test_child_on_a_not_adopted_from_b_inventory(manager, site_a, site_b, authz):
     sid = uuid.uuid4()
     grant(authz, "k1", sid)
-    cid = await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])
+    cid = (await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])).child_id
     # Site B (buggy or hostile) claims the same child id.
     site_b.children[cid] = {"child_id": cid, "server_id": str(sid)}
     res = await manager.sync_with_runner("site-b")
@@ -309,7 +309,7 @@ async def test_child_on_a_not_adopted_from_b_inventory(manager, site_a, site_b, 
 async def test_b_inventory_does_not_free_a_slots(manager, site_a, site_b, authz):
     sid = uuid.uuid4()
     grant(authz, "k1", sid)
-    cid = await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])
+    cid = (await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])).child_id
     site_b.conn_seq += 1  # B reconnects with an empty inventory
     res = await manager.sync_with_runner("site-b")
     assert res.freed == []
@@ -319,7 +319,7 @@ async def test_b_inventory_does_not_free_a_slots(manager, site_a, site_b, authz)
 async def test_own_site_inventory_absence_frees_slot(manager, site_a, authz):
     sid = uuid.uuid4()
     grant(authz, "k1", sid)
-    cid = await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])
+    cid = (await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])).child_id
     site_a.children.clear()
     site_a.conn_seq += 1
     res = await manager.sync_with_runner("site-a")
@@ -338,7 +338,7 @@ async def test_unknown_child_from_b_is_tracked_and_killed_on_b(manager, site_a, 
 async def test_child_exited_from_wrong_site_is_ignored(manager, site_a, site_b, authz):
     sid = uuid.uuid4()
     grant(authz, "k1", sid)
-    cid = await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])
+    cid = (await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])).child_id
     site_b.on_child_exited(cid)  # B cannot give exit evidence for A's child
     assert manager.slot(cid) is not None
     site_a.on_child_exited(cid)
@@ -348,7 +348,7 @@ async def test_child_exited_from_wrong_site_is_ignored(manager, site_a, site_b, 
 async def test_attach_hooks_reconcile_per_site(manager, site_a, site_b, authz):
     sid = uuid.uuid4()
     grant(authz, "k1", sid)
-    cid = await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])
+    cid = (await manager.reserve_and_start(sid, "k1", PAYLOAD, preferred_regions=["region-a"])).child_id
     site_b.children[cid] = {"child_id": cid, "server_id": str(sid)}
     await site_b.on_connected()  # what RunnerClient does after B's hello
     assert manager.slot(cid).site_id == "site-a"
@@ -369,7 +369,7 @@ async def test_bare_client_still_works_without_site_argument(authz):
     sm.attach(only)
     sid = uuid.uuid4()
     grant(authz, "k1", sid)
-    cid = await sm.reserve_and_start(sid, "k1", PAYLOAD)
+    cid = (await sm.reserve_and_start(sid, "k1", PAYLOAD)).child_id
     assert sm.slot(cid).site_id == "local"
     only.children.clear()
     only.conn_seq += 1
@@ -394,7 +394,7 @@ async def test_omni_rpc_goes_to_the_slots_site(pool, manager, site_a, site_b, au
     )
     sid = uuid.uuid4()
     grant(authz, "k1", sid)
-    server = SimpleNamespace(id=sid, enabled=True, kind="stdio")
+    server = SimpleNamespace(id=sid, enabled=True, kind="stdio", slug="demo")
     tool = SimpleNamespace(upstream_name="alpha")
     other = uuid.uuid4()  # load site A so the scheduler sends the invoke child to B
     grant(authz, "k1", other)

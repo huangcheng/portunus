@@ -38,7 +38,9 @@ from .registry import Registry
 from .remote import RemoteProxy
 from .runner_client import RunnerClient
 from .runner_pool import RunnerPool
+from . import __version__ as gateway_version
 from .slots import SlotManager
+from .telemetry import setup_telemetry
 from .vault import Vault
 
 log = logging.getLogger("portunus.gateway")
@@ -230,6 +232,7 @@ def create_gateway_app() -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def lifespan(a: FastAPI) -> AsyncIterator[None]:
+        setup_telemetry(service_version=gateway_version)
         await store.reload_from_db()  # authz is rebuilt from the DB on start (spec §3)
         # Single-operator: every active key may use every server.
         await authz.ensure_full_grants()

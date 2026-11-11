@@ -321,9 +321,9 @@ async def test_slot_manager_over_real_client(sock_path, authz):
     async with running(c):
         await c.wait_connected(2)
         await _wait(lambda: any(f["op"] == "inventory" for f in srv.frames))
-        cid = await sm.reserve_and_start(
+        cid = (await sm.reserve_and_start(
             server, key, {"argv": ["uvx", "pkg==1.0.0"], "env": {"A": "b"}, "vault_version": 3}
-        )
+        )).child_id
         f = next(x for x in srv.frames if x["op"] == "start")
         assert f["child_id"] == cid and f["argv"] == ["uvx", "pkg==1.0.0"]
         assert f["env"] == {"A": "b"} and f["server_id"] == str(server)

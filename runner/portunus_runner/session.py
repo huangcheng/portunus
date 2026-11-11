@@ -493,8 +493,8 @@ class Runner:
             rec.rpc = rpc.ChildRpc(proc)
         timeout_s = rpc.clamp_timeout(msg.get("timeout_s"), float(DEFAULTS.invoke_timeout_s))
         try:
-            result = await rec.rpc.call(msg.get("payload"), timeout_s)
-            await self._reply(sess, msg, result=result)
+            result, timing = await rec.rpc.call(msg.get("payload"), timeout_s)
+            await self._reply(sess, msg, result=result, timing=timing)
         except asyncio.CancelledError:
             raise
         except FrameError as e:  # reply too large for one frame
@@ -504,7 +504,11 @@ class Runner:
                 # stdout is desynchronised mid-line: the child cannot be reused.
                 with contextlib.suppress(ProcessLookupError):
                     rec.handle.kill()
-            await self._error(sess, msg, e.code, e.message or "rpc failed", with_token=True)
+            timing = getattr(rec.rpc, "last_timing", None)
+            extra = {"timing": timing} if isinstance(timing, dict) and timing else {}
+            await self._error(
+                sess, msg, e.code, e.message or "rpc failed", with_token=True, **extra
+            )
         except Exception:
             log.exception("rpc failed")
             await self._error(sess, msg, "upstream_crash", "rpc failed", with_token=True)

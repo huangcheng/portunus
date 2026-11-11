@@ -36,10 +36,12 @@ import asyncio
 import base64
 import binascii
 import json
+import logging
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from typing import Any
 
 import mcp_types as types
@@ -47,6 +49,7 @@ from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
 from mcp.server.lowlevel.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from opentelemetry.trace import SpanKind
 from portunus_shared import DEFAULTS, ERROR_CODES, PortunusError
 from pydantic import TypeAdapter
 from pydantic import ValidationError as PydanticValidationError
@@ -55,6 +58,7 @@ from starlette.responses import JSONResponse
 from starlette.types import Message, Receive, Scope, Send
 
 from . import __version__
+from . import telemetry as tel
 from .db.models import Server as ServerRow
 from .db.models import Tool as ToolRow
 from .db.models import VaultEntry
@@ -63,6 +67,11 @@ from .oauth import AUTH_HEADER_NAME
 from .registry import RegistryError
 from .runner_client import RunnerRequestError
 from .runner_pool import RunnerPool
+
+log_calls = logging.getLogger("portunus.gateway.calls")
+
+# Invoke handlers stash timing fields here; dispatch merges them into ``_meta.portunus``.
+_invoke_attrs: ContextVar[dict[str, Any] | None] = ContextVar("portunus_invoke_attrs", default=None)
 
 MAX_BODY_BYTES = 1024 * 1024
 MAX_RESULT_BYTES = 1024 * 1024
@@ -168,6 +177,73 @@ def ok_result(obj: dict[str, Any]) -> types.CallToolResult:
     return types.CallToolResult(
         content=[types.TextContent(text=json.dumps(obj))], structured_content=obj
     )
+
+
+def with_portunus_meta(
+    result: types.CallToolResult, portunus: Mapping[str, Any]
+) -> types.CallToolResult:
+    """Merge gateway attribution into ``result.meta`` (wire alias ``_meta``), never structuredContent."""
+    meta = dict(result.meta) if result.meta else {}
+    existing = meta.get("portunus")
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged.update(portunus)
+    meta["portunus"] = merged
+    return result.model_copy(update={"meta": meta})
+
+
+def _ms_since(t0: float) -> int:
+    return max(0, int((time.perf_counter() - t0) * 1000))
+
+
+def _error_code_from_result(result: types.CallToolResult) -> str | None:
+    if not result.is_error:
+        return None
+    structured = result.structured_content
+    if isinstance(structured, dict):
+        err = structured.get("error")
+        if isinstance(err, dict) and isinstance(err.get("code"), str):
+            return err["code"]
+    return "upstream_error"
+
+
+def _safe_label(value: str, *, max_len: int = 128) -> str:
+    """Strip control chars and truncate so client input cannot forge log lines / metric labels."""
+    cleaned = "".join(ch for ch in value if ch.isprintable())
+    return cleaned[:max_len]
+
+
+def _log_invoke_call(
+    *,
+    trace_id: str,
+    key_id: str,
+    server: str,
+    tool: str,
+    outcome: str,
+    site_id: str | None,
+    timing: Mapping[str, Any],
+) -> None:
+    server = _safe_label(server)
+    tool = _safe_label(tool)
+    parts = [
+        f"trace_id={trace_id}",
+        f"key_id={key_id}",
+        f"server={server}",
+        f"tool={tool}",
+        f"outcome={outcome}",
+    ]
+    if site_id is not None:
+        parts.append(f"site_id={site_id}")
+    for key in (
+        "gateway_ms",
+        "start_ms",
+        "cold_start",
+        "queue_ms",
+        "init_ms",
+        "upstream_ms",
+    ):
+        if key in timing:
+            parts.append(f"{key}={timing[key]}")
+    log_calls.info(" ".join(parts))
 
 
 def _promote_structured(content: list[Any], structured: Any) -> Any:
@@ -382,9 +458,39 @@ class Omni:
     async def _on_call_tool(self, ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
         request = getattr(ctx, "request", None)
         key_id = request.scope.get(KEY_SCOPE) if request is not None else None
+        http_headers: dict[str, str] = {}
+        if request is not None:
+            for raw_k, raw_v in request.scope.get("headers") or ():
+                # ASGI headers are always (bytes, bytes); latin-1 cannot fail on bytes.
+                if isinstance(raw_k, (bytes, bytearray)) and isinstance(raw_v, (bytes, bytearray)):
+                    http_headers[raw_k.decode("latin-1").lower()] = raw_v.decode("latin-1")
+        request_meta: Mapping[str, Any] | None = None
+        if params.meta:
+            request_meta = dict(params.meta)
         if not isinstance(key_id, str):
-            return error_result("unauthorized", "no authenticated agent key")
-        return await self.dispatch(key_id, params.name, params.arguments or {})
+            # Still mint a trace id so clients can correlate the unauthorized result.
+            parent = tel.extract_parent_context(request_meta, http_headers)
+            with tel.use_parent_context(parent):
+                with tel.start_span(
+                    "tools/call unknown",
+                    kind=SpanKind.SERVER,
+                    attributes={
+                        tel.ATTR_MCP_METHOD: "tools/call",
+                        tel.ATTR_GEN_AI_TOOL: "unknown",
+                    },
+                ) as span:
+                    tel.set_span_error(span, "unauthorized")
+                    return with_portunus_meta(
+                        error_result("unauthorized", "no authenticated agent key"),
+                        {"trace_id": tel.current_trace_id(), "gateway_ms": 0},
+                    )
+        return await self.dispatch(
+            key_id,
+            params.name,
+            params.arguments or {},
+            request_meta=request_meta,
+            http_headers=http_headers,
+        )
 
     # ---- dispatch ------------------------------------------------------------------
 
@@ -400,25 +506,106 @@ class Omni:
             raise PortunusError("rate_limited", f"over {self.rate_per_min} calls per minute")
         window.append(now)
 
-    async def dispatch(self, key_id: str, name: str, args: dict[str, Any]) -> types.CallToolResult:
+    async def dispatch(
+        self,
+        key_id: str,
+        name: str,
+        args: dict[str, Any],
+        *,
+        request_meta: Mapping[str, Any] | None = None,
+        http_headers: Mapping[str, str] | None = None,
+    ) -> types.CallToolResult:
         """Run one meta tool for an authenticated key. Never raises for expected failures."""
+        t0 = time.perf_counter()
+        parent = tel.extract_parent_context(request_meta, http_headers)
+        invoke_attrs: dict[str, Any] = {}
+        token = _invoke_attrs.set(invoke_attrs)
+        # Bound metric/span labels before validating the name (unknown tools are rejected later).
+        tool_label = _safe_label(name) if name in _SCHEMAS else "unknown"
         try:
-            if name not in _SCHEMAS:
-                raise PortunusError("unsupported", f"unknown tool {name!r}")
-            self._check_key(key_id)
-            _validate(_SCHEMAS[name], args, what="arguments")
-            self._rate_limit(key_id)
-            handler = {
-                "portunus_discover_servers": self._discover_servers,
-                "portunus_discover_tools": self._discover_tools,
-                "portunus_get_tool_schema": self._get_tool_schema,
-                "portunus_invoke_tool": self._invoke,
-            }[name]
-            return await handler(key_id, args)
-        except PortunusError as e:
-            return error_result(e.code, e.message)
-        except RegistryError as e:
-            return error_result(e.code if e.code in ERROR_CODES else "spawn_failed", e.message)
+            with tel.use_parent_context(parent):
+                with tel.start_span(
+                    f"tools/call {tool_label}",
+                    kind=SpanKind.SERVER,
+                    attributes={
+                        tel.ATTR_MCP_METHOD: "tools/call",
+                        tel.ATTR_GEN_AI_TOOL: tool_label,
+                        tel.ATTR_KEY_ID: key_id,
+                    },
+                ) as span:
+                    try:
+                        if name not in _SCHEMAS:
+                            raise PortunusError("unsupported", f"unknown tool {name!r}")
+                        self._check_key(key_id)
+                        _validate(_SCHEMAS[name], args, what="arguments")
+                        self._rate_limit(key_id)
+                        handler = {
+                            "portunus_discover_servers": self._discover_servers,
+                            "portunus_discover_tools": self._discover_tools,
+                            "portunus_get_tool_schema": self._get_tool_schema,
+                            "portunus_invoke_tool": self._invoke,
+                        }[name]
+                        result = await handler(key_id, args)
+                    except PortunusError as e:
+                        tel.set_span_error(span, e.code)
+                        result = error_result(e.code, e.message)
+                    except RegistryError as e:
+                        code = e.code if e.code in ERROR_CODES else "spawn_failed"
+                        tel.set_span_error(span, code)
+                        result = error_result(code, e.message)
+
+                    gateway_ms = _ms_since(t0)
+                    portunus: dict[str, Any] = {
+                        "trace_id": tel.current_trace_id(),
+                        "gateway_ms": gateway_ms,
+                    }
+                    # Invoke fills start/cold/queue/init/upstream; discovery keeps only the above.
+                    for key in (
+                        "start_ms",
+                        "cold_start",
+                        "queue_ms",
+                        "init_ms",
+                        "upstream_ms",
+                    ):
+                        if key in invoke_attrs:
+                            portunus[key] = invoke_attrs[key]
+
+                    error_type = _error_code_from_result(result)
+                    if error_type:
+                        tel.set_span_error(span, error_type)
+                    tel.record_operation_duration(
+                        gateway_ms / 1000.0,
+                        method="tools/call",
+                        tool=tool_label,
+                        error_type=error_type,
+                    )
+                    if name == "portunus_invoke_tool":
+                        # Prefer resolved DB slugs; never trust raw args for logs/metrics.
+                        server = _safe_label(str(invoke_attrs.get("server") or ""))
+                        tool = _safe_label(str(invoke_attrs.get("tool") or ""))
+                        outcome = error_type or "ok"
+                        if server and tool:
+                            tel.record_tool_duration(
+                                gateway_ms / 1000.0,
+                                server=server,
+                                tool=tool,
+                                outcome=outcome,
+                            )
+                        init_ms = invoke_attrs.get("init_ms")
+                        if isinstance(init_ms, int) and server:
+                            tel.record_init_duration(init_ms / 1000.0, server=server)
+                        _log_invoke_call(
+                            trace_id=portunus["trace_id"],
+                            key_id=key_id,
+                            server=server or "unknown",
+                            tool=tool,
+                            outcome=outcome,
+                            site_id=invoke_attrs.get("site_id"),
+                            timing=portunus,
+                        )
+                    return with_portunus_meta(result, portunus)
+        finally:
+            _invoke_attrs.reset(token)
 
     # ---- authorization -------------------------------------------------------------
 
@@ -571,6 +758,31 @@ class Omni:
             else:
                 self._inflight.pop(key_id, None)
 
+    def _note_invoke(self, **fields: Any) -> None:
+        bag = _invoke_attrs.get()
+        if bag is not None:
+            bag.update(fields)
+
+    def _apply_rpc_timing(
+        self, rpc_span: Any, timing: Any, *, fallback_ms: int
+    ) -> None:
+        """Copy runner ``timing`` onto invoke attrs + span; else use full rpc RTT as upstream_ms."""
+        if isinstance(timing, dict):
+            for key, attr in (
+                ("queue_ms", tel.ATTR_QUEUE_MS),
+                ("init_ms", tel.ATTR_INIT_MS),
+                ("upstream_ms", tel.ATTR_UPSTREAM_MS),
+            ):
+                val = timing.get(key)
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    ms = int(val)
+                    self._note_invoke(**{key: ms})
+                    rpc_span.set_attribute(attr, ms)
+            return
+        # Old runner / client-side timeout: omit queue/init.
+        self._note_invoke(upstream_ms=fallback_ms)
+        rpc_span.set_attribute(tel.ATTR_UPSTREAM_MS, fallback_ms)
+
     async def _run_invoke(
         self,
         key_id: str,
@@ -579,37 +791,74 @@ class Omni:
         arguments: dict[str, Any],
         timeout_s: float,
     ) -> types.CallToolResult:
+        self._note_invoke(server=server.slug, tool=tool.upstream_name)
         if server.kind == "remote":
             return await self._run_remote_invoke(key_id, server, tool, arguments, timeout_s)
         start = await self.registry.start_payload(server.id)
         self.state_cache.put(server.id, server.enabled, start["vault_version"])
-        child_id = await self.slots.reserve_and_start(
-            server.id, key_id, start, preferred_regions=start.get("preferred_regions") or ()
-        )
-        site_id = self.slots.site_of(child_id)  # the rpc goes to the site that owns the child
+        child_attrs = {
+            tel.ATTR_SERVER: server.slug,
+            tel.ATTR_TOOL: tool.upstream_name,
+            tel.ATTR_KEY_ID: key_id,
+        }
+        t_start = time.perf_counter()
+        with tel.start_span("portunus.start_child", attributes=child_attrs) as start_span:
+            reserved = await self.slots.reserve_and_start(
+                server.id, key_id, start, preferred_regions=start.get("preferred_regions") or ()
+            )
+            child_id = reserved.child_id
+            cold_start = reserved.cold_start
+            slot = self.slots.slot(child_id)
+            preferred_miss = bool(slot.preferred_miss) if slot is not None else False
+            site_id = slot.site_id if slot is not None else None
+            start_span.set_attribute(tel.ATTR_COLD_START, cold_start)
+            start_span.set_attribute(tel.ATTR_PREFERRED_MISS, preferred_miss)
+            if site_id is not None:
+                start_span.set_attribute(tel.ATTR_SITE_ID, site_id)
+            if cold_start and preferred_miss:
+                tel.record_preferred_miss(server=server.slug)
+        start_ms = _ms_since(t_start)
+        self._note_invoke(start_ms=start_ms, cold_start=cold_start, site_id=site_id)
         if site_id is None:
             raise PortunusError("upstream_crash", "child exited before the call")
-        try:
-            reply = await self.pool.request(
-                site_id,
-                "rpc",
-                timeout=timeout_s + RPC_SLACK_S,
-                child_id=child_id,
-                timeout_s=timeout_s,
-                payload={
-                    "method": "tools/call",
-                    "params": {"name": tool.upstream_name, "arguments": arguments},
-                },
+        rpc_attrs = {
+            **child_attrs,
+            tel.ATTR_SITE_ID: site_id,
+        }
+        t_rpc = time.perf_counter()
+        with tel.start_span(
+            "portunus.runner.rpc", kind=SpanKind.CLIENT, attributes=rpc_attrs
+        ) as rpc_span:
+            try:
+                reply = await self.pool.request(
+                    site_id,
+                    "rpc",
+                    timeout=timeout_s + RPC_SLACK_S,
+                    child_id=child_id,
+                    timeout_s=timeout_s,
+                    payload={
+                        "method": "tools/call",
+                        "params": {"name": tool.upstream_name, "arguments": arguments},
+                    },
+                )
+            except asyncio.CancelledError:
+                self.slots.stop_pair(key_id, server.id)  # caller left mid-call: child may be wedged
+                raise
+            except RunnerRequestError as e:
+                if e.code == "upstream_timeout":
+                    self.slots.stop_pair(key_id, server.id)
+                # Runner may still have attached timing on an error reply.
+                err_timing = e.reply.get("timing") if isinstance(e.reply, dict) else None
+                self._apply_rpc_timing(rpc_span, err_timing, fallback_ms=_ms_since(t_rpc))
+                tel.set_span_error(rpc_span, e.code)
+                if e.reason == "unknown_child":
+                    raise PortunusError("upstream_crash", "child exited during the call") from None
+                raise PortunusError(e.code, e.message) from None
+            self._apply_rpc_timing(
+                rpc_span,
+                reply.get("timing") if isinstance(reply, dict) else None,
+                fallback_ms=_ms_since(t_rpc),
             )
-        except asyncio.CancelledError:
-            self.slots.stop_pair(key_id, server.id)  # caller left mid-call: child may be wedged
-            raise
-        except RunnerRequestError as e:
-            if e.code == "upstream_timeout":
-                self.slots.stop_pair(key_id, server.id)
-            if e.reason == "unknown_child":
-                raise PortunusError("upstream_crash", "child exited during the call") from None
-            raise PortunusError(e.code, e.message) from None
 
         # Authorization may have changed while the call ran: never hand back that result.
         self._check_key(key_id)
@@ -634,23 +883,41 @@ class Omni:
         if proxy is None:
             raise PortunusError("unsupported", "remote proxy is not configured")
         self.state_cache.put(server.id, server.enabled, server.vault_version)
-        try:
-            result = await proxy.invoke(
-                server.id, tool.upstream_name, arguments, timeout_s=timeout_s
-            )
-        except PortunusError as e:
-            if e.code == "auth_required":
-                return error_result(
-                    "auth_required",
-                    (
-                        f"remote server requires authorization; "
-                        f"reconnect '{server.slug}' in the Portunus Apps dashboard"
-                    ),
-                    data={"server": server.slug, "action": "reauth"},
+        remote_attrs = {
+            tel.ATTR_SERVER: server.slug,
+            tel.ATTR_TOOL: tool.upstream_name,
+            tel.ATTR_KEY_ID: key_id,
+        }
+        t_up = time.perf_counter()
+        with tel.start_span(
+            "portunus.remote.invoke", kind=SpanKind.CLIENT, attributes=remote_attrs
+        ) as remote_span:
+            try:
+                result = await proxy.invoke(
+                    server.id, tool.upstream_name, arguments, timeout_s=timeout_s
                 )
-            raise
-        except RegistryError as e:
-            raise PortunusError(e.code if e.code in ERROR_CODES else "upstream_crash", e.message) from e
+            except PortunusError as e:
+                self._note_invoke(upstream_ms=_ms_since(t_up))
+                remote_span.set_attribute(tel.ATTR_UPSTREAM_MS, _ms_since(t_up))
+                tel.set_span_error(remote_span, e.code)
+                if e.code == "auth_required":
+                    return error_result(
+                        "auth_required",
+                        (
+                            f"remote server requires authorization; "
+                            f"reconnect '{server.slug}' in the Portunus Apps dashboard"
+                        ),
+                        data={"server": server.slug, "action": "reauth"},
+                    )
+                raise
+            except RegistryError as e:
+                self._note_invoke(upstream_ms=_ms_since(t_up))
+                remote_span.set_attribute(tel.ATTR_UPSTREAM_MS, _ms_since(t_up))
+                code = e.code if e.code in ERROR_CODES else "upstream_crash"
+                tel.set_span_error(remote_span, code)
+                raise PortunusError(code, e.message) from e
+            self._note_invoke(upstream_ms=_ms_since(t_up))
+            remote_span.set_attribute(tel.ATTR_UPSTREAM_MS, _ms_since(t_up))
         self._check_key(key_id)
         if not self.authz.has_grant(key_id, server.id):
             raise PortunusError("not_granted", "grant removed during the call")
@@ -670,6 +937,12 @@ _GUARD_RPC_CODES = {
 _JSONRPC_ADAPTER = TypeAdapter(types.JSONRPCMessage)
 
 
+def _gate_trace_id() -> str:
+    """Trace id for gate-layer errors (401/413/envelope); always creates a span context."""
+    with tel.start_span("portunus.gate", kind=SpanKind.SERVER):
+        return tel.current_trace_id()
+
+
 def _error_response(status: int, code: str, message: str, headers: dict[str, str] | None = None):
     """JSON-RPC envelope for gate failures; Portunus string code lives in ``data.code``."""
     body = {
@@ -678,7 +951,7 @@ def _error_response(status: int, code: str, message: str, headers: dict[str, str
         "error": {
             "code": _GUARD_RPC_CODES.get(code, -32000),
             "message": message,
-            "data": {"code": code},
+            "data": {"code": code, "trace_id": _gate_trace_id()},
         },
     }
     return JSONResponse(body, status, headers)
@@ -686,7 +959,15 @@ def _error_response(status: int, code: str, message: str, headers: dict[str, str
 
 def _rpc_error_response(status: int, code: int, message: str):
     """A JSON-RPC level failure, shaped like the transport's own (e.g. -32700 on a parse error)."""
-    body = {"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}}
+    body = {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {
+            "code": code,
+            "message": message,
+            "data": {"trace_id": _gate_trace_id()},
+        },
+    }
     return JSONResponse(body, status)
 
 
@@ -750,9 +1031,10 @@ class _Gate:
             return
 
         declared = headers.get("content-length", "")
-        too_big = _error_response(413, "payload_too_large", "request body exceeds 1MiB")
         if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
-            await too_big(scope, receive, send)
+            await _error_response(413, "payload_too_large", "request body exceeds 1MiB")(
+                scope, receive, send
+            )
             return
         body_receive = receive
         if scope["method"] == "POST":
@@ -764,7 +1046,9 @@ class _Gate:
                     return  # client went away
                 total += len(msg.get("body", b""))
                 if total > MAX_BODY_BYTES:
-                    await too_big(scope, receive, send)
+                    await _error_response(413, "payload_too_large", "request body exceeds 1MiB")(
+                        scope, receive, send
+                    )
                     return
                 chunks.append(msg.get("body", b""))
                 if not msg.get("more_body", False):

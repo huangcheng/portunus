@@ -163,7 +163,7 @@ async def test_exit_frees_cap(slot_manager, fake_runner, authz):
     servers = [uuid.uuid4() for _ in range(33)]
     for s in servers:
         grant(authz, "k1", s)
-    cids = [await slot_manager.reserve_and_start(s, "k1", PAYLOAD) for s in servers[:32]]
+    cids = [(await slot_manager.reserve_and_start(s, "k1", PAYLOAD)).child_id for s in servers[:32]]
     slot_manager.on_child_exited(cids[0])
     await slot_manager.reserve_and_start(servers[32], "k1", PAYLOAD)
 
@@ -175,9 +175,9 @@ async def test_one_child_per_server_key_pair(slot_manager, fake_runner, authz):
         slot_manager.reserve_and_start(srv, "k1", PAYLOAD),
         slot_manager.reserve_and_start(srv, "k1", PAYLOAD),
     )
-    assert a == b
+    assert a.child_id == b.child_id
     assert len(fake_runner.starts) == 1
-    assert await slot_manager.reserve_and_start(srv, "k1", PAYLOAD) == a
+    assert (await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)).child_id == a.child_id
 
 
 # ---- start frame / admission ----------------------------------------------------------
@@ -186,7 +186,7 @@ async def test_one_child_per_server_key_pair(slot_manager, fake_runner, authz):
 async def test_start_frame_is_explicit(slot_manager, fake_runner, authz):
     srv = uuid.uuid4()
     grant(authz, "k1", srv)
-    cid = await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)
+    cid = (await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)).child_id
     f = fake_runner.starts[0]
     assert f["child_id"] == cid and f["server_id"] == str(srv)
     assert f["argv"] == PAYLOAD["argv"]  # command rides as argv[0]
@@ -407,7 +407,7 @@ async def test_unrelated_generation_bump_does_not_cancel_start(slot_manager, fak
     grant(authz, "other", uuid.uuid4())  # bumps generation; our pair untouched
     assert authz.generation > g0
     fake_runner.start_gate.set()
-    cid = await task
+    cid = (await task).child_id
     slot = slot_manager.slot(cid)
     assert slot.state is SlotState.COMMITTED
     assert slot.generation == authz.generation  # re-stamped at commit
@@ -436,7 +436,7 @@ async def test_vault_bump_during_start_cancels(fake_runner, authz):
 async def test_reconcile_drops_ungranted(slot_manager, fake_runner, authz):
     srv = uuid.uuid4()
     grant(authz, "k1", srv)
-    cid = await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)
+    cid = (await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)).child_id
     ungrant(authz, "k1", srv)  # slot manager not told: reconcile must still catch it
     fake_runner.kill_exits = False
     inv = (await fake_runner.request("inventory", timeout=1))["children"]
@@ -453,7 +453,7 @@ async def test_same_epoch_reconnect_after_ungrant_during_grace_kills_not_adopts(
 ):
     srv = uuid.uuid4()
     grant(authz, "k1", srv)
-    cid = await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)
+    cid = (await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)).child_id
     # Gateway loses the runner; runner keeps the child alive in its local grace window.
     fake_runner.disconnect()
     ungrant(authz, "k1", srv)
@@ -480,7 +480,7 @@ async def test_reconnect_after_ungrant_without_gateway_hook_still_kills(
     """Ungrant happened while disconnected and no hook ran (e.g. gateway-side state only)."""
     srv = uuid.uuid4()
     grant(authz, "k1", srv)
-    cid = await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)
+    cid = (await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)).child_id
     fake_runner.disconnect()
     ungrant(authz, "k1", srv)
     fake_runner.reconnect()
@@ -492,7 +492,7 @@ async def test_reconnect_after_ungrant_without_gateway_hook_still_kills(
 async def test_reconcile_revoked_key_killed(slot_manager, fake_runner, authz):
     srv = uuid.uuid4()
     grant(authz, "k1", srv)
-    cid = await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)
+    cid = (await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)).child_id
     authz.mark_revoked("k1")
     fake_runner.reconnect()
     await slot_manager.sync_with_runner()
@@ -504,8 +504,8 @@ async def test_reconcile_adopts_allowed_and_frees_absent(slot_manager, fake_runn
     s1, s2 = uuid.uuid4(), uuid.uuid4()
     grant(authz, "k1", s1)
     grant(authz, "k1", s2)
-    c1 = await slot_manager.reserve_and_start(s1, "k1", PAYLOAD)
-    c2 = await slot_manager.reserve_and_start(s2, "k1", PAYLOAD)
+    c1 = (await slot_manager.reserve_and_start(s1, "k1", PAYLOAD)).child_id
+    c2 = (await slot_manager.reserve_and_start(s2, "k1", PAYLOAD)).child_id
     fake_runner.children.pop(c2)  # runner lost it (e.g. grace expiry, never reported)
     fake_runner.reconnect()
     res = await slot_manager.sync_with_runner()
@@ -530,7 +530,7 @@ async def test_reconcile_adopts_unresolved_reserved_start(slot_manager, fake_run
     res = await slot_manager.sync_with_runner()
     assert cid in res.kept
     assert slot_manager.slot(cid).state is SlotState.COMMITTED
-    assert await slot_manager.reserve_and_start(srv, "k1", PAYLOAD) == cid
+    assert (await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)).child_id == cid
     assert len(fake_runner.starts) == 1
 
 
@@ -562,7 +562,7 @@ async def test_reconcile_does_not_free_start_sent_on_current_connection(
     await slot_manager.reconcile([], **reconcile_kwargs(authz))  # stale inventory: empty
     assert slot_manager.slot(cid) is not None
     fake_runner.start_gate.set()
-    assert await task == cid
+    assert (await task).child_id == cid
 
 
 async def test_reconcile_does_not_adopt_timed_out_pending_stop(slot_manager, fake_runner, authz):
@@ -601,8 +601,8 @@ async def test_ghost_that_never_exits_does_not_wedge_later_reconciles(
     s_ok, s_bad = uuid.uuid4(), uuid.uuid4()
     grant(authz, "k1", s_ok)
     grant(authz, "k1", s_bad)
-    ok = await slot_manager.reserve_and_start(s_ok, "k1", PAYLOAD)
-    bad = await slot_manager.reserve_and_start(s_bad, "k1", PAYLOAD)
+    ok = (await slot_manager.reserve_and_start(s_ok, "k1", PAYLOAD)).child_id
+    bad = (await slot_manager.reserve_and_start(s_bad, "k1", PAYLOAD)).child_id
     fake_runner.children["ghost"] = {"child_id": "ghost", "server_id": str(s_ok), "pid": 9}
     fake_runner.kill_exits = False  # kills are acked but nothing ever exits
     fake_runner.reconnect()
@@ -625,7 +625,7 @@ async def test_reconcile_vault_version_mismatch_killed(fake_runner, authz):
     versions = {srv: 1}
     sm = SlotManager(fake_runner, authz, vault_version=lambda s: versions[s], stop_retry_s=0.05)
     fake_runner.manager = sm
-    cid = await sm.reserve_and_start(srv, "k1", PAYLOAD)
+    cid = (await sm.reserve_and_start(srv, "k1", PAYLOAD)).child_id
     versions[srv] = 2
     fake_runner.reconnect()
     await sm.sync_with_runner()
@@ -639,7 +639,7 @@ async def test_reconcile_disabled_server_killed(fake_runner, authz):
     enabled = {"v": True}
     sm = SlotManager(fake_runner, authz, server_enabled=lambda s: enabled["v"], stop_retry_s=0.05)
     fake_runner.manager = sm
-    cid = await sm.reserve_and_start(srv, "k1", PAYLOAD)
+    cid = (await sm.reserve_and_start(srv, "k1", PAYLOAD)).child_id
     enabled["v"] = False
     fake_runner.reconnect()
     await sm.sync_with_runner()
@@ -653,7 +653,7 @@ async def test_disable_server_hook_stops_all_keys(slot_manager, fake_runner, aut
         await slot_manager.reserve_and_start(srv, k, PAYLOAD)
     other = uuid.uuid4()
     grant(authz, "a", other)
-    keep = await slot_manager.reserve_and_start(other, "a", PAYLOAD)
+    keep = (await slot_manager.reserve_and_start(other, "a", PAYLOAD)).child_id
     slot_manager.disable_server(srv)
     await settle(lambda: set(slot_manager.slots) == {keep})
     assert len(fake_runner.kills) == 2
@@ -662,7 +662,7 @@ async def test_disable_server_hook_stops_all_keys(slot_manager, fake_runner, aut
 async def test_kill_unknown_child_reply_is_exit_evidence(slot_manager, fake_runner, authz):
     srv = uuid.uuid4()
     grant(authz, "k1", srv)
-    cid = await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)
+    cid = (await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)).child_id
     fake_runner.children.pop(cid)  # runner no longer has it; child_exited was lost
     slot_manager.revoke_key("k1")
     await settle(lambda: slot_manager.slots == {})
@@ -673,7 +673,7 @@ async def test_stop_gives_up_while_disconnected_and_resumes_via_reconcile(
 ):
     srv = uuid.uuid4()
     grant(authz, "k1", srv)
-    cid = await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)
+    cid = (await slot_manager.reserve_and_start(srv, "k1", PAYLOAD)).child_id
     fake_runner.disconnect()
     slot_manager.revoke_key("k1")
     await asyncio.sleep(0.1)
