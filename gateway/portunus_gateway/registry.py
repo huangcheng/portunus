@@ -187,7 +187,8 @@ def server_view(
         "args": list(server.args or []),
         "url": server.url,
         "oauth": oauth_public_view(server.oauth if isinstance(server.oauth, dict) else None),
-        "has_auth": any(n.lower() == AUTH_HEADER_NAME.lower() for n in env_names),
+        # Any non-reserved vault entry counts (Authorization, WyHeader, …).
+        "has_auth": any(not n.lower().startswith("portunus.") for n in env_names),
         # device_qr marker written after platform login succeeds.
         "has_skill_session": any(n == "SKILL_SESSION" for n in env_names),
         "preferred_regions": list(server.preferred_regions or []),
@@ -612,14 +613,19 @@ class Registry:
         if oauth_client_secret is not None:
             if not isinstance(oauth_client_secret, str) or "\x00" in oauth_client_secret:
                 raise RegistryError(422, "invalid_oauth", "invalid oauth_client_secret")
-        secrets = validate_env(env) if env is not None else None
+        secrets: dict[str, str] | None = None
+        if env is not None:
+            # Decided after we know server.kind (stdio env vs remote headers).
+            secrets = dict(env)
         creds_changed = bool(secrets) or bool(oauth_client_secret)
         async with self._sf() as s:
             server = await self._get_server(s, server_id)
             if (oauth is not None or oauth_client_secret is not None) and server.kind != "remote":
                 raise RegistryError(422, "invalid_request", "stdio servers do not take oauth")
-            if secrets is not None and server.kind != "stdio":
-                raise RegistryError(422, "invalid_request", "remote servers do not take stdio env")
+            if secrets is not None:
+                secrets = (
+                    validate_env(secrets) if server.kind == "stdio" else validate_headers(secrets)
+                )
             audit: dict[str, Any] = {}
             if regions is not None:
                 server.preferred_regions = regions

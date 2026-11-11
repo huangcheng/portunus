@@ -154,6 +154,22 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "spec": {"url": "https://mcp.dida365.com"},
     },
     {
+        "slug": "weiyun",
+        "label": "微云",
+        "name": "微云",
+        "description": "Tencent Weiyun drive via remote MCP (WyHeader token).",
+        "connection": "http",
+        "popular": True,
+        "categories": ["Storage"],
+        "tags": ["weiyun", "tencent", "drive", "http"],
+        "sort_order": 55,
+        "spec": {
+            "url": "https://www.weiyun.com/api/v3/mcpserver",
+            "auth_header": "WyHeader",
+            "token_prefix": "mcp_token=",
+        },
+    },
+    {
         "slug": "weread",
         "label": "微信读书",
         "name": "微信读书",
@@ -291,7 +307,21 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
             out["token_endpoint_auth_method"] = method
         return out
     if connection == "http":
-        return {"url": _require_str(spec, "url")}
+        out = {"url": _require_str(spec, "url")}
+        # Optional custom request header for Connect (e.g. Weiyun WyHeader).
+        auth_header = spec.get("auth_header")
+        if auth_header is not None and auth_header != "":
+            if not isinstance(auth_header, str) or not auth_header.strip():
+                raise RegistryError(422, "invalid_request", "spec.auth_header must be a non-empty string")
+            out["auth_header"] = auth_header.strip()
+            prefix = spec.get("token_prefix")
+            if prefix is None or prefix == "":
+                out["token_prefix"] = ""
+            elif not isinstance(prefix, str):
+                raise RegistryError(422, "invalid_request", "spec.token_prefix must be a string")
+            else:
+                out["token_prefix"] = prefix
+        return out
     if connection == "webdav":
         out = {
             "root_url": _require_str(spec, "root_url"),

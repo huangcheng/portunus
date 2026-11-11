@@ -175,7 +175,13 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
       return out;
     }
     if (connection === "http") {
-      return { url: String(spec.url ?? "").trim() };
+      const out: Record<string, unknown> = { url: String(spec.url ?? "").trim() };
+      const authHeader = String(spec.auth_header ?? "").trim();
+      if (authHeader) {
+        out.auth_header = authHeader;
+        out.token_prefix = String(spec.token_prefix ?? "");
+      }
+      return out;
     }
     if (connection === "webdav") {
       const argsRaw = spec.args;
@@ -478,15 +484,36 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
         )}
 
         {connection === "http" && (
-          <label className="field">
-            MCP URL
-            <input
-              value={String(spec.url ?? "")}
-              onChange={(e) => patchSpec({ url: e.target.value })}
-              placeholder="https://example.com/mcp"
-              required
-            />
-          </label>
+          <div className="stack">
+            <label className="field">
+              MCP URL
+              <input
+                value={String(spec.url ?? "")}
+                onChange={(e) => patchSpec({ url: e.target.value })}
+                placeholder="https://example.com/mcp"
+                required
+              />
+            </label>
+            <div className="form-grid">
+              <label className="field">
+                Auth header (optional)
+                <input
+                  value={String(spec.auth_header ?? "")}
+                  onChange={(e) => patchSpec({ auth_header: e.target.value })}
+                  placeholder="WyHeader (blank = Bearer)"
+                />
+              </label>
+              <label className="field">
+                Token prefix
+                <input
+                  value={String(spec.token_prefix ?? "")}
+                  onChange={(e) => patchSpec({ token_prefix: e.target.value })}
+                  placeholder="mcp_token="
+                  disabled={!String(spec.auth_header ?? "").trim()}
+                />
+              </label>
+            </div>
+          </div>
         )}
 
         {connection === "webdav" && (

@@ -296,7 +296,7 @@ async def test_patch_stdio_env_upserts_vault(real):
         "WEBDAV_AUTH_ENABLED",
     }
 
-    # remote rejects stdio env
+    # remote accepts request headers via env; rejects invalid header names
     remote = await client.post(
         "/api/servers",
         json={
@@ -306,7 +306,12 @@ async def test_patch_stdio_env_upserts_vault(real):
             "url": "https://mcp.example.com/mcp",
         },
     )
-    bad = await client.patch(f"/api/servers/{remote.json()['id']}", json={"env": {"A": "1"}})
+    rid = remote.json()["id"]
+    ok = await client.patch(f"/api/servers/{rid}", json={"env": {"WyHeader": "mcp_token=abc"}})
+    assert ok.status_code == 200, ok.text
+    assert "WyHeader" in ok.json()["env_names"]
+    assert ok.json()["has_auth"] is True
+    bad = await client.patch(f"/api/servers/{rid}", json={"env": {"Host": "evil"}})
     assert bad.status_code == 422
 
 

@@ -82,7 +82,7 @@ export type UpdateServerBody = {
   preferred_regions?: string[];
   oauth?: OAuthBody | null;
   oauth_client_secret?: string | null;
-  /** Stdio vault upsert (names only returned); omit keys to leave unchanged. */
+  /** Vault upsert: stdio env names, or remote request headers (e.g. WyHeader). */
   env?: Record<string, string>;
 };
 

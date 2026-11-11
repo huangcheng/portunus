@@ -1577,7 +1577,13 @@ function HttpManagePanel({
     setNotice("");
   }, [server, app]);
 
-  const active = !!current?.has_auth;
+  const authHeader = specString(app.spec, "auth_header");
+  const tokenPrefix = specString(app.spec, "token_prefix");
+  const customHeader = !!authHeader;
+  const active = customHeader
+    ? !!current?.env_names.some((n) => n.toLowerCase() === authHeader.toLowerCase()) ||
+      !!current?.has_auth
+    : !!current?.has_auth;
 
   async function ensureServer(): Promise<Server> {
     if (current) return current;
@@ -1598,7 +1604,17 @@ function HttpManagePanel({
     setError("");
     try {
       const target = await ensureServer();
-      const updated = await api.setBearerToken(target.id, token.trim());
+      const raw = token.trim();
+      let updated: Server;
+      if (customHeader) {
+        const value =
+          tokenPrefix && !raw.toLowerCase().startsWith(tokenPrefix.toLowerCase())
+            ? `${tokenPrefix}${raw}`
+            : raw;
+        updated = await api.updateServer(target.id, { env: { [authHeader]: value } });
+      } else {
+        updated = await api.setBearerToken(target.id, raw);
+      }
       setCurrent(updated);
       setToken("");
       setNotice("Token saved.");
@@ -1609,6 +1625,10 @@ function HttpManagePanel({
       setBusy(false);
     }
   }
+
+  const tokenLabel = customHeader
+    ? `${authHeader} token${active ? " (replace)" : ""}`
+    : `Bearer token${active ? " (replace)" : ""}`;
 
   return (
     <DrawerShell
@@ -1623,9 +1643,30 @@ function HttpManagePanel({
       <form className="stack drawer-section" onSubmit={saveToken}>
         <p className="provider-hint">
           MCP: <code>{specString(app.spec, "url")}</code>
+          {customHeader ? (
+            <>
+              <br />
+              Auth header: <code>{authHeader}</code>
+              {tokenPrefix ? (
+                <>
+                  {" "}
+                  (<code>{tokenPrefix}…</code>)
+                </>
+              ) : null}
+            </>
+          ) : null}
         </p>
+        {app.slug === "weiyun" ? (
+          <p className="provider-hint">
+            Get a token at{" "}
+            <a href="https://www.weiyun.com/act/openclaw" target="_blank" rel="noreferrer">
+              weiyun.com/act/openclaw
+            </a>
+            .
+          </p>
+        ) : null}
         <label className="field">
-          Bearer token {active ? "(replace)" : ""}
+          {tokenLabel}
           <input
             type="password"
             value={token}
