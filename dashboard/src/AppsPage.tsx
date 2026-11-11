@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { api, type OAuthBody, type Server, type Tool } from "./api";
+import { CatalogConfigPage } from "./CatalogConfigPage";
 import { CreateMcpForm } from "./CreateMcpForm";
 import { GatewayOverview } from "./GatewayOverview";
 import { AppBrandMark, appIconIdForSlug } from "./icons/apps";
@@ -164,6 +165,7 @@ export function AppsPage() {
   const [selectedApp, setSelectedApp] = useState<CatalogApp | null>(null);
   const [selectedServer, setSelectedServer] = useState<Server | null>(null);
   const [adding, setAdding] = useState(false);
+  const [catalogConfig, setCatalogConfig] = useState(false);
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
@@ -242,7 +244,7 @@ export function AppsPage() {
   }, [servers, catalog, query]);
 
   const discoveredTools = Object.values(toolCounts).reduce((sum, count) => sum + count, 0);
-  const showOverview = !query.trim() && category === "all" && tab === "all";
+  const showOverview = !catalogConfig && !query.trim() && category === "all" && tab === "all";
 
   // Popular is a spotlight strip; All apps still includes those same apps (Composio-style).
   const popular = filteredCatalog.filter((a) => a.popular);
@@ -286,9 +288,12 @@ export function AppsPage() {
           <button
             type="button"
             role="tab"
-            aria-selected={tab === "all"}
-            className={tab === "all" ? "active" : undefined}
-            onClick={() => setTab("all")}
+            aria-selected={!catalogConfig && tab === "all"}
+            className={!catalogConfig && tab === "all" ? "active" : undefined}
+            onClick={() => {
+              setCatalogConfig(false);
+              setTab("all");
+            }}
           >
             All
             <span className="apps-tab-count">{catalog.length}</span>
@@ -296,36 +301,62 @@ export function AppsPage() {
           <button
             type="button"
             role="tab"
-            aria-selected={tab === "connected"}
-            className={tab === "connected" ? "active" : undefined}
-            onClick={() => setTab("connected")}
+            aria-selected={!catalogConfig && tab === "connected"}
+            className={!catalogConfig && tab === "connected" ? "active" : undefined}
+            onClick={() => {
+              setCatalogConfig(false);
+              setTab("connected");
+            }}
           >
             Connected
             <span className="apps-tab-count">{connected.length}</span>
           </button>
         </div>
-        <label className="field apps-search">
-          <span className="sr-only">Search apps</span>
-          <span className="search-control">
-            <Icon name="search" size={14} />
-            <input
-              placeholder="Search apps"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              autoComplete="off"
-            />
-          </span>
-        </label>
-        <button
-          type="button"
-          className={adding ? "outline sm" : "primary sm"}
-          onClick={() => setAdding((v) => !v)}
-        >
-          <Icon name={adding ? "close" : "plus"} size={14} />
-          {adding ? "Close" : "Add custom MCP"}
-        </button>
+        {!catalogConfig && (
+          <label className="field apps-search">
+            <span className="sr-only">Search apps</span>
+            <span className="search-control">
+              <Icon name="search" size={14} />
+              <input
+                placeholder="Search apps"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                autoComplete="off"
+              />
+            </span>
+          </label>
+        )}
+        <div className="apps-toolbar-actions">
+          <button
+            type="button"
+            className={catalogConfig ? "outline sm" : "ghost sm"}
+            onClick={() => {
+              setAdding(false);
+              setSelectedApp(null);
+              setSelectedServer(null);
+              setCatalogConfig((v) => !v);
+            }}
+          >
+            <Icon name="layers" size={14} />
+            {catalogConfig ? "Back to Apps" : "Catalog config"}
+          </button>
+          {!catalogConfig && (
+            <button
+              type="button"
+              className={adding ? "outline sm" : "primary sm"}
+              onClick={() => setAdding((v) => !v)}
+            >
+              <Icon name={adding ? "close" : "plus"} size={14} />
+              {adding ? "Close" : "Add custom MCP"}
+            </button>
+          )}
+        </div>
       </div>
 
+      {catalogConfig ? (
+        <CatalogConfigPage catalog={catalog} onChanged={onChanged} />
+      ) : (
+        <>
       {tab === "all" && categories.length > 0 && (
         <div className="apps-categories" role="radiogroup" aria-label="App categories">
           <button
@@ -444,6 +475,8 @@ export function AppsPage() {
             setSelectedServer(next);
           }}
         />
+      )}
+        </>
       )}
     </>
   );

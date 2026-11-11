@@ -6,6 +6,8 @@ type Props = {
   onChange: (next: string) => void;
   placeholder?: string;
   rows?: number;
+  /** stringMap: object of string values (headers). object: any JSON object (manifests). */
+  valueMode?: "stringMap" | "object";
   /** When set, surface parse errors to the parent (e.g. disable submit). */
   onValidityChange?: (ok: boolean) => void;
 };
@@ -17,6 +19,7 @@ export function JsonObjectEditor({
   onChange,
   placeholder = '{\n  "Authorization": "Bearer …"\n}',
   rows = 8,
+  valueMode = "stringMap",
   onValidityChange,
 }: Props) {
   const id = useId();
@@ -34,6 +37,11 @@ export function JsonObjectEditor({
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
         setError("Must be a JSON object");
         onValidityChange?.(false);
+        return;
+      }
+      if (valueMode === "object") {
+        setError("");
+        onValidityChange?.(true);
         return;
       }
       for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
@@ -54,7 +62,7 @@ export function JsonObjectEditor({
       setError("Invalid JSON");
       onValidityChange?.(false);
     }
-  }, [value, onValidityChange]);
+  }, [value, valueMode, onValidityChange]);
 
   function format() {
     const trimmed = value.trim();
