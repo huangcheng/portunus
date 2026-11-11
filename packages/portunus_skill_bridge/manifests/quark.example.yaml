@@ -8,10 +8,10 @@ backend: json_cli
 
 auth:
   type: oauth_link
-  # Force Quark agent detection on Connect auth. Tool calls also need
-  # OPENCLAW_CLI via catalog env_defaults (stdio vault) — login_env alone is not enough.
-  login_env:
-    OPENCLAW_CLI: "1"
+  # Do not impersonate OpenClaw (or any other agent runtime) to bypass Quark's
+  # agent-environment gate (-104). Honest options: supported integration path
+  # from Quark, or leave the server auth_required / upstream_error.
+  login_env: {}
   actions:
     login: login
     status: get-user-info

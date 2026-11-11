@@ -221,9 +221,6 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "env_defaults": {
                 "SKILL_ROOT": QUARK_SKILL_ROOT,
                 "STATE_DIR": QUARK_STATE_DIR,
-                # Quark CLI agent-gate (-104) requires OpenClaw identity on every
-                # tool spawn, not only Connect login (login_env is auth-only).
-                "OPENCLAW_CLI": "1",
             },
         },
     },

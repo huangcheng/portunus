@@ -106,6 +106,8 @@ class Tool(Base):
     description: Mapped[str | None] = mapped_column(Text)
     schema: Mapped[dict[str, Any]] = mapped_column(JSON)
     schema_hash: Mapped[str] = mapped_column(String(128))
+    # MCP ToolAnnotations (readOnlyHint / destructiveHint / …); null when upstream omitted.
+    annotations: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     enabled: Mapped[bool] = mapped_column(default=True, server_default=true())
     created_at: Mapped[datetime] = _created_at()
 

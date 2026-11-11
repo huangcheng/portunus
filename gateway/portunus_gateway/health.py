@@ -68,10 +68,19 @@ def _missing_credentials(facts: HealthFacts) -> bool:
 
 
 def derive_status(facts: HealthFacts) -> str:
-    """First matching rule wins (spec §6)."""
+    """First matching rule wins (spec §6).
+
+    Live traffic writes ``last_ok_at``; treat it as evidence of life so servers
+    do not stay ``probing`` forever when the operator never clicked Probe
+    (review #23 / compliance 2026-11-12).
+    """
     if facts.probing:
         return "probing"
-    if facts.last_probe_at is None and facts.last_error_at is None:
+    if (
+        facts.last_probe_at is None
+        and facts.last_error_at is None
+        and facts.last_ok_at is None
+    ):
         return "probing"
     if _missing_credentials(facts):
         return "auth_required"
@@ -89,7 +98,8 @@ def derive_status(facts: HealthFacts) -> str:
 def health_fields(facts: HealthFacts) -> dict[str, Any]:
     """Six fields shared by discovery and ``server_view``."""
     tool_count: int | None
-    if facts.last_probe_at is None:
+    # tool_count stays null until the first successful observation (probe or live ok).
+    if facts.last_probe_at is None and facts.last_ok_at is None:
         tool_count = None
     else:
         tool_count = facts.enabled_tool_count

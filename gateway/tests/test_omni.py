@@ -7,6 +7,7 @@ MCP SDK client over Streamable HTTP against the ASGI app.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import uuid
@@ -498,7 +499,8 @@ async def test_schema_validation_and_pin(stack):
         )
         assert not schema_res.is_error, payload(schema_res)
         h = payload(schema_res)
-        assert h.get("schema_pin") == "optional"
+        assert h.get("schema_pin") == h.get("schema_hash")
+        assert h.get("schema_pin_required") is False
         ok = await c.call_tool(
             "portunus_invoke_tool",
             {
@@ -547,6 +549,62 @@ def test_result_cap_is_one_mib():
     over = finish_result({"content": [{"type": "text", "text": "x" * (pad + 1)}]})
     assert over.is_error and payload(over)["error"]["code"] == "payload_too_large"
     assert "xxxx" not in json.dumps(over.model_dump(mode="json"))
+
+
+def test_finish_result_truncate_flag_returns_preview(pepper_file):
+    big = {"content": [{"type": "text", "text": "y" * 5000}]}
+    cut = finish_result(big, max_bytes=2048, truncate=True)
+    assert not cut.is_error
+    sc = cut.structured_content
+    assert sc["truncated"] is True
+    assert sc["bytes"] > 2048
+    assert sc["limit"] == 2048
+    assert "preview" in sc
+
+
+def test_cursor_bound_to_scope_and_query(pepper_file):
+    from portunus_gateway.omni import decode_cursor, encode_cursor
+    from portunus_shared import PortunusError
+
+    cur = encode_cursor("alpha", scope="tools:koofr", query="web")
+    assert decode_cursor(cur, scope="tools:koofr", query="web") == "alpha"
+    forged_blob = json.dumps(
+        {"after": "zzz", "scope": "tools:koofr", "query": "web", "sig": "0" * 32}
+    ).encode()
+    forged_cur = base64.urlsafe_b64encode(forged_blob).decode().rstrip("=")
+    with pytest.raises(PortunusError) as forged:
+        decode_cursor(forged_cur, scope="tools:koofr", query="web")
+    assert forged.value.code == "invalid_cursor"
+    with pytest.raises(PortunusError) as cross:
+        decode_cursor(cur, scope="tools:nutstore", query="web")
+    assert cross.value.code == "invalid_cursor"
+    with pytest.raises(PortunusError) as q:
+        decode_cursor(cur, scope="tools:koofr", query="")
+    assert q.value.code == "invalid_cursor"
+
+
+async def test_discover_tools_inlines_input_schema(stack):
+    sid = await stack.add_server()
+    token, _ = await stack.add_key(sid)
+    async with stack.client(token) as c:
+        r = payload(await c.call_tool("portunus_discover_tools", {"server": "fix"}))
+        assert r["items"]
+        for item in r["items"]:
+            assert isinstance(item.get("input_schema"), dict)
+            assert item.get("schema_hash")
+        # Cross-server cursor must fail (#26).
+        other = await stack.add_server("other")
+        token2, _ = await stack.add_key(sid, other)
+        async with stack.client(token2) as c2:
+            page = payload(
+                await c2.call_tool("portunus_discover_tools", {"server": "demo", "limit": 1})
+            )
+            if page.get("next_cursor"):
+                bad = await c2.call_tool(
+                    "portunus_discover_tools",
+                    {"server": "other", "cursor": page["next_cursor"]},
+                )
+                assert error_code(bad) == "invalid_cursor"
 
 
 def test_finish_result_promotes_json_text_to_structured_content():
@@ -599,6 +657,54 @@ def test_finish_result_promotes_json_text_to_structured_content():
         }
     )
     assert already.structured_content == {"error": {"code": "auth_required", "message": "x"}}
+
+
+def test_finish_result_cli_envelope_failures_become_iserror():
+    """stdio CLI business failures must not ride isError:false (review v7 §4)."""
+    quark = finish_result(
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": '{"exit_code":1,"code":-104,"message":"无法识别当前 Agent 环境"}',
+                }
+            ],
+            "structuredContent": {
+                "result": '{"exit_code":1,"code":-104,"message":"无法识别当前 Agent 环境"}'
+            },
+        },
+        server="quark",
+        tool="get_user_info",
+    )
+    assert quark.is_error
+    assert quark.structured_content["error"]["code"] == "upstream_error"
+    assert "无法识别" in quark.structured_content["error"]["message"]
+
+    pending = finish_result(
+        {
+            "content": [{"type": "text", "text": '{"exit_code":0,"code":"LOGIN_PENDING","logged_in":false}'}],
+            "structuredContent": {
+                "exit_code": 0,
+                "code": "LOGIN_PENDING",
+                "logged_in": False,
+            },
+        },
+        server="guangyapan",
+        tool="account_rights",
+    )
+    assert pending.is_error
+    assert pending.structured_content["error"]["code"] == "auth_required"
+
+    weread = finish_result(
+        {
+            "content": [{"type": "text", "text": '{"ok":false,"errcode":-2003}'}],
+            "structuredContent": {"ok": False, "errcode": -2003, "status_code": 499},
+        },
+        server="weread",
+        tool="readdata_detail",
+    )
+    assert weread.is_error
+    assert weread.structured_content["error"]["code"] == "upstream_error"
 
 
 # ---- timeout / concurrency / rate / revoke ------------------------------------------------

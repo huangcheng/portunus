@@ -51,7 +51,25 @@ def _facts(**overrides) -> HealthFacts:
     "kwargs,expected",
     [
         ({"probing": True}, "probing"),
-        ({"last_probe_at": None, "last_error_at": None, "enabled_tool_count": 0}, "probing"),
+        (
+            {
+                "last_probe_at": None,
+                "last_error_at": None,
+                "last_ok_at": None,
+                "enabled_tool_count": 0,
+            },
+            "probing",
+        ),
+        # Live traffic alone is enough to leave probing (review #23).
+        (
+            {
+                "last_probe_at": None,
+                "last_error_at": None,
+                "last_ok_at": datetime(2026, 11, 11, tzinfo=timezone.utc),
+                "enabled_tool_count": 2,
+            },
+            "ok",
+        ),
         (
             {
                 "kind": "remote",
@@ -92,9 +110,24 @@ def test_derive_status_rules(kwargs, expected):
 
 
 def test_health_fields_null_tool_count_until_probe():
-    fields = health_fields(_facts(last_probe_at=None, last_error_at=None, enabled_tool_count=0))
+    fields = health_fields(
+        _facts(last_probe_at=None, last_error_at=None, last_ok_at=None, enabled_tool_count=0)
+    )
     assert fields["status"] == "probing"
     assert fields["tool_count"] is None
+
+
+def test_health_fields_tool_count_after_live_ok_without_probe():
+    fields = health_fields(
+        _facts(
+            last_probe_at=None,
+            last_error_at=None,
+            last_ok_at=datetime(2026, 11, 11, tzinfo=timezone.utc),
+            enabled_tool_count=4,
+        )
+    )
+    assert fields["status"] == "ok"
+    assert fields["tool_count"] == 4
 
 
 def test_should_record_failure_respects_short_timeout_and_skip():

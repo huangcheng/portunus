@@ -54,6 +54,9 @@ services:
       PORTUNUS_RUNNER_UID: "10001"
       PORTUNUS_DATABASE_URL: ${PORTUNUS_DATABASE_URL:-sqlite+aiosqlite:////var/lib/portunus/portunus.db}
       PORTUNUS_TRUSTED_PROXIES: ${PORTUNUS_TRUSTED_PROXIES:-}
+      # MCP Origin allowlist + RFC 9728 resource id (comma-separated origins; public URL origin is included).
+      PORTUNUS_PUBLIC_URL: ${PORTUNUS_PUBLIC_URL:-}
+      PORTUNUS_ALLOWED_ORIGINS: ${PORTUNUS_ALLOWED_ORIGINS:-}
     volumes:
       - run:/run/portunus
       - data:/var/lib/portunus

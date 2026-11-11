@@ -23,8 +23,11 @@ def _otel():
 
 def _portunus(result) -> dict:
     meta = result.meta or {}
-    portunus = meta.get("portunus")
+    portunus = meta.get("io.portunus.gateway") or meta.get("portunus")
     assert isinstance(portunus, dict), meta
+    # Dual-write during the rename window.
+    assert meta.get("portunus") == portunus
+    assert meta.get("io.portunus.gateway") == portunus
     return portunus
 
 
@@ -53,6 +56,7 @@ async def test_fake_delayed_upstream_reports_upstream_ms(caplog):
     registry.start_payload = AsyncMock(
         return_value={"argv": ["x"], "env": {}, "vault_version": 1, "preferred_regions": []}
     )
+    registry.record_outcome = AsyncMock()
     registry.remote = None
 
     authz = MagicMock()
@@ -124,6 +128,7 @@ async def test_missing_runner_timing_sets_upstream_omits_queue_init():
     registry.start_payload = AsyncMock(
         return_value={"argv": ["x"], "env": {}, "vault_version": 1, "preferred_regions": []}
     )
+    registry.record_outcome = AsyncMock()
     authz = MagicMock()
     authz.is_revoked = MagicMock(return_value=False)
     authz.has_grant = MagicMock(return_value=True)
@@ -169,6 +174,7 @@ async def test_meta_portunus_trace_id_on_success_and_error():
     assert "gateway_ms" in _portunus(err)
 
     ok = with_portunus_meta(error_result("unsupported", "x"), {"trace_id": "abc", "gateway_ms": 1})
+    assert ok.meta["io.portunus.gateway"]["trace_id"] == "abc"
     assert ok.meta["portunus"]["trace_id"] == "abc"
 
     # Successful discover-shaped path: revoked key still gets meta via dispatch.

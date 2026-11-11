@@ -17,7 +17,7 @@ Platform auth (`device_qr` / `oauth_link`) requires `backend: json_cli`.
 
 ## Shared AuthSpec fields
 
-- `login_env` — injected **only** for Connect `skill_exec` auth (e.g. `OPENCLAW_CLI: "1"`, `GUANGYAPAN_DRIVE_LOGIN_MODE: device`). Not for normal tool calls.
+- `login_env` — injected **only** for Connect `skill_exec` auth (e.g. `GUANGYAPAN_DRIVE_LOGIN_MODE: device`). Not for normal tool calls. Do not use it to impersonate another agent runtime.
 - `actions` — CLI subcommands: `login`, `status`, `logout` (defaults: `login`, `login-status`, `logout`).
 - `connect_hint` — optional operator copy under Connect (≤500 chars).
 - `poll_interval_s` — Connect poll cadence (default 2).

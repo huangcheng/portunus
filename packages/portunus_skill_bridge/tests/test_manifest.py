@@ -40,7 +40,7 @@ def test_load_quark_example():
     assert m.auth.poll_interval_s == 2
     assert m.auth.token_paste is True
     assert m.auth.connect_hint and "打开授权页" in m.auth.connect_hint
-    assert m.auth.login_env.get("OPENCLAW_CLI") == "1"
+    assert m.auth.login_env == {}
     assert m.auth.actions.status == "get-user-info"
     assert m.cli is not None
     assert m.cli.run_wrapper == "raw"

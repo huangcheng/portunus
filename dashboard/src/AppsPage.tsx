@@ -1003,7 +1003,7 @@ function SkillBridgeManagePanel({
 
   async function ensureServer(): Promise<Server> {
     if (current) {
-      // Backfill catalog env_defaults (e.g. OPENCLAW_CLI) onto existing vaults.
+      // Backfill catalog env_defaults onto existing vaults.
       const missing = Object.fromEntries(
         Object.entries(envDefaults).filter(([k]) => !current.env_names.includes(k)),
       );

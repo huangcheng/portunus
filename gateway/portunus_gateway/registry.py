@@ -202,7 +202,7 @@ def server_view(
 
 
 def tool_view(tool: Tool) -> dict[str, Any]:
-    return {
+    out = {
         "id": str(tool.id),
         "server_id": str(tool.server_id),
         "name": tool.upstream_name,
@@ -211,6 +211,9 @@ def tool_view(tool: Tool) -> dict[str, Any]:
         "schema_hash": tool.schema_hash,
         "enabled": tool.enabled,
     }
+    if tool.annotations:
+        out["annotations"] = tool.annotations
+    return out
 
 
 def _normalize_tools(raw: Any) -> list[dict[str, Any]]:
@@ -238,7 +241,24 @@ def _normalize_tools(raw: Any) -> list[dict[str, Any]]:
             schema = {"type": "object"}
         if not isinstance(schema, dict):
             raise bad("inputSchema is not an object")
-        out[name] = {"name": name, "description": desc, "schema": schema}
+        annotations = item.get("annotations")
+        if annotations is not None and not isinstance(annotations, dict):
+            raise bad("annotations is not an object")
+        # Keep only JSON-serializable annotation hints (MCP ToolAnnotations).
+        if isinstance(annotations, dict):
+            clean: dict[str, Any] = {}
+            for k, v in annotations.items():
+                if not isinstance(k, str) or not k or len(k) > 64:
+                    continue
+                if isinstance(v, (bool, int, float, str)) or v is None:
+                    clean[k] = v
+            annotations = clean or None
+        out[name] = {
+            "name": name,
+            "description": desc,
+            "schema": schema,
+            "annotations": annotations,
+        }
     return list(out.values())
 
 
@@ -1183,6 +1203,7 @@ class Registry:
             changed: list[str] = []
             for item in incoming:
                 digest = schema_hash(item["schema"])
+                annotations = item.get("annotations")
                 tool = existing.get(item["name"])
                 if tool is None:
                     s.add(
@@ -1192,14 +1213,20 @@ class Registry:
                             description=item["description"],
                             schema=item["schema"],
                             schema_hash=digest,
+                            annotations=annotations,
                             enabled=True,
                         )
                     )
                     added += 1
-                elif tool.schema_hash != digest or tool.description != item["description"]:
+                elif (
+                    tool.schema_hash != digest
+                    or tool.description != item["description"]
+                    or tool.annotations != annotations
+                ):
                     tool.description = item["description"]
                     tool.schema = item["schema"]
                     tool.schema_hash = digest
+                    tool.annotations = annotations
                     tool.enabled = True
                     changed.append(tool.upstream_name)
                 elif not tool.enabled:
