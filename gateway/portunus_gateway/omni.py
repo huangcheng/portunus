@@ -61,9 +61,7 @@ from . import __version__
 from . import telemetry as tel
 from .db.models import Server as ServerRow
 from .db.models import Tool as ToolRow
-from .db.models import VaultEntry
 from .keys import AuthError, verify_agent_token
-from .oauth import AUTH_HEADER_NAME
 from .registry import RegistryError
 from .runner_client import RunnerRequestError
 from .runner_pool import RunnerPool
