@@ -268,6 +268,12 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const onUnauth = () => setAuthed(false);
+    window.addEventListener("portunus-unauthorized", onUnauth);
+    return () => window.removeEventListener("portunus-unauthorized", onUnauth);
+  }, []);
+
+  useEffect(() => {
     if (!authed) return;
     let cancelled = false;
     const tick = async () => {

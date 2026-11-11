@@ -32,6 +32,12 @@ async function call<T>(method: string, path: string, body?: unknown, headers: Re
     const detail = Array.isArray(data.errors)
       ? data.errors.map((e: { loc: string[] }) => e.loc.join(".")).join(", ")
       : "";
+    // Session gone / never logged in: bounce the shell to <Login/>. Skip /auth/login
+    // so a wrong password stays on the form instead of remounting it.
+    if (res.status === 401 && path !== "/auth/login") {
+      csrf = "";
+      window.dispatchEvent(new Event("portunus-unauthorized"));
+    }
     throw new ApiError(res.status, data.code ?? "error", data.message ?? (detail ? `invalid: ${detail}` : res.statusText));
   }
   return data as T;
