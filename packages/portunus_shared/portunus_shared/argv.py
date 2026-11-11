@@ -19,6 +19,8 @@ _UVX_PKG = re.compile(rf"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?=={_SEMVER}",
 
 _BASENAMES = frozenset({"npx", "uvx"})
 _PYTHON = frozenset({"python", "python3"})
+_PIKPAK = frozenset({"pikpak"})
+_PIKPAK_MCP_ARGS = ("mcp", "--stdio")
 _SKILL_BRIDGE_MODULE = "portunus_skill_bridge"
 _SKILL_BRIDGE_ENV_FLAGS = frozenset({"--manifest-env", "--manifest-stdin"})
 
@@ -94,6 +96,14 @@ def validate_stdio_command(
         _validate_python_skill_bridge(args)
         return
 
+    if command in _PIKPAK:
+        resolved = which(command, path=os.pathsep.join(trusted_path))
+        if not resolved:
+            raise _reject(f"{command} not found in trusted_path")
+        if tuple(args) != _PIKPAK_MCP_ARGS:
+            raise _reject("pikpak requires exactly: mcp --stdio")
+        return
+
     if os.path.isabs(command):
         real = os.path.realpath(command)
         allowed = {os.path.realpath(p) for p in binary_allowlist}
@@ -104,7 +114,10 @@ def validate_stdio_command(
                 raise _reject(f"arg not in trailing_allowlist: {a!r}")
         return
 
-    raise _reject("command must be npx, uvx, python -m portunus_skill_bridge, or an allowlisted absolute path")
+    raise _reject(
+        "command must be npx, uvx, pikpak mcp --stdio, python -m portunus_skill_bridge, "
+        "or an allowlisted absolute path"
+    )
 
 
 def _validate_python_skill_bridge(args: list[str]) -> None:

@@ -20,6 +20,7 @@ export type AppIconId =
   | "guangyapan"
   | "quark"
   | "weiyun"
+  | "pikpak"
   | "generic";
 
 export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
@@ -34,6 +35,7 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "guangyapan") return "guangyapan";
   if (slug === "quark" || slug === "quarkclouddrive") return "quark";
   if (slug === "weiyun") return "weiyun";
+  if (slug === "pikpak") return "pikpak";
   return "generic";
 }
 
@@ -48,6 +50,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   guangyapan: "guangyapan.svg",
   quark: "quark.png",
   weiyun: "weiyun.png",
+  pikpak: "pikpak.png",
 };
 
 export function AppBrandMark({
@@ -68,6 +71,7 @@ export function AppBrandMark({
     id === "guangyapan" ||
     id === "quark" ||
     id === "weiyun" ||
+    id === "pikpak" ||
     id === "ticktick"
       ? id === "ticktick"
         ? "dida365"

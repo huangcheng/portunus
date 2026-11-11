@@ -227,6 +227,28 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "slug": "pikpak",
+        "label": "PikPak",
+        "name": "PikPak",
+        "description": "PikPak cloud drive via official CLI MCP (pikpak mcp --stdio + PAT).",
+        "connection": "stdio",
+        "popular": True,
+        "categories": ["Storage"],
+        "tags": ["pikpak", "drive", "mcp", "stdio"],
+        "sort_order": 78,
+        "spec": {
+            "command": "pikpak",
+            "args": ["mcp", "--stdio"],
+            "env": [
+                {"name": "PIKPAK_TOKEN", "label": "Personal Access Token", "secret": True},
+            ],
+            "env_defaults": {
+                "PIKPAK_DIR": "/var/lib/portunus/skill-state/pikpak",
+                "PIKPAK_NO_UPDATE_NOTIFIER": "1",
+            },
+        },
+    },
 ]
 
 
@@ -356,7 +378,20 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
                 "secret": bool(item.get("secret", True)),
             }
         )
-    return {"command": command, "args": list(args), "env": env_out}
+    out: dict[str, Any] = {"command": command, "args": list(args), "env": env_out}
+    defaults = spec.get("env_defaults") or {}
+    if defaults:
+        if not isinstance(defaults, dict):
+            raise RegistryError(422, "invalid_request", "spec.env_defaults must be an object")
+        env_defaults: dict[str, str] = {}
+        for k, v in defaults.items():
+            if not isinstance(k, str) or not k.strip() or not isinstance(v, str):
+                raise RegistryError(
+                    422, "invalid_request", "spec.env_defaults must map strings to strings"
+                )
+            env_defaults[k.strip()] = v
+        out["env_defaults"] = env_defaults
+    return out
 
 
 def _validate_skill_bridge_spec(spec: dict[str, Any]) -> dict[str, Any]:

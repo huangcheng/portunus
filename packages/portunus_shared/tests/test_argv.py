@@ -47,3 +47,27 @@ def test_uvx_ok(monkeypatch):
         trusted_path=["/usr/bin"],
         binary_allowlist=[],
     )
+
+
+def test_pikpak_mcp_stdio_ok(monkeypatch):
+    monkeypatch.setattr("portunus_shared.argv.which", lambda c, path=None: "/usr/local/bin/pikpak")
+    validate_stdio_command(
+        "pikpak",
+        ["mcp", "--stdio"],
+        trailing_allowlist=[],
+        trusted_path=["/usr/local/bin"],
+        binary_allowlist=[],
+    )
+
+
+def test_pikpak_other_args_rejected(monkeypatch):
+    monkeypatch.setattr("portunus_shared.argv.which", lambda c, path=None: "/usr/local/bin/pikpak")
+    with pytest.raises(ArgvError) as e:
+        validate_stdio_command(
+            "pikpak",
+            ["mcp"],
+            trailing_allowlist=[],
+            trusted_path=["/usr/local/bin"],
+            binary_allowlist=[],
+        )
+    assert e.value.code == "spawn_rejected"

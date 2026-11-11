@@ -16,6 +16,7 @@ import {
   isOauthLinkAuth,
   isPlatformSkillAuth,
   isSkillBridgeApp,
+  isStdioApp,
   oauthLinkAuthOptions,
   isWebDavApp,
   specString,
@@ -24,6 +25,7 @@ import {
   type HttpApp,
   type OAuthApp,
   type SkillBridgeApp,
+  type StdioApp,
   type WebDavApp,
 } from "./providers";
 
@@ -71,6 +73,18 @@ function appStatus(app: CatalogApp, server: Server | null): {
   }
   if (isHttpApp(app)) {
     return { active: !!server?.has_auth, configured: !!server?.has_auth };
+  }
+  if (isStdioApp(app)) {
+    const secrets = Array.isArray(app.spec.env) ? app.spec.env : [];
+    const required = secrets
+      .filter((item): item is { name: string } => !!item && typeof item === "object" && typeof (item as { name?: unknown }).name === "string")
+      .map((item) => item.name);
+    if (required.length) {
+      const names = new Set(server?.env_names ?? []);
+      const active = required.every((n) => names.has(n));
+      return { active, configured: !!server };
+    }
+    return { active: !!server?.enabled, configured: !!server };
   }
   return {
     active: !!server?.has_auth,
@@ -676,6 +690,9 @@ function ManagePanel({
   }
   if (isHttpApp(app)) {
     return <HttpManagePanel app={app} server={server} onClose={onClose} onChanged={onChanged} />;
+  }
+  if (isStdioApp(app)) {
+    return <StdioManagePanel app={app} server={server} onClose={onClose} onChanged={onChanged} />;
   }
   if (isOAuthApp(app)) {
     return <OAuthManagePanel app={app} server={server} onClose={onClose} onChanged={onChanged} />;
@@ -1557,6 +1574,181 @@ function WebDavManagePanel({
           onChanged={onChanged}
         />
 
+        {notice && <div className="notice success">{notice}</div>}
+        {error && <div className="notice error">{error}</div>}
+      </form>
+    </DrawerShell>
+  );
+}
+
+function stdioEnvDefs(app: StdioApp): { name: string; label: string; secret: boolean }[] {
+  const raw = app.spec.env;
+  if (!Array.isArray(raw)) return [];
+  const out: { name: string; label: string; secret: boolean }[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const name = (item as { name?: unknown }).name;
+    if (typeof name !== "string" || !name.trim()) continue;
+    const label = (item as { label?: unknown }).label;
+    const secret = (item as { secret?: unknown }).secret;
+    out.push({
+      name: name.trim(),
+      label: typeof label === "string" && label.trim() ? label.trim() : name.trim(),
+      secret: secret !== false,
+    });
+  }
+  return out;
+}
+
+function stdioEnvDefaults(app: StdioApp): Record<string, string> {
+  const raw = app.spec.env_defaults;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof k === "string" && k.trim() && typeof v === "string") out[k.trim()] = v;
+  }
+  return out;
+}
+
+function StdioManagePanel({
+  app,
+  server,
+  onClose,
+  onChanged,
+}: {
+  app: StdioApp;
+  server: Server | null;
+  onClose: () => void;
+  onChanged: () => Promise<void>;
+}) {
+  const secretDefs = stdioEnvDefs(app);
+  const envDefaults = stdioEnvDefaults(app);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [current, setCurrent] = useState<Server | null>(server);
+
+  useEffect(() => {
+    setCurrent(server);
+    setValues({});
+    setError("");
+    setNotice("");
+  }, [server, app]);
+
+  const { active, configured } = appStatus(app, current);
+  const command = specString(app.spec, "command") || "pikpak";
+  const args = specStringList(app.spec, "args");
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const env: Record<string, string> = { ...envDefaults };
+      for (const def of secretDefs) {
+        const v = (values[def.name] || "").trim();
+        if (v) env[def.name] = v;
+      }
+      if (current) {
+        const missing = Object.fromEntries(
+          Object.entries(envDefaults).filter(([k]) => !current.env_names.includes(k)),
+        );
+        const payload = { ...missing };
+        for (const def of secretDefs) {
+          if (env[def.name]) payload[def.name] = env[def.name];
+        }
+        if (!Object.keys(payload).length) {
+          setNotice("Already connected. Enter a new secret only when rotating.");
+          return;
+        }
+        for (const def of secretDefs) {
+          if (!current.env_names.includes(def.name) && !payload[def.name]) {
+            throw new Error(`${def.label} is required`);
+          }
+        }
+        const updated = await api.updateServer(current.id, { env: payload });
+        setCurrent(updated);
+      } else {
+        for (const def of secretDefs) {
+          if (!env[def.name]) throw new Error(`${def.label} is required`);
+        }
+        const created = await api.createServer({
+          name: app.name,
+          slug: app.slug,
+          kind: "stdio",
+          command,
+          args,
+          env,
+        });
+        setCurrent(created);
+      }
+      setValues({});
+      setNotice("Saved. Probe to refresh tools and go live for agents.");
+      await onChanged();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <DrawerShell
+      title={app.label}
+      description={app.description}
+      iconId={app.slug}
+      onClose={onClose}
+      current={current}
+      active={active}
+      configured={configured}
+    >
+      <form className="stack drawer-section" onSubmit={save}>
+        <p className="provider-hint">
+          Stdio MCP: <code>{[command, ...args].join(" ")}</code>
+          {app.slug === "pikpak" ? (
+            <>
+              <br />
+              Create a PAT in PikPak → Settings → Access & Integrations → Personal Access Tokens (
+              <a
+                href="https://mypikpak.com/en-US/help-center/connected_apps/personal_access_tokens"
+                target="_blank"
+                rel="noreferrer"
+              >
+                guide
+              </a>
+              ).
+            </>
+          ) : null}
+        </p>
+        {secretDefs.map((def) => (
+          <label className="field" key={def.name}>
+            {def.label} {active ? "(leave blank to keep)" : ""}
+            <input
+              type={def.secret ? "password" : "text"}
+              value={values[def.name] || ""}
+              onChange={(e) => setValues((prev) => ({ ...prev, [def.name]: e.target.value }))}
+              required={!active}
+              autoComplete="off"
+              placeholder={active && def.secret ? "••••••••" : undefined}
+            />
+          </label>
+        ))}
+        <div className="apps-actions">
+          <button className="primary sm" type="submit" disabled={busy}>
+            {current ? "Save" : "Connect"}
+          </button>
+        </div>
+        <ServerLifecycle
+          current={current}
+          busy={busy}
+          setBusy={setBusy}
+          setError={setError}
+          setNotice={setNotice}
+          setCurrent={setCurrent}
+          onChanged={onChanged}
+        />
         {notice && <div className="notice success">{notice}</div>}
         {error && <div className="notice error">{error}</div>}
       </form>
