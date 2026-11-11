@@ -153,6 +153,14 @@ async def test_tools_list_only_four_meta(stack):
         assert t.input_schema["type"] == "object"
 
 
+def _guard_code(body: dict) -> str:
+    """HTTP-guard failures use a JSON-RPC envelope with the Portunus code in ``data.code``."""
+    err = body["error"]
+    assert body.get("jsonrpc") == "2.0"
+    assert isinstance(err["code"], int)
+    return err["data"]["code"]
+
+
 async def test_requires_bearer_agent_key(stack):
     sid = await stack.add_server()
     token, key_id = await stack.add_key(sid)
@@ -166,10 +174,10 @@ async def test_requires_bearer_agent_key(stack):
             r = await hc.post("/mcp", json=body, headers=h)
             assert r.status_code == 401, auth
             assert r.headers["www-authenticate"].startswith("Bearer")
-            assert r.json()["error"]["code"] == "unauthorized"
+            assert _guard_code(r.json()) == "unauthorized"
         await keys.revoke_key(key_id)
         r = await hc.post("/mcp", json=body, headers=dict(headers, Authorization=f"Bearer {token}"))
-        assert r.status_code == 401 and r.json()["error"]["code"] == "unauthorized"
+        assert r.status_code == 401 and _guard_code(r.json()) == "unauthorized"
 
 
 async def test_oversize_request_body_rejected(stack):
@@ -188,7 +196,7 @@ async def test_oversize_request_body_rejected(stack):
             },
         )
     assert r.status_code == 413
-    assert r.json()["error"]["code"] == "payload_too_large"
+    assert _guard_code(r.json()) == "payload_too_large"
 
 
 async def test_initialize_reports_package_version(stack):
@@ -239,6 +247,29 @@ async def test_batch_request_refused_without_leaking_internals(stack):
         assert needle not in leaked, leaked
 
 
+async def test_invalid_envelope_refused_without_leaking_internals(stack):
+    """Malformed JSON-RPC objects must not echo a pydantic union dump (review #10)."""
+    sid = await stack.add_server()
+    token, _ = await stack.add_key(sid)
+    bad = [
+        {"id": 1, "method": "ping"},  # missing jsonrpc
+        {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": "oops"},
+    ]
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=stack.app), base_url="http://test"
+    ) as hc:
+        for body in bad:
+            r = await hc.post(
+                "/mcp", json=body, headers=BASE_HEADERS | {"Authorization": f"Bearer {token}"}
+            )
+            assert r.status_code == 400, body
+            assert r.json()["error"]["code"] == -32602
+            assert r.json()["error"]["message"] == "invalid JSON-RPC envelope"
+            leaked = r.text.lower()
+            for needle in ("pydantic", "validation error", "docs.", "jsonrpcrequest"):
+                assert needle not in leaked, leaked
+
+
 async def test_auth_scheme_mistake_is_reported_precisely(stack):
     """A bare token is the common mistake; do not claim the request carried no key at all."""
     sid = await stack.add_server()
@@ -255,7 +286,7 @@ async def test_auth_scheme_mistake_is_reported_precisely(stack):
     assert missing.json()["error"]["message"] == "agent key required"
     assert empty.json()["error"]["message"] == "agent key required"
     for r in (bare, missing, empty):
-        assert r.json()["error"]["code"] == "unauthorized"
+        assert _guard_code(r.json()) == "unauthorized"
         assert r.headers["www-authenticate"].startswith("Bearer")
 
 
@@ -360,11 +391,11 @@ async def test_discover_tools_cursor_pages_50_and_100(stack):
         _, sizes = await pages(limit=100)
         assert sizes == [100, 32]
         bad = await c.call_tool("portunus_discover_tools", {"server": "fix", "limit": 101})
-        assert error_code(bad) == "schema_mismatch"  # >100 refused, never silently clamped
+        assert error_code(bad) == "invalid_gateway_arguments"  # >100 refused, never silently clamped
         bad = await c.call_tool(
             "portunus_discover_tools", {"server": "fix", "cursor": "!!not-a-cursor"}
         )
-        assert error_code(bad) == "unsupported"
+        assert error_code(bad) == "invalid_cursor"
 
 
 # ---- authorization and admission -----------------------------------------------------
@@ -404,6 +435,39 @@ async def test_server_disabled_and_tool_missing(stack):
     assert stack.srv.children.empty()
 
 
+async def test_tool_disabled_hidden_and_blocked(stack):
+    from sqlalchemy import select
+
+    sid = await stack.add_server()
+    token, _ = await stack.add_key(sid)
+    async with async_session() as s:
+        alpha = (
+            await s.execute(
+                select(Tool).where(Tool.server_id == sid, Tool.upstream_name == "alpha")
+            )
+        ).scalar_one()
+        tool_id = alpha.id
+    await stack.registry.set_tool_enabled(tool_id, False, "test")
+
+    async with stack.client(token) as c:
+        tools = payload(await c.call_tool("portunus_discover_tools", {"server": "fix"}))
+        assert [t["name"] for t in tools["items"]] == ["beta"]
+        servers = payload(await c.call_tool("portunus_discover_servers", {}))
+        assert servers["items"][0]["tool_count"] == 1
+        assert error_code(
+            await c.call_tool("portunus_get_tool_schema", {"server": "fix", "tool": "alpha"})
+        ) == "tool_disabled"
+        assert error_code(
+            await c.call_tool("portunus_invoke_tool", {"server": "fix", "tool": "alpha"})
+        ) == "tool_disabled"
+        # still-enabled tool remains visible / schema-fetchable
+        schema = payload(
+            await c.call_tool("portunus_get_tool_schema", {"server": "fix", "tool": "beta"})
+        )
+        assert schema["name"] == "beta"
+    assert stack.srv.children.empty()
+
+
 async def test_is_revoked_checked_before_has_grant(stack):
     sid = await stack.add_server()
     _token, key_id = await stack.add_key(sid)
@@ -419,27 +483,42 @@ async def test_is_revoked_checked_before_has_grant(stack):
 
 
 async def test_schema_validation_and_pin(stack):
-    sid = await stack.add_server()
+    sid = await stack.add_server("pinsrv")
     token, _ = await stack.add_key(sid)
     async with stack.client(token) as c:
         res = await c.call_tool(
             "portunus_invoke_tool",
-            {"server": "fix", "tool": "alpha", "arguments": {"q": 5}},
+            {"server": "pinsrv", "tool": "alpha", "arguments": {"q": 5}},
         )
-        assert error_code(res) == "schema_mismatch"
+        assert error_code(res) == "invalid_tool_arguments"
         assert stack.srv.children.empty()  # rejected before any child was started
 
-        h = payload(await c.call_tool("portunus_get_tool_schema", {"server": "fix", "tool": "alpha"}))
+        schema_res = await c.call_tool(
+            "portunus_get_tool_schema", {"server": "pinsrv", "tool": "alpha"}
+        )
+        assert not schema_res.is_error, payload(schema_res)
+        h = payload(schema_res)
+        assert h.get("schema_pin") == "optional"
         ok = await c.call_tool(
             "portunus_invoke_tool",
-            {"server": "fix", "tool": "alpha", "arguments": {"q": "x"}, "schema_hash": h["schema_hash"]},
+            {
+                "server": "pinsrv",
+                "tool": "alpha",
+                "arguments": {"q": "x"},
+                "schema_hash": h["schema_hash"],
+            },
         )
         assert not ok.is_error
         stale = await c.call_tool(
             "portunus_invoke_tool",
-            {"server": "fix", "tool": "alpha", "arguments": {"q": "x"}, "schema_hash": "0" * 64},
+            {
+                "server": "pinsrv",
+                "tool": "alpha",
+                "arguments": {"q": "x"},
+                "schema_hash": "0" * 64,
+            },
         )
-        assert error_code(stale) == "schema_mismatch"
+        assert error_code(stale) == "schema_drift"
 
 
 # ---- Review Focus: oversized result -> payload_too_large ------------------------------
@@ -468,6 +547,58 @@ def test_result_cap_is_one_mib():
     over = finish_result({"content": [{"type": "text", "text": "x" * (pad + 1)}]})
     assert over.is_error and payload(over)["error"]["code"] == "payload_too_large"
     assert "xxxx" not in json.dumps(over.model_dump(mode="json"))
+
+
+def test_finish_result_promotes_json_text_to_structured_content():
+    """stdio peers often put JSON only in content[0].text (review #19)."""
+    promoted = finish_result(
+        {"content": [{"type": "text", "text": '{"path":"/","entries":["a"]}'}]}
+    )
+    assert not promoted.is_error
+    assert promoted.structured_content == {"path": "/", "entries": ["a"]}
+    assert promoted.content[0].text == '{"path":"/","entries":["a"]}'
+
+    listed = finish_result({"content": [{"type": "text", "text": '["a","b"]'}]})
+    assert listed.structured_content == {"items": ["a", "b"]}
+
+    prose = finish_result({"content": [{"type": "text", "text": "Error reading file: 404"}]} )
+    assert prose.structured_content is None
+
+    kept = finish_result(
+        {
+            "content": [{"type": "text", "text": '{"ignored":true}'}],
+            "structuredContent": {"account_id": "x"},
+        }
+    )
+    assert kept.structured_content == {"account_id": "x"}
+
+    # review #16: proxied isError prose gets a gateway envelope; text stays
+    proxied = finish_result(
+        {
+            "content": [{"type": "text", "text": "Error listing directory: 404 Not Found"}],
+            "isError": True,
+        },
+        server="koofr",
+        tool="webdav_list_remote_directory",
+    )
+    assert proxied.is_error
+    assert proxied.content[0].text == "Error listing directory: 404 Not Found"
+    assert proxied.structured_content == {
+        "error": {
+            "code": "upstream_error",
+            "message": "Error listing directory: 404 Not Found",
+            "upstream": {"server": "koofr", "tool": "webdav_list_remote_directory"},
+        }
+    }
+    # already-structured gateway errors are left alone
+    already = finish_result(
+        {
+            "content": [{"type": "text", "text": '{"error":{"code":"auth_required","message":"x"}}'}],
+            "structuredContent": {"error": {"code": "auth_required", "message": "x"}},
+            "isError": True,
+        }
+    )
+    assert already.structured_content == {"error": {"code": "auth_required", "message": "x"}}
 
 
 # ---- timeout / concurrency / rate / revoke ------------------------------------------------

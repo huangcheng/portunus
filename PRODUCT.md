@@ -6,20 +6,20 @@ product
 
 ## Users
 
-Solo operator of a private MCP gateway. Brief sessions to add servers, probe tools, mint agent keys, and grant access — then leave.
+Solo operator of a private MCP gateway. Brief sessions to connect apps, probe tools, mint agent keys — then leave.
 
 ## Product Purpose
 
-Portunus is the management plane for one MCP gateway: Servers + Keys. Success means completing those tasks without ambiguity or accidental writes. Not a marketplace, Connect product, or multi-tenant console.
+Portunus is the management plane for one MCP gateway: **Apps + Keys**. Apps are the unit of connection (well-known catalog and custom MCP endpoints); Keys authorize agents on `/mcp`. Success means completing those tasks without ambiguity or accidental writes. Single-operator console — not multi-tenant, billing, or teams UI.
 
 ## Brand Personality
 
-Precise, quiet, expert — same register as Janus Dashboard. Dependable operations tool: compact without cramped, familiar without generic.
+Precise, architectural, assured. A dependable operations tool with a memorable gateway identity: compact without cramped, distinctive without becoming ornamental.
 
 ## Aesthetic Direction
 
-Align to Janus Dashboard: cool-neutral OKLCH, indigo accent, light sidebar, Geist, raised cards, flush tables.
+Architectural control room: deep-ink framing, warm porcelain working surfaces, chartreuse accents, strong Geist typography, and geometric gateway motifs. Apps catalog keeps its efficient All / Connected / Popular information architecture, with visually distinct overview, featured, and working sections instead of a uniform minimal-admin grid.
 
 ## Anti-references
 
-Decorative SaaS dashboards, oversized marketing layouts, novelty controls, gratuitous animation, low-contrast text, sparse unfinished monochrome “report” pages, Composio marketplace chrome, billing/teams/projects UI.
+Generic minimal admin templates, uniform white card grids, decorative SaaS analytics, oversized marketing layouts, purple-blue gradients, glassmorphism, fake telemetry, novelty controls, gratuitous animation, low-contrast text, sparse unfinished monochrome “report” pages, billing/teams/projects UI.

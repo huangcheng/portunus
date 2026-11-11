@@ -379,6 +379,57 @@ async def test_modern_2026_discover_skips_handshake():
     assert methods == ["server/discover", "tools/call"]
 
 
+async def test_discover_http_400_unsupported_protocol_falls_back_to_initialize():
+    """Flomo-style peer: rejects 2026-07-28 with plain HTTP 400, speaks initialize."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "DELETE":
+            return httpx.Response(200)
+        msg = json.loads(request.content)
+        mid, method = msg.get("id"), msg.get("method")
+        if mid is None:
+            return httpx.Response(202)
+        if method == "server/discover":
+            return httpx.Response(
+                400,
+                content=b"Bad Request: Unsupported protocol version (supported versions: 2025-11-25)",
+            )
+        if method == "initialize":
+            assert request.headers["mcp-protocol-version"] == "2025-11-25"
+            return httpx.Response(
+                200,
+                headers={"mcp-session-id": "sess-legacy"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": mid,
+                    "result": {"protocolVersion": "2025-11-25", "capabilities": {}},
+                },
+            )
+        if method == "tools/call":
+            assert request.headers["mcp-session-id"] == "sess-legacy"
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": mid,
+                    "result": {"content": [{"type": "text", "text": "legacy-ok"}]},
+                },
+            )
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": mid, "error": {"code": -32601}})
+
+    out = await client("https://mcp.example.com/mcp", handler=handler).call_tool("alpha", {})
+    assert out["content"][0]["text"] == "legacy-ok"
+    methods = [json.loads(r.content).get("method") for r in seen if r.content]
+    assert methods == [
+        "server/discover",
+        "initialize",
+        "notifications/initialized",
+        "tools/call",
+    ]
+
+
 async def test_list_tools_follows_pagination():
     pages = {None: ({"tools": [TOOLS[0]], "nextCursor": "c2"}), "c2": {"tools": [{"name": "b"}]}}
 

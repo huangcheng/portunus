@@ -1,4 +1,9 @@
 {
-  "trusted_path": ["/usr/local/bin", "/usr/bin", "/bin"],
+  "trusted_path": [
+    "/app/gateway/.venv/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin"
+  ],
   "binary_allowlist": []
 }

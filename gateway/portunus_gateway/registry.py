@@ -19,16 +19,21 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 import uuid
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from portunus_shared import DEFAULTS, PortunusError, validate_stdio_command
+# oauth_link browser_capture jobs live in runner memory — status polls must hit the same site.
+_OAUTH_JOB_SITES: dict[str, tuple[str, float]] = {}  # job_id -> (site_id, expires_at)
+_OAUTH_JOB_SITE_TTL_S = 300.0
+
+from portunus_shared import ALLOWED_PORTUNUS_ENV, DEFAULTS, PortunusError, validate_stdio_command
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .db.models import AuditEvent, Server, Tool, VaultEntry
+from .db.models import AuditEvent, CatalogApp, Server, Tool, VaultEntry
 from .oauth import (
     AUTH_HEADER_NAME,
     OAUTH_CLIENT_SECRET_NAME,
@@ -95,7 +100,8 @@ def validate_env(env: dict[str, str]) -> dict[str, str]:
             raise RegistryError(422, "invalid_env", "env must map strings to strings")
         if not _ENV_NAME.fullmatch(k):
             raise RegistryError(422, "invalid_env", f"invalid env name {k!r}")
-        if k.upper().startswith(_FORBIDDEN_ENV_PREFIXES):
+        uk = k.upper()
+        if uk.startswith(_FORBIDDEN_ENV_PREFIXES) and uk not in ALLOWED_PORTUNUS_ENV:
             raise RegistryError(422, "invalid_env", f"env name not allowed: {k}")
         if "\x00" in v:
             raise RegistryError(422, "invalid_env", "NUL in env value")
@@ -169,6 +175,8 @@ def server_view(server: Server, env_names: list[str]) -> dict[str, Any]:
         "url": server.url,
         "oauth": oauth_public_view(server.oauth if isinstance(server.oauth, dict) else None),
         "has_auth": any(n.lower() == AUTH_HEADER_NAME.lower() for n in env_names),
+        # device_qr marker written after platform login succeeds.
+        "has_skill_session": any(n == "SKILL_SESSION" for n in env_names),
         "preferred_regions": list(server.preferred_regions or []),
         "vault_version": server.vault_version,
         "env_names": public_names,  # names only, never values
@@ -353,8 +361,14 @@ class Registry:
         preferred_regions: list[str] | None = None,
         oauth: dict[str, Any] | None = None,
         oauth_client_secret: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        if preferred_regions is None and oauth is None and oauth_client_secret is None:
+        if (
+            preferred_regions is None
+            and oauth is None
+            and oauth_client_secret is None
+            and env is None
+        ):
             raise RegistryError(422, "invalid_request", "no fields to update")
         regions = validate_regions(preferred_regions) if preferred_regions is not None else None
         try:
@@ -364,10 +378,13 @@ class Registry:
         if oauth_client_secret is not None:
             if not isinstance(oauth_client_secret, str) or "\x00" in oauth_client_secret:
                 raise RegistryError(422, "invalid_oauth", "invalid oauth_client_secret")
+        secrets = validate_env(env) if env is not None else None
         async with self._sf() as s:
             server = await self._get_server(s, server_id)
             if (oauth is not None or oauth_client_secret is not None) and server.kind != "remote":
                 raise RegistryError(422, "invalid_request", "stdio servers do not take oauth")
+            if secrets is not None and server.kind != "stdio":
+                raise RegistryError(422, "invalid_request", "remote servers do not take stdio env")
             audit: dict[str, Any] = {}
             if regions is not None:
                 server.preferred_regions = regions
@@ -379,6 +396,10 @@ class Registry:
             if oauth_client_secret:
                 await self._upsert_vault(s, server, OAUTH_CLIENT_SECRET_NAME, oauth_client_secret)
                 audit["oauth_client_secret"] = True
+            if secrets:
+                for key, value in secrets.items():
+                    await self._upsert_vault(s, server, key, value)
+                audit["env"] = sorted(secrets)
             s.add(self._audit(actor, "server.update", server_id, audit or None))
             await s.commit()
             names = await self._env_names(s, server_id)
@@ -457,6 +478,7 @@ class Registry:
             command, args = server.command, list(server.args or [])
             self._validate_argv(command, args)
             env = await self._decrypt_env(s, server_id)
+            env = await self._inject_skill_bridge_manifest(s, server.slug, env)
             vault_version = server.vault_version
             preferred_regions = list(server.preferred_regions or [])
         assert command is not None
@@ -467,6 +489,25 @@ class Registry:
             "vault_version": vault_version,
             "preferred_regions": preferred_regions,  # scheduling hint; not sent to the runner
         }
+
+    async def _inject_skill_bridge_manifest(
+        self, s: AsyncSession, slug: str, env: dict[str, str]
+    ) -> dict[str, str]:
+        """Overlay live catalog manifest for skill_bridge apps (DB hot-update source of truth)."""
+        from .catalog import SKILL_BRIDGE_MANIFEST_ENV
+        from .db.models import CatalogApp
+
+        row = (
+            await s.execute(select(CatalogApp).where(CatalogApp.slug == slug.casefold()))
+        ).scalar_one_or_none()
+        if row is None or row.connection != "skill_bridge":
+            return env
+        manifest = (row.spec or {}).get("manifest")
+        if not isinstance(manifest, dict):
+            return env
+        out = dict(env)
+        out[SKILL_BRIDGE_MANIFEST_ENV] = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
+        return out
 
     # ---- probe -------------------------------------------------------------------
 
@@ -482,6 +523,260 @@ class Registry:
         finally:
             self._probing.discard(server_id)
 
+    async def skill_auth(
+        self,
+        server_id: uuid.UUID,
+        action: str,
+        actor: str,
+        *,
+        token: str | None = None,
+        job_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Platform-owned skill CLI auth (device_qr / oauth_link). Not agent MCP."""
+        from portunus_skill_bridge.manifest import Manifest
+
+        logical = action.strip()
+        aliases = {
+            "login-status": "status",
+            "refresh-login": "refresh",
+        }
+        logical = aliases.get(logical, logical)
+        if logical not in {"login", "status", "logout", "relogin", "refresh"}:
+            raise RegistryError(422, "invalid_request", f"unsupported skill auth action: {action}")
+        token_val = token.strip() if isinstance(token, str) else ""
+        job_val = job_id.strip() if isinstance(job_id, str) else ""
+        if token_val and logical != "login":
+            raise RegistryError(422, "invalid_request", "token is only valid for login")
+
+        async with self._sf() as s:
+            server = await self._get_server(s, server_id)
+            if server.kind != "stdio":
+                raise RegistryError(422, "unsupported", "skill auth requires a stdio skill-bridge server")
+            env = await self._decrypt_env(s, server_id)
+            skill_root = env.get("SKILL_ROOT")
+            state_dir = env.get("STATE_DIR")
+            entrypoint = ""
+            login_env: dict[str, str] = {}
+            qr_path_field = "qr_code_path"
+            agent_name: str | None = None
+            agent_profile_dir: str | None = None
+            token_flag = "--token"
+            success_code = 0
+            pending_codes: list[int] = [-114]
+            oauth_link = False
+            device_qr = False
+            browser_capture = False
+            capture_timeout_s = 90.0
+            catalog = (
+                await s.execute(select(CatalogApp).where(CatalogApp.slug == server.slug.casefold()))
+            ).scalar_one_or_none()
+            if catalog is None or catalog.connection != "skill_bridge":
+                raise RegistryError(422, "unsupported", "skill auth requires a skill_bridge catalog app")
+            defaults = (catalog.spec or {}).get("env_defaults") or {}
+            if isinstance(defaults, dict):
+                skill_root = skill_root or defaults.get("SKILL_ROOT")
+                state_dir = state_dir or defaults.get("STATE_DIR")
+            try:
+                manifest = Manifest.model_validate((catalog.spec or {}).get("manifest") or {})
+            except Exception as e:
+                raise RegistryError(422, "invalid_request", f"invalid skill manifest: {e}") from e
+            if not manifest.auth.is_platform_auth():
+                raise RegistryError(
+                    422,
+                    "unsupported",
+                    f"skill auth requires device_qr or oauth_link (got {manifest.auth.type!r})",
+                )
+            device_qr = manifest.auth.is_device_qr()
+            oauth_link = manifest.auth.is_oauth_link()
+            browser_capture = manifest.auth.wants_browser_capture()
+            capture_timeout_s = float(manifest.auth.capture_timeout_s)
+            login_env = dict(manifest.auth.login_env)
+            qr_path_field = manifest.auth.qr_path_field
+            token_flag = manifest.auth.token_flag
+            success_code = int(manifest.auth.success_code)
+            pending_codes = [int(c) for c in manifest.auth.pending_codes]
+            acts = manifest.auth.actions
+            cli_action = {
+                "login": acts.login,
+                "status": acts.status,
+                "logout": acts.logout,
+                "relogin": acts.relogin,
+                "refresh": acts.refresh,
+            }[logical]
+            if manifest.cli is not None:
+                agent_name = manifest.cli.identity.agent_name
+                agent_profile_dir = manifest.cli.identity.agent_profile_dir
+                if agent_profile_dir:
+                    agent_profile_dir = agent_profile_dir.replace("${STATE_DIR}", state_dir or "")
+                    agent_profile_dir = agent_profile_dir.replace("${SKILL_ROOT}", skill_root or "")
+                cmd = manifest.cli.command
+                if len(cmd) >= 2 and isinstance(cmd[-1], str) and not str(cmd[-1]).startswith("/"):
+                    entrypoint = str(cmd[-1])
+            preferred_regions = list(server.preferred_regions or [])
+
+        if not skill_root or not state_dir:
+            raise RegistryError(
+                422,
+                "invalid_request",
+                "SKILL_ROOT and STATE_DIR are required (connect with env_defaults first)",
+            )
+        if not entrypoint:
+            raise RegistryError(422, "invalid_request", "manifest.cli.command must end with a relative entrypoint")
+
+        extra_args: list[str] = []
+        if token_val:
+            extra_args = [token_flag, token_val]
+
+        # oauth_link + browser_capture: keep CLI alive while Connect opens URL / polls job.
+        capture_login = browser_capture and logical == "login" and not token_val
+        timeout_s = capture_timeout_s if capture_login else 60.0
+        timeout_s = max(15.0, min(timeout_s, 300.0))
+
+        # Status polls for a capture job must stick to the runner that owns it.
+        now = time.monotonic()
+        for jid, (_site, exp) in list(_OAUTH_JOB_SITES.items()):
+            if exp <= now:
+                _OAUTH_JOB_SITES.pop(jid, None)
+
+        pinned_site: str | None = None
+        if browser_capture and logical == "status" and job_val:
+            pinned = _OAUTH_JOB_SITES.get(job_val)
+            if pinned is not None:
+                pinned_site = pinned[0]
+
+        if pinned_site is not None:
+            if not self.pool.is_connected(pinned_site):
+                _OAUTH_JOB_SITES.pop(job_val, None)
+                raise RegistryError(
+                    503, "runner_unavailable", f"oauth job runner {pinned_site!r} not connected"
+                )
+            site_id = pinned_site
+        else:
+            decision = self.pool.pick(preferred_regions)
+            if decision is None:
+                raise RegistryError(503, "runner_unavailable", "runner not connected")
+            site_id = decision.site_id
+
+        req: dict[str, Any] = {
+            "skill_root": skill_root,
+            "state_dir": state_dir,
+            "entrypoint": entrypoint,
+            "action": cli_action,
+            "env": login_env,
+            "qr_path_field": qr_path_field,
+            "extra_args": extra_args,
+            "timeout_s": timeout_s,
+        }
+        if agent_name:
+            req["agent_name"] = agent_name
+        if agent_profile_dir:
+            req["agent_profile_dir"] = agent_profile_dir
+        if capture_login:
+            req["oauth_capture"] = True
+        if browser_capture and logical == "status" and job_val:
+            # Poll background capture job instead of get-user-info.
+            req = {
+                "skill_root": skill_root,
+                "state_dir": state_dir,
+                "entrypoint": entrypoint,
+                "action": "login",  # unused when oauth_poll
+                "oauth_job_id": job_val,
+                "oauth_poll": True,
+                "env": {},
+                "extra_args": [],
+                "timeout_s": 15.0,
+            }
+        try:
+            reply = await self.pool.request(
+                site_id,
+                "skill_exec",
+                timeout=max(timeout_s + 30.0, 90.0),
+                **req,
+            )
+        except RunnerRequestError as e:
+            raise RegistryError(_RUNNER_STATUS.get(e.code, 502), e.code, e.message) from e
+        result = reply.get("result") if isinstance(reply, dict) else None
+        logged_in = False
+        pending = False
+        if isinstance(reply, dict) and reply.get("logged_in") is True:
+            logged_in = True
+        if isinstance(reply, dict) and reply.get("pending") is True:
+            pending = True
+        if isinstance(result, dict):
+            if device_qr:
+                data = result.get("data") if isinstance(result.get("data"), dict) else {}
+                logged_in = data.get("logged_in") is True
+            elif oauth_link:
+                code = result.get("code")
+                if code == success_code:
+                    logged_in = True
+                elif isinstance(code, int) and code in pending_codes:
+                    pending = True
+                if logical == "status" and code == success_code:
+                    logged_in = True
+
+        auth_url = reply.get("auth_url") if isinstance(reply, dict) else None
+        out_job_id = reply.get("oauth_job_id") if isinstance(reply, dict) else None
+        if not auth_url and isinstance(result, dict) and isinstance(result.get("msg"), str):
+            m = re.search(r"https://[^\s\"'<>）\]]+", result["msg"])
+            if m:
+                auth_url = m.group(0)
+
+        if capture_login and out_job_id:
+            _OAUTH_JOB_SITES[str(out_job_id)] = (
+                site_id,
+                time.monotonic() + max(timeout_s, 60.0) + 60.0,
+            )
+        if browser_capture and logical == "status" and job_val and (logged_in or not pending):
+            _OAUTH_JOB_SITES.pop(job_val, None)
+
+        async with self._sf() as s:
+            server = await self._get_server(s, server_id)
+            if logical in {"login", "status", "refresh", "relogin"} and logged_in:
+                await self._upsert_vault(s, server, "SKILL_SESSION", "1")
+            if logical == "logout":
+                row = (
+                    await s.execute(
+                        select(VaultEntry).where(
+                            VaultEntry.server_id == server_id, VaultEntry.name == "SKILL_SESSION"
+                        )
+                    )
+                ).scalar_one_or_none()
+                if row is not None:
+                    await s.delete(row)
+                    server.vault_version = int(server.vault_version or 0) + 1
+            s.add(
+                self._audit(
+                    actor,
+                    "skill.auth",
+                    server_id,
+                    {
+                        "action": logical,
+                        "cli_action": cli_action,
+                        "logged_in": logged_in,
+                        "pending": pending,
+                        "site": site_id,
+                        "has_token": bool(token_val),
+                    },
+                )
+            )
+            await s.commit()
+            names = await self._env_names(s, server_id)
+
+        return {
+            "action": logical,
+            "cli_action": cli_action,
+            "exit_code": reply.get("exit_code"),
+            "result": result,
+            "stderr": reply.get("stderr"),
+            "qr_png_base64": reply.get("qr_png_base64"),
+            "auth_url": auth_url,
+            "job_id": out_job_id or job_val or None,
+            "pending": pending,
+            "logged_in": logged_in,
+            "has_skill_session": "SKILL_SESSION" in names,
+        }
+
     async def _probe(self, server_id: uuid.UUID, actor: str) -> dict[str, Any]:
         async with self._sf() as s:
             server = await self._get_server(s, server_id)
@@ -491,6 +786,7 @@ class Registry:
             if kind == "stdio":
                 self._validate_argv(command, args)  # policy may have changed since create
                 env = await self._decrypt_env(s, server_id)
+                env = await self._inject_skill_bridge_manifest(s, server.slug, env)
             elif kind == "remote":
                 if not server.url:
                     raise RegistryError(422, "invalid_url", "remote server needs a url")

@@ -1,0 +1,133 @@
+# 夸克网盘 — JSON CLI skill (bundled Node). Auth is platform-owned oauth_link
+# (Connect shows authorize URL; operator pastes code). No login tools for agents.
+# SKILL_ROOT / STATE_DIR expand from the child environment.
+
+name: quark
+version: "1.0.25"
+backend: json_cli
+
+auth:
+  type: oauth_link
+  # Force Quark agent detection on headless Portunus runners.
+  login_env:
+    OPENCLAW_CLI: "1"
+  actions:
+    login: login
+    status: get-user-info
+    logout: unauthorize
+  token_flag: "--token"
+  success_code: 0
+  # -114: login wait cancelled with authorize URL; -106: still waiting / retry link.
+  pending_codes: [-114, -106]
+  # Headless: shim xdg-open so page_code stays valid while Connect opens the authorize URL.
+  browser_capture: true
+  capture_timeout_s: 90
+  poll_interval_s: 2
+  token_paste: true
+  connect_hint: "已自动打开授权页；也可点「打开授权页」或复制链接到手机浏览器打开（可跳转夸克网盘 App）。确认后 Connect 会自动完成；也可粘贴授权码。"
+
+cli:
+  command: ["node", "scripts/quark-drive.cjs"]
+  cwd: ${SKILL_ROOT}
+  # No --agent-name / --agent-profile-dir (Quark rejects unknown flags).
+  identity: {}
+  run_wrapper: raw
+
+tools:
+  - name: search
+    description: Search Quark Drive files
+    cli: search
+    input:
+      keyword:
+        type: string
+        required: true
+      size:
+        type: integer
+      search_type:
+        type: string
+      parent_fid:
+        type: string
+      stdout_only:
+        type: boolean
+
+  - name: browse
+    description: Browse a Quark Drive directory
+    cli: browse
+    input:
+      parent_fid:
+        type: string
+      page_size:
+        type: integer
+      all:
+        type: boolean
+
+  - name: get_user_info
+    description: Get Quark account / membership info
+    cli: get-user-info
+    input: {}
+
+  - name: create_folder
+    description: Create a folder in Quark Drive
+    cli: create-folder
+    input:
+      dir_path:
+        type: string
+        required: true
+      parent_fid:
+        type: string
+
+  - name: download
+    description: Download a Quark Drive file by FID
+    cli: download
+    input:
+      fid:
+        type: string
+        required: true
+      output_dir:
+        type: string
+      overwrite:
+        type: boolean
+
+  - name: upload
+    description: Upload a local file (use file_path)
+    cli: upload
+    input:
+      file_path:
+        type: string
+        required: true
+      parent_fid:
+        type: string
+
+  - name: share
+    description: Create a share link for file FIDs
+    cli: share
+    input:
+      title:
+        type: string
+      url_type:
+        type: integer
+      expired_type:
+        type: integer
+
+  - name: saveas
+    description: Save a share link into Quark Drive
+    cli: saveas
+    input:
+      url:
+        type: string
+        required: true
+      save_all:
+        type: boolean
+      fid_list:
+        type: string
+      to_pdir_path:
+        type: string
+      to_pdir_fid:
+        type: string
+      passcode:
+        type: string
+
+  - name: subscribe_vip
+    description: Get Quark membership purchase URL
+    cli: subscribe-vip
+    input: {}

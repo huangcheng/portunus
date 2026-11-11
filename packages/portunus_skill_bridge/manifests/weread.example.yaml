@@ -1,0 +1,255 @@
+# WeRead Agent Gateway — full surface from /_list (skill_version 1.0.3).
+# Secrets: WEREAD_API_KEY via Portunus vault. Do not put keys in this file.
+
+name: weread
+version: "1.0.3"
+backend: http_rpc
+
+auth:
+  type: bearer_env
+  env: WEREAD_API_KEY
+  header: Authorization
+  prefix: "Bearer "
+
+http:
+  base_url: https://i.weread.qq.com/api/agent/gateway
+  method: POST
+  dispatch_field: api_name
+  const:
+    skill_version: "1.0.3"
+  timeout_s: 60
+
+tools:
+  - name: review_single
+    description: "获取单条想法/评论的详情（含评论列表和点赞信息）"
+    dispatch: /review/single
+    input:
+      reviewId:
+        type: string
+        required: true
+        description: "想法/评论 ID"
+      commentsCount:
+        type: integer
+        description: "拉取评论数量"
+      commentsDirection:
+        type: integer
+        description: "评论排序方向：0=倒序, 1=正序"
+      likesCount:
+        type: integer
+        description: "拉取点赞数量"
+      likesDirection:
+        type: integer
+        description: "点赞排序方向：0=倒序"
+      synckey:
+        type: integer
+        description: "增量同步 key"
+  - name: book_readreviews
+    description: "获取章节中某些划线范围下的想法/评论列表（每个划线最多 20 条）"
+    dispatch: /book/readreviews
+    input:
+      bookId:
+        type: string
+        required: true
+        description: "书籍 ID"
+      chapterUid:
+        type: integer
+        required: true
+        description: "章节 UID"
+      reviews:
+        type: array
+        required: true
+        description: "要查询的划线范围数组，每项包含 range/maxIdx/count/synckey"
+        items:
+          type: object
+  - name: book_bestbookmarks
+    description: "获取某本书的热门划线列表（含划线文本和人数，按热度排序，最多20条）"
+    dispatch: /book/bestbookmarks
+    input:
+      bookId:
+        type: string
+        required: true
+        description: "书籍 ID"
+      chapterUid:
+        type: integer
+        description: "章节 UID（0=全部章节，从 /book/chapterinfo 获取）"
+      synckey:
+        type: integer
+        description: "增量同步 key"
+  - name: book_underlines
+    description: "获取某本书某章节的划线热度统计（每条划线的人数/得分/类型，不含划线文本）"
+    dispatch: /book/underlines
+    input:
+      bookId:
+        type: string
+        required: true
+        description: "书籍 ID"
+      chapterUid:
+        type: integer
+        required: true
+        description: "章节 UID（从 /book/chapterinfo 获取）"
+      synckey:
+        type: integer
+        description: "增量同步 key"
+  - name: book_similar
+    description: "获取与某本书相似的推荐书籍"
+    dispatch: /book/similar
+    input:
+      bookId:
+        type: string
+        required: true
+        description: "书籍 ID"
+      count:
+        type: integer
+        description: "每页数量"
+      maxIdx:
+        type: integer
+        description: "翻页偏移"
+      sessionId:
+        type: string
+        description: "翻页会话 ID（首次不传，后续用回包中的值）"
+  - name: discover_interact_type3
+    description: "获取发现页朋友在读动态，返回转换后的 type=3 书籍卡片，按 updateTime 从新到旧排序"
+    dispatch: /discover/interact/type3
+    input:
+      count:
+        type: integer
+        description: "最终返回数量，默认 20"
+      maxIdx:
+        type: integer
+        description: "翻页游标，传上一页回包中的 nextMaxIdx"
+      synckey:
+        type: integer
+        description: "同步游标，首次请求不传；后续刷新可传上一页回包中的 synckey"
+  - name: book_recommend
+    description: "获取个性化推荐书籍（为你推荐）"
+    dispatch: /book/recommend
+    input:
+      count:
+        type: integer
+        description: "每页数量"
+      maxIdx:
+        type: integer
+        description: "翻页偏移"
+  - name: page_submit
+    description: "上传自定义 HTML 页面，返回页面 ID、对象路径和创建时间"
+    dispatch: /page/submit
+    input:
+      scene:
+        type: integer
+        required: true
+        description: "页面场景枚举：1=2026 年年度总结"
+      html:
+        type: string
+        required: true
+        description: "非空 HTML 页面内容"
+  - name: book_info
+    description: "获取书籍基本信息（书名、作者、简介等）"
+    dispatch: /book/info
+    input:
+      bookId:
+        type: string
+        required: true
+        description: "书籍 ID"
+  - name: book_bookmarklist
+    description: "获取用户对某本书的划线列表（不含书签）"
+    dispatch: /book/bookmarklist
+    input:
+      bookId:
+        type: string
+        required: true
+        description: "书籍 ID"
+  - name: book_chapterinfo
+    description: "获取书籍的章节目录"
+    dispatch: /book/chapterinfo
+    input:
+      bookId:
+        type: string
+        required: true
+        description: "书籍 ID"
+  - name: search_books
+    description: "搜索书籍/作者/书单/听书/公众号/文章/全文等（通过 scope 切换 tab）"
+    dispatch: /store/search
+    input:
+      keyword:
+        type: string
+        required: true
+        description: "搜索关键词"
+      scope:
+        type: integer
+        description: "搜索类型：0=全部, 10=电子书, 16=网文小说, 14=微信听书, 6=作者, 12=全文, 13=书单, 2=公众号, 4=文章"
+      maxIdx:
+        type: integer
+        description: "翻页偏移"
+      count:
+        type: integer
+        description: "每页数量，不传则使用服务端默认值（15）"
+  - name: shelf_sync
+    description: "获取用户书架列表（含听书/讲书）"
+    dispatch: /shelf/sync
+    input: {}
+  - name: review_list
+    description: "获取某本书的公开点评/想法"
+    dispatch: /review/list
+    input:
+      bookId:
+        type: string
+        required: true
+        description: "书籍 ID"
+      reviewListType:
+        type: integer
+        description: "筛选类型：0=全部, 1=推荐, 2=不行, 3=最新, 4=一般"
+      count:
+        type: integer
+        description: "每页数量"
+      maxIdx:
+        type: integer
+        description: "翻页偏移"
+      synckey:
+        type: integer
+        description: "翻页游标"
+  - name: book_getprogress
+    description: "获取用户对某本书的阅读进度"
+    dispatch: /book/getprogress
+    input:
+      bookId:
+        type: string
+        required: true
+        description: "书籍 ID"
+  - name: review_list_mine
+    description: "获取用户在某本书上的个人想法/笔记"
+    dispatch: /review/list/mine
+    input:
+      bookid:
+        type: string
+        required: true
+        description: "书籍 ID"
+      synckey:
+        type: integer
+        description: "翻页游标"
+      count:
+        type: integer
+        description: "每页数量"
+  - name: readdata_detail
+    description: "获取用户阅读统计数据（周/月/年/总），包含阅读时长、天数、读书排行、偏好分析等"
+    dispatch: /readdata/detail
+    input:
+      mode:
+        type: string
+        description: "统计维度：weekly=本周, monthly=本月, annually=本年, overall=总计"
+      baseTime:
+        type: integer
+        description: "基准时间戳（0=当前周期，传历史时间戳可查看历史周期数据）"
+  - name: user_notebooks
+    description: "获取用户所有有笔记的书籍列表（笔记本概览）"
+    dispatch: /user/notebooks
+    input:
+      count:
+        type: integer
+        description: "每页数量"
+      lastSort:
+        type: integer
+        description: "翻页游标（上一页最后一条的 sort 值）"
+  - name: list_apis
+    description: "List gateway APIs and parameter schemas"
+    dispatch: /_list
+    input: {}

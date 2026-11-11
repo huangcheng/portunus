@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { api, type Key } from "./api";
+import { Icon } from "./icons/ui";
 
 async function copyText(text: string) {
   await navigator.clipboard.writeText(text);
@@ -12,12 +13,17 @@ export function KeysPage() {
   const [error, setError] = useState("");
   const [mintOpen, setMintOpen] = useState(false);
   const [copyingId, setCopyingId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     try {
       setKeys(await api.keys());
+      setError("");
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      setLoading(false);
     }
   }, []);
   useEffect(() => void refresh(), [refresh]);
@@ -54,6 +60,8 @@ export function KeysPage() {
     try {
       const { token } = await api.revealKey(keyId);
       await copyText(token);
+      setCopiedId(keyId);
+      window.setTimeout(() => setCopiedId(null), 1500);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -63,30 +71,59 @@ export function KeysPage() {
 
   return (
     <>
-      {error && <p className="error">{error}</p>}
+      {error && <div className="notice error">{error}</div>}
+
+      <section className="keys-summary" aria-label="Keyring summary">
+        <div className="keys-summary-count">
+          <span className="summary-label">Keyring / active</span>
+          <strong>{loading ? "—" : String(keys.length).padStart(2, "0")}</strong>
+          <span>Active credentials</span>
+        </div>
+        <div className="keys-summary-note">
+          <span className="summary-icon"><Icon name="shield" size={23} /></span>
+          <div>
+            <strong>Full access, explicitly granted.</strong>
+            <p>Each key can call every connected app through <code>/mcp</code>. Revoke access here at any time.</p>
+          </div>
+        </div>
+        <div className="keys-summary-route" aria-hidden="true">
+          <span>AGENT</span><Icon name="chevron-right" size={14} /><span>MCP</span><Icon name="chevron-right" size={14} /><span>TOOLS</span>
+        </div>
+      </section>
 
       {minted && (
-        <div className="secret-banner">
-          <strong>Copy this key now</strong>
-          Or use Actions → Copy later — the secret is recoverable.
+        <section className="secret-banner" aria-label="New agent key">
+          <div className="secret-banner-header">
+            <span className="secret-icon"><Icon name="key" size={19} /></span>
+            <div>
+              <span className="secret-kicker">Credential created</span>
+              <strong>Your new key is ready</strong>
+              <p>Copy it now, or recover it later from the key inventory.</p>
+            </div>
+          </div>
           <p className="token">{minted}</p>
-          <button type="button" className="outline sm" onClick={() => void copyText(minted).then(() => setMinted(""))}>
-            Copy & dismiss
-          </button>
-          <button type="button" className="ghost sm" onClick={() => setMinted("")}>
-            Dismiss
-          </button>
-        </div>
+          <div className="secret-actions">
+            <button type="button" className="primary sm" onClick={() => void copyText(minted).then(() => setMinted(""))}>
+              <Icon name="copy" size={14} />
+              Copy & dismiss
+            </button>
+            <button type="button" className="ghost sm" onClick={() => setMinted("")}>
+              Dismiss
+            </button>
+          </div>
+        </section>
       )}
 
       {mintOpen && (
         <div className="card create-card">
-          <h2>Mint key</h2>
+          <span className="create-card-kicker">New credential</span>
+          <h2>Create an agent key</h2>
+          <p className="desc">Use a recognizable label to identify where this key is used.</p>
           <form className="mint-row" onSubmit={mint}>
             <label className="field grow">
-              Label
+              Label <span className="muted">(optional)</span>
               <input
-                placeholder="optional — e.g. cursor-agent"
+                placeholder="e.g. cursor-agent"
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
                 autoFocus
@@ -96,34 +133,46 @@ export function KeysPage() {
               Cancel
             </button>
             <button className="primary sm" type="submit">
-              Mint
+              <Icon name="plus" size={14} />
+              Create key
             </button>
           </form>
         </div>
       )}
 
-      <div className="card">
+      <section className="card keys-card" aria-labelledby="keys-inventory-title">
         <div className="card-header">
-          <h2>Keys</h2>
-          <p className="desc">Bearer keys for /mcp. Every key can use every server.</p>
+          <div>
+            <p className="section-kicker">Credential directory</p>
+            <h2 id="keys-inventory-title">Key inventory</h2>
+          </div>
+          <p className="desc">Bearer credentials for <code>/mcp</code>. Every key can use every app.</p>
           <div className="action">
             <button type="button" className="primary sm" onClick={() => setMintOpen(true)}>
+              <Icon name="plus" size={14} />
               Create key
             </button>
           </div>
         </div>
         <div className="card-body">
-          {keys.length === 0 ? (
-            <div className="empty">
-              <strong>No agent keys yet</strong>
-              Create a bearer key so agents can call /mcp.
+          {loading ? (
+            <div className="empty keys-empty"><span className="empty-icon"><Icon name="key" size={24} /></span><strong>Opening your keyring</strong><span>Loading credentials…</span></div>
+          ) : keys.length === 0 ? (
+            <div className="empty keys-empty">
+              <span className="empty-icon"><Icon name="key" size={24} /></span>
+              <strong>Your keyring is empty</strong>
+              <span>Create a bearer key so agents can call <code>/mcp</code>.</span>
+              <button type="button" className="primary sm" onClick={() => setMintOpen(true)}>
+                <Icon name="plus" size={14} />
+                Create your first key
+              </button>
             </div>
           ) : (
             <div className="table-wrap">
               <table className="flush">
                 <thead>
                   <tr>
-                    <th>Prefix</th>
+                    <th>Key</th>
                     <th>Label</th>
                     <th>Access</th>
                     <th>State</th>
@@ -133,15 +182,22 @@ export function KeysPage() {
                 <tbody>
                   {keys.map((k) => (
                     <tr key={k.key_id}>
-                      <td className="mono">{k.key_id.slice(0, 8)}…</td>
-                      <td className="muted">{k.label?.trim() ? k.label : "—"}</td>
-                      <td>
-                        <span className="access-pill">all servers</span>
+                      <td data-label="Key">
+                        <div className="key-identity">
+                          <span className="key-icon"><Icon name="key" size={15} /></span>
+                          <code title={k.key_id}>{k.key_id.slice(0, 8)}…</code>
+                        </div>
                       </td>
-                      <td>
-                        <span className="status on">active</span>
+                      <td data-label="Label" className="key-label">
+                        {k.label?.trim() ? k.label : <span className="muted">Untitled key</span>}
                       </td>
-                      <td>
+                      <td data-label="Access">
+                        <span className="access-pill"><Icon name="apps" size={11} />All apps</span>
+                      </td>
+                      <td data-label="State">
+                        <span className="status on">Active</span>
+                      </td>
+                      <td data-label="Actions">
                         <div className="actions">
                           <button
                             type="button"
@@ -150,7 +206,8 @@ export function KeysPage() {
                             title={k.has_secret ? "Copy key" : "Key not recoverable — delete and create a new one."}
                             onClick={() => void copyKey(k.key_id)}
                           >
-                            {copyingId === k.key_id ? "Copying…" : "Copy"}
+                            <Icon name={copiedId === k.key_id ? "check" : "copy"} size={13} />
+                            {copyingId === k.key_id ? "Copying…" : copiedId === k.key_id ? "Copied" : "Copy"}
                           </button>
                           <button
                             type="button"
@@ -162,6 +219,7 @@ export function KeysPage() {
                               await api.deleteKey(k.key_id);
                             })}
                           >
+                            <Icon name="trash" size={13} />
                             Delete
                           </button>
                         </div>
@@ -173,7 +231,7 @@ export function KeysPage() {
             </div>
           )}
         </div>
-      </div>
+      </section>
     </>
   );
 }

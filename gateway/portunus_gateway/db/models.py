@@ -23,6 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, validates
 
 SERVER_KINDS = ("stdio", "remote")
+CATALOG_CONNECTIONS = ("oauth", "http", "webdav", "stdio", "skill_bridge")
 SESSION_TTL = timedelta(hours=12)
 
 
@@ -171,3 +172,37 @@ class AuditEvent(Base):
     action: Mapped[str] = mapped_column(String(100))
     target: Mapped[str | None] = mapped_column(String(200))
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class CatalogApp(Base):
+    """Operator-editable Apps catalog entry (well-known connect recipes).
+
+    ``connection`` selects the Connect UX; ``spec`` holds the shape-specific fields
+    (OAuth URLs, WebDAV root, stdio argv, …). Not a running Server — Connect materializes one.
+    """
+
+    __tablename__ = "catalog_apps"
+    __table_args__ = (
+        CheckConstraint(
+            "connection IN ('oauth', 'http', 'webdav', 'stdio', 'skill_bridge')",
+            name="connection",
+        ),
+        CheckConstraint("slug = lower(slug)", name="slug_lower"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    slug: Mapped[str] = mapped_column(String(100), unique=True)
+    label: Mapped[str] = mapped_column(String(200))
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text)
+    connection: Mapped[str] = mapped_column(String(16))
+    popular: Mapped[bool] = mapped_column(default=False, server_default=false())
+    categories: Mapped[list[Any]] = mapped_column(JSON, nullable=False, server_default="[]")
+    tags: Mapped[list[Any]] = mapped_column(JSON, nullable=False, server_default="[]")
+    spec: Mapped[dict[str, Any]] = mapped_column(JSON)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = _created_at()
+
+    @validates("slug")
+    def _casefold_slug(self, _key: str, value: str) -> str:
+        return value.casefold()

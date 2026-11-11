@@ -27,7 +27,7 @@ import shutil
 import sys
 from typing import Any
 
-from portunus_shared import PortunusError, validate_stdio_command
+from portunus_shared import ALLOWED_PORTUNUS_ENV, PortunusError, validate_stdio_command
 
 from .children import ChildHandle, ProcessHandle
 from .policy import DEFAULT_POLICY_PATH, Policy, load_policy
@@ -66,7 +66,8 @@ def validate_env(env: Any) -> dict[str, str]:
             raise _reject("env must map strings to strings")
         if not _ENV_NAME.fullmatch(k):
             raise _reject(f"invalid env name {k!r}")
-        if k.upper().startswith(_FORBIDDEN_ENV_PREFIXES):
+        uk = k.upper()
+        if uk.startswith(_FORBIDDEN_ENV_PREFIXES) and uk not in ALLOWED_PORTUNUS_ENV:
             raise _reject(f"env name not allowed: {k}")
         if "\x00" in v:
             raise _reject("NUL in env value")
@@ -78,7 +79,7 @@ def validate_env(env: Any) -> dict[str, str]:
 
 def resolve_exec(command: str, policy: Policy) -> str:
     """Path to exec for an already-validated ``command``."""
-    if command in ("npx", "uvx"):
+    if command in ("npx", "uvx", "python", "python3"):
         found = shutil.which(command, path=os.pathsep.join(policy.trusted_path))
         if not found:
             raise _reject(f"{command} not found in trusted_path")

@@ -222,6 +222,19 @@ async def test_create_rejects_bad_env(real, env):
         assert (await s.execute(select(Server))).scalars().all() == []
 
 
+async def test_create_allows_skill_bridge_manifest_env(real):
+    """PORTUNUS_MANIFEST is the sole PORTUNUS_* exception (skill-bridge carrier)."""
+    from portunus_shared import SKILL_BRIDGE_MANIFEST_ENV
+
+    client, _registry, _srv = real
+    r = await client.post(
+        "/api/servers",
+        json=_body(env={SKILL_BRIDGE_MANIFEST_ENV: '{"name":"weread","backend":"http_rpc"}'}),
+    )
+    assert r.status_code == 201, r.text
+    assert SKILL_BRIDGE_MANIFEST_ENV in r.json()["env_names"]
+
+
 async def test_create_duplicate_slug_conflicts_and_slug_casefolds(real):
     client, _registry, _srv = real
     assert (await client.post("/api/servers", json=_body(slug="dup"))).status_code == 201
@@ -254,6 +267,49 @@ async def test_create_bad_slug(real):
     assert r.status_code == 422
 
 
+async def test_patch_stdio_env_upserts_vault(real):
+    client, _registry, _srv = real
+    created = await client.post(
+        "/api/servers",
+        json=_body(slug="nutstore", env={"WEBDAV_ROOT_URL": "https://dav.example/dav/"}),
+    )
+    assert created.status_code == 201, created.text
+    sid = created.json()["id"]
+    assert created.json()["env_names"] == ["WEBDAV_ROOT_URL"]
+
+    patched = await client.patch(
+        f"/api/servers/{sid}",
+        json={
+            "env": {
+                "WEBDAV_USERNAME": "me@example.com",
+                "WEBDAV_PASSWORD": "app-pass",
+                "WEBDAV_AUTH_ENABLED": "true",
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    names = set(patched.json()["env_names"])
+    assert names == {
+        "WEBDAV_ROOT_URL",
+        "WEBDAV_USERNAME",
+        "WEBDAV_PASSWORD",
+        "WEBDAV_AUTH_ENABLED",
+    }
+
+    # remote rejects stdio env
+    remote = await client.post(
+        "/api/servers",
+        json={
+            "name": "r",
+            "slug": "remote-no-env",
+            "kind": "remote",
+            "url": "https://mcp.example.com/mcp",
+        },
+    )
+    bad = await client.patch(f"/api/servers/{remote.json()['id']}", json={"env": {"A": "1"}})
+    assert bad.status_code == 422
+
+
 # ---- enable ---------------------------------------------------------------------------
 
 
@@ -266,6 +322,20 @@ async def test_enable_server(real):
     assert er.status_code == 200 and er.json()["enabled"] is True
     tools = {t["name"]: t["enabled"] for t in (await client.get(f"/api/servers/{sid}/tools")).json()}
     assert tools == {"alpha": True, "beta": True}
+
+
+async def test_enable_tool_toggle(real):
+    client, _registry, _srv = real
+    sid = (await client.post("/api/servers", json=_body())).json()["id"]
+    await client.post(f"/api/servers/{sid}/probe")
+    tools = (await client.get(f"/api/servers/{sid}/tools")).json()
+    alpha = next(t for t in tools if t["name"] == "alpha")
+    off = await client.post(f"/api/tools/{alpha['id']}/enable", json={"enabled": False})
+    assert off.status_code == 200 and off.json()["enabled"] is False
+    listed = {t["name"]: t["enabled"] for t in (await client.get(f"/api/servers/{sid}/tools")).json()}
+    assert listed == {"alpha": False, "beta": True}
+    on = await client.post(f"/api/tools/{alpha['id']}/enable", json={"enabled": True})
+    assert on.status_code == 200 and on.json()["enabled"] is True
 
 
 async def test_disable_server(real):

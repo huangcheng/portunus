@@ -17,9 +17,14 @@ Invariants
   ``pending_stop`` while the call ran (revoke / ungrant / disable / vault bump mid-call).
 * A request body that is a JSON-RPC batch is refused with ``-32600`` before it reaches the
   transport, which would otherwise leak a pydantic traceback instead of a protocol error.
+  Other envelope validation failures are refused here with ``-32602`` for the same reason.
+* HTTP-layer guards (auth, body size) use the same JSON-RPC error envelope as the transport,
+  with the Portunus string code preserved in ``error.data.code``.
 * ``serverInfo.version`` is the package version, never blank.
 * Errors reach the agent as ``isError`` tool results whose JSON text is
   ``{"error": {"code": <spec §6.4 code>, "message": ...}}``.
+* When an upstream result has no ``structuredContent`` but ``content[0].text`` is JSON, it is
+  promoted so remote and stdio results share one shape.
 * Limits: 60 tool calls/min/key (``rate_limited``), 8 concurrent invokes/key (``rate_limited``),
   invoke timeout default 60s (an agent may only shorten it). A timed-out or cancelled call retires
   its child (it may be wedged mid-call).
@@ -43,6 +48,8 @@ from jsonschema.validators import validator_for
 from mcp.server.lowlevel.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from portunus_shared import DEFAULTS, ERROR_CODES, PortunusError
+from pydantic import TypeAdapter
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 from starlette.responses import JSONResponse
 from starlette.types import Message, Receive, Scope, Send
@@ -50,7 +57,9 @@ from starlette.types import Message, Receive, Scope, Send
 from . import __version__
 from .db.models import Server as ServerRow
 from .db.models import Tool as ToolRow
+from .db.models import VaultEntry
 from .keys import AuthError, verify_agent_token
+from .oauth import AUTH_HEADER_NAME
 from .registry import RegistryError
 from .runner_client import RunnerRequestError
 from .runner_pool import RunnerPool
@@ -106,12 +115,19 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
             "arguments": {"type": "object", "description": "Arguments per the tool's schema."},
             "schema_hash": {
                 **_STR,
-                "description": "Optional: refuse unless the stored schema still has this hash.",
+                "description": (
+                    "Optional pin from portunus_get_tool_schema. When omitted, drift is not "
+                    "checked; when set, a changed schema returns schema_drift before invoke."
+                ),
             },
             "timeout_s": {
                 "type": "number",
                 "exclusiveMinimum": 0,
-                "description": "Optional: shorten (never extend) the invoke timeout.",
+                "maximum": float(DEFAULTS.invoke_timeout_s),
+                "description": (
+                    f"Optional: shorten (never extend) the invoke timeout "
+                    f"(max {DEFAULTS.invoke_timeout_s}s)."
+                ),
             },
         },
         ["server", "tool"],
@@ -134,10 +150,15 @@ def list_tool_definitions() -> list[types.Tool]:
 # ---- results ---------------------------------------------------------------------------
 
 
-def error_result(code: str, message: str = "") -> types.CallToolResult:
+def error_result(
+    code: str, message: str = "", *, data: dict[str, Any] | None = None
+) -> types.CallToolResult:
     if code not in ERROR_CODES:
         code, message = "upstream_crash", message or "internal error"
-    body = {"error": {"code": code, "message": message}}
+    err: dict[str, Any] = {"code": code, "message": message}
+    if data:
+        err["data"] = data
+    body = {"error": err}
     return types.CallToolResult(
         content=[types.TextContent(text=json.dumps(body))], structured_content=body, is_error=True
     )
@@ -149,11 +170,49 @@ def ok_result(obj: dict[str, Any]) -> types.CallToolResult:
     )
 
 
-def finish_result(result: Any) -> types.CallToolResult:
+def _promote_structured(content: list[Any], structured: Any) -> Any:
+    """If upstream omitted ``structuredContent`` but text is JSON, promote it (review #19)."""
+    if structured is not None or not content:
+        return structured
+    first = content[0]
+    text = getattr(first, "text", None)
+    if not isinstance(text, str) or not text.strip():
+        return structured
+    try:
+        promoted = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return structured
+    if isinstance(promoted, dict):
+        return promoted
+    if isinstance(promoted, list):
+        return {"items": promoted}
+    return {"value": promoted}
+
+
+def _already_gateway_error(structured: Any) -> bool:
+    if not isinstance(structured, dict):
+        return False
+    err = structured.get("error")
+    return isinstance(err, dict) and err.get("code") in ERROR_CODES
+
+
+def _first_text(content: list[Any]) -> str:
+    if not content:
+        return ""
+    text = getattr(content[0], "text", None)
+    return text if isinstance(text, str) else ""
+
+
+def finish_result(
+    result: Any, *, server: str | None = None, tool: str | None = None
+) -> types.CallToolResult:
     """Turn an upstream ``tools/call`` result into the agent-facing result.
 
     Over 1MiB serialized -> ``payload_too_large`` (the payload is dropped entirely: an agent must
     never mistake a truncated payload for a successful one).
+
+    Proxied ``isError`` results without a gateway envelope become ``upstream_error``
+    (review #16 / #19-failure) while keeping the original ``content[0].text``.
     """
     if not isinstance(result, dict):
         return error_result("upstream_crash", "malformed tool result")
@@ -166,8 +225,29 @@ def finish_result(result: Any) -> types.CallToolResult:
         parsed = types.CallToolResult.model_validate(result)
     except Exception:
         return error_result("upstream_crash", "malformed tool result")
+    structured = _promote_structured(list(parsed.content), parsed.structured_content)
+    if parsed.is_error and not _already_gateway_error(structured):
+        text = _first_text(list(parsed.content))
+        message = (text.strip().split("\n", 1)[0] if text.strip() else "")[:240] or (
+            "upstream tool reported an error"
+        )
+        upstream: dict[str, Any] = {}
+        if server:
+            upstream["server"] = server
+        if tool:
+            upstream["tool"] = tool
+        body = {
+            "error": {
+                "code": "upstream_error",
+                "message": message,
+                **({"upstream": upstream} if upstream else {}),
+            }
+        }
+        return types.CallToolResult(
+            content=parsed.content, structured_content=body, is_error=True
+        )
     return types.CallToolResult(
-        content=parsed.content, structured_content=parsed.structured_content, is_error=parsed.is_error
+        content=parsed.content, structured_content=structured, is_error=parsed.is_error
     )
 
 
@@ -185,9 +265,9 @@ def decode_cursor(cursor: str | None) -> str | None:
         raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
         after = json.loads(raw)["after"]
     except (binascii.Error, ValueError, KeyError, TypeError):
-        raise PortunusError("unsupported", "invalid cursor") from None
+        raise PortunusError("invalid_cursor", "invalid cursor") from None
     if not isinstance(after, str):
-        raise PortunusError("unsupported", "invalid cursor")
+        raise PortunusError("invalid_cursor", "invalid cursor")
     return after
 
 
@@ -231,14 +311,20 @@ def _first_error(exc: ValidationError) -> str:
 
 
 def _validate(schema: dict[str, Any], value: Any, *, what: str) -> None:
+    if what == "tool arguments":
+        code = "invalid_tool_arguments"
+    elif what == "arguments":
+        code = "invalid_gateway_arguments"
+    else:
+        code = "schema_mismatch"
     try:
         cls = validator_for(schema)
         cls.check_schema(schema)
         cls(schema).validate(value)
     except ValidationError as e:
-        raise PortunusError("schema_mismatch", f"{what}: {_first_error(e)}") from None
+        raise PortunusError(code, f"{what}: {_first_error(e)}") from None
     except SchemaError:
-        raise PortunusError("schema_mismatch", f"{what}: stored schema is not valid") from None
+        raise PortunusError(code, f"{what}: stored schema is not valid") from None
 
 
 class Omni:
@@ -366,6 +452,8 @@ class Omni:
             ).scalar_one_or_none()
         if tool is None:
             raise PortunusError("tool_missing", "no such tool")
+        if not tool.enabled:
+            raise PortunusError("tool_disabled", "tool is disabled")
         return tool
 
     # ---- discovery -----------------------------------------------------------------
@@ -383,14 +471,39 @@ class Omni:
                 .all()
             )
             counts: dict[uuid.UUID, int] = {}
-            for sid in (await s.execute(select(ToolRow.server_id))).scalars():
+            for sid in (
+                await s.execute(select(ToolRow.server_id).where(ToolRow.enabled.is_(True)))
+            ).scalars():
                 counts[sid] = counts.get(sid, 0) + 1
-        items = [
-            {"slug": sv.slug, "name": sv.name, "kind": sv.kind, "tool_count": counts.get(sv.id, 0)}
-            for sv in sorted(servers, key=lambda x: x.slug)
-            if self.authz.has_grant(key_id, sv.id)
-            and (not query or query in sv.slug.casefold() or query in sv.name.casefold())
-        ]
+            auth_sids = {
+                row
+                for row in (
+                    await s.execute(
+                        select(VaultEntry.server_id).where(
+                            VaultEntry.name == AUTH_HEADER_NAME
+                        )
+                    )
+                ).scalars()
+            }
+        items = []
+        for sv in sorted(servers, key=lambda x: x.slug):
+            if not self.authz.has_grant(key_id, sv.id):
+                continue
+            if query and query not in sv.slug.casefold() and query not in sv.name.casefold():
+                continue
+            status = "ok"
+            # Cheap readiness: OAuth remotes without a stored Authorization need reconnect.
+            if sv.kind == "remote" and sv.oauth and sv.id not in auth_sids:
+                status = "auth_required"
+            items.append(
+                {
+                    "slug": sv.slug,
+                    "name": sv.name,
+                    "kind": sv.kind,
+                    "tool_count": counts.get(sv.id, 0),
+                    "status": status,
+                }
+            )
         return ok_result(_page(items, "slug", cursor, limit))
 
     async def _discover_tools(self, key_id: str, args: dict[str, Any]) -> types.CallToolResult:
@@ -400,7 +513,9 @@ class Omni:
             tools = (
                 (
                     await s.execute(
-                        select(ToolRow).where(ToolRow.server_id == server.id)
+                        select(ToolRow).where(
+                            ToolRow.server_id == server.id, ToolRow.enabled.is_(True)
+                        )
                     )
                 )
                 .scalars()
@@ -425,6 +540,8 @@ class Omni:
                 "description": tool.description,
                 "input_schema": tool.schema,
                 "schema_hash": tool.schema_hash,
+                # Review #15: pinning stays optional; clients that care should send this hash.
+                "schema_pin": "optional",
             }
         )
 
@@ -435,7 +552,7 @@ class Omni:
         tool = await self._enabled_tool(server, args["tool"])
         pin = args.get("schema_hash")
         if pin is not None and pin != tool.schema_hash:
-            raise PortunusError("schema_mismatch", "tool schema changed since schema_hash")
+            raise PortunusError("schema_drift", "tool schema changed since schema_hash")
         arguments = args.get("arguments", {})
         _validate(tool.schema, arguments, what="tool arguments")
         timeout_s = self.invoke_timeout_s
@@ -463,7 +580,7 @@ class Omni:
         timeout_s: float,
     ) -> types.CallToolResult:
         if server.kind == "remote":
-            return await self._run_remote_invoke(key_id, server, tool, arguments)
+            return await self._run_remote_invoke(key_id, server, tool, arguments, timeout_s)
         start = await self.registry.start_payload(server.id)
         self.state_cache.put(server.id, server.enabled, start["vault_version"])
         child_id = await self.slots.reserve_and_start(
@@ -501,7 +618,9 @@ class Omni:
         slot = self.slots.slot(child_id)
         if slot is not None and slot.pending_stop:
             raise PortunusError("cancelled", "server stopped during the call")
-        return finish_result(reply.get("result"))
+        return finish_result(
+            reply.get("result"), server=server.slug, tool=tool.upstream_name
+        )
 
     async def _run_remote_invoke(
         self,
@@ -509,14 +628,26 @@ class Omni:
         server: ServerRow,
         tool: ToolRow,
         arguments: dict[str, Any],
+        timeout_s: float,
     ) -> types.CallToolResult:
         proxy = self.registry.remote
         if proxy is None:
             raise PortunusError("unsupported", "remote proxy is not configured")
         self.state_cache.put(server.id, server.enabled, server.vault_version)
         try:
-            result = await proxy.invoke(server.id, tool.upstream_name, arguments)
-        except PortunusError:
+            result = await proxy.invoke(
+                server.id, tool.upstream_name, arguments, timeout_s=timeout_s
+            )
+        except PortunusError as e:
+            if e.code == "auth_required":
+                return error_result(
+                    "auth_required",
+                    (
+                        f"remote server requires authorization; "
+                        f"reconnect '{server.slug}' in the Portunus Apps dashboard"
+                    ),
+                    data={"server": server.slug, "action": "reauth"},
+                )
             raise
         except RegistryError as e:
             raise PortunusError(e.code if e.code in ERROR_CODES else "upstream_crash", e.message) from e
@@ -525,20 +656,53 @@ class Omni:
             raise PortunusError("not_granted", "grant removed during the call")
         if not server.enabled:
             raise PortunusError("server_disabled", "server is disabled")
-        return finish_result(result)
+        return finish_result(result, server=server.slug, tool=tool.upstream_name)
 
 
 # ---- ASGI gate -------------------------------------------------------------------------
 
+# Application-defined JSON-RPC codes for HTTP guards (-32000..-32099). String Portunus codes
+# stay in ``error.data.code`` so clients that already branch on them keep working.
+_GUARD_RPC_CODES = {
+    "unauthorized": -32001,
+    "payload_too_large": -32002,
+}
+_JSONRPC_ADAPTER = TypeAdapter(types.JSONRPCMessage)
+
 
 def _error_response(status: int, code: str, message: str, headers: dict[str, str] | None = None):
-    return JSONResponse({"error": {"code": code, "message": message}}, status, headers)
+    """JSON-RPC envelope for gate failures; Portunus string code lives in ``data.code``."""
+    body = {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {
+            "code": _GUARD_RPC_CODES.get(code, -32000),
+            "message": message,
+            "data": {"code": code},
+        },
+    }
+    return JSONResponse(body, status, headers)
 
 
 def _rpc_error_response(status: int, code: int, message: str):
     """A JSON-RPC level failure, shaped like the transport's own (e.g. -32700 on a parse error)."""
     body = {"jsonrpc": "2.0", "id": None, "error": {"code": code, "message": message}}
     return JSONResponse(body, status)
+
+
+def _envelope_invalid(body: bytes) -> bool:
+    """True when the body is JSON but not a valid single JSON-RPC message."""
+    try:
+        raw = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False  # let the transport emit -32700
+    if isinstance(raw, list):
+        return False  # batch path already refused
+    try:
+        _JSONRPC_ADAPTER.validate_python(raw)
+    except PydanticValidationError:
+        return True
+    return False
 
 
 def _replay(body: bytes, receive: Receive) -> Receive:
@@ -613,6 +777,12 @@ class _Gate:
                 await _rpc_error_response(
                     400, -32600, "JSON-RPC batch is not supported; send one request per POST"
                 )(scope, receive, send)
+                return
+            if _envelope_invalid(body):
+                # Same leak class as the batch path: transport echoes a full pydantic union dump.
+                await _rpc_error_response(400, -32602, "invalid JSON-RPC envelope")(
+                    scope, receive, send
+                )
                 return
             body_receive = _replay(body, receive)
 

@@ -36,6 +36,7 @@ ARG PIP_INDEX
 RUN pip install --no-cache-dir ${PIP_INDEX:+-i ${PIP_INDEX}} "uv==0.9.30" \
     && ln -sf /usr/local/bin/uv /usr/local/bin/uvx
 
+# WITH_POSTGRES kept for compose/build compat; asyncpg is always in gateway deps.
 ARG WITH_POSTGRES=0
 WORKDIR /app
 COPY packages/portunus_shared packages/portunus_shared
@@ -47,8 +48,7 @@ ARG PIP_INDEX
 ENV UV_DEFAULT_INDEX=${PIP_INDEX} \
     UV_INDEX_URL=${PIP_INDEX}
 RUN cd gateway && uv sync --frozen --no-dev \
-    && uv pip install --python .venv/bin/python -e ../runner \
-    && if [ "$WITH_POSTGRES" = "1" ]; then uv pip install --python .venv/bin/python asyncpg; fi
+    && uv pip install --python .venv/bin/python -e ../runner
 COPY --from=dashboard /dashboard/dist dashboard/dist
 
 # Same uid for gateway and runner in compose; production uses separate users (see README).

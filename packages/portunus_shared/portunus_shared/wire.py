@@ -23,6 +23,7 @@ OPS: frozenset[str] = frozenset(
         "cancel",
         "heartbeat",
         "child_exited",
+        "skill_exec",
     }
 )
 
@@ -144,6 +145,11 @@ def kill(*, request_id: str, token: str, child_id: str, **extra: Any) -> dict[st
 
 def probe(*, request_id: str, token: str, child_id: str, **extra: Any) -> dict[str, Any]:
     return _msg("probe", request_id, token, child_id=child_id, **extra)
+
+
+def skill_exec(*, request_id: str, token: str, **extra: Any) -> dict[str, Any]:
+    """Constrained one-shot skill CLI (platform login/status for json_cli apps)."""
+    return _msg("skill_exec", request_id, token, **extra)
 
 
 def rpc(

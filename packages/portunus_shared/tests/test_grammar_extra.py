@@ -127,6 +127,20 @@ def test_other_commands_rejected(with_which, cmd):
         _v(cmd, [])
 
 
+def test_python_skill_bridge_ok(with_which):
+    _v("python", ["-m", "portunus_skill_bridge", "--manifest-env", "PORTUNUS_MANIFEST"])
+    _v("python3", ["-m", "portunus_skill_bridge", "--manifest-stdin"])
+
+
+def test_python_skill_bridge_rejects(with_which):
+    with pytest.raises(ArgvError):
+        _v("python", ["-m", "other_mod", "--manifest-env", "X"])
+    with pytest.raises(ArgvError):
+        _v("python", ["-m", "portunus_skill_bridge"])
+    with pytest.raises(ArgvError):
+        _v("python", ["script.py"])
+
+
 def test_error_codes_match_spec_6_4_exactly():
     assert ERROR_CODES == frozenset(
         {
@@ -137,9 +151,14 @@ def test_error_codes_match_spec_6_4_exactly():
             "tool_disabled",
             "tool_missing",
             "schema_mismatch",
+            "schema_drift",
+            "invalid_tool_arguments",
+            "invalid_gateway_arguments",
+            "invalid_cursor",
             "payload_too_large",
             "upstream_timeout",
             "upstream_crash",
+            "upstream_error",
             "cancelled",
             "auth_required",
             "child_cap",

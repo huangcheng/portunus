@@ -233,6 +233,9 @@ def create_gateway_app() -> FastAPI:
         await store.reload_from_db()  # authz is rebuilt from the DB on start (spec §3)
         # Single-operator: every active key may use every server.
         await authz.ensure_full_grants()
+        seeded = await a.state.catalog.ensure_defaults()
+        if seeded:
+            log.info("seeded %d catalog apps", seeded)
         pool.start()
         try:
             async with inner_lifespan(a):
@@ -244,10 +247,10 @@ def create_gateway_app() -> FastAPI:
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, object]:
+        # Public: no fleet inventory. Operator UI uses GET /api/status (review #8).
         return {
             "ok": True,
             "runner_connected": pool.any_connected(),
-            "runners_connected": sum(1 for e in pool.connected()),
         }
 
     dist = Path(os.environ.get("PORTUNUS_DASHBOARD_DIR") or default_dashboard_dir())

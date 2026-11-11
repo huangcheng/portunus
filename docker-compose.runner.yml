@@ -1,0 +1,21 @@
+services:
+  portunus-runner:
+    image: portunus:local
+    entrypoint: []
+    restart: unless-stopped
+    user: "0:0"
+    network_mode: host
+    env_file: runner.env
+    environment:
+      PORTUNUS_SOCKET: /run/portunus/runner.sock
+      PORTUNUS_TOKEN_FILE: /run/secrets/runner_token
+      PORTUNUS_POLICY: /etc/portunus/runner-policy.json
+      PORTUNUS_DROP_PRIVS: "0"
+      PORTUNUS_GATEWAY_UID: "0"
+    volumes:
+      - ./runner-policy.json:/etc/portunus/runner-policy.json:ro
+      - ./secrets/runner.token:/run/secrets/runner_token:ro
+      - /run/portunus:/run/portunus
+      - /var/lib/portunus/skills:/var/lib/portunus/skills
+      - /var/lib/portunus/skill-state:/var/lib/portunus/skill-state
+    command: ["portunus-runner"]

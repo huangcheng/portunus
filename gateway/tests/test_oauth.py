@@ -80,6 +80,18 @@ def test_validate_oauth_config_normalizes_and_rejects():
         "client_id": "cid",
         "scopes": ["mcp", "openid"],
     }
+    dcr = validate_oauth_config(
+        {
+            "authorize_url": "https://ardot.tencent.com/oauth/authorize",
+            "token_url": "https://ardot.tencent.com/oauth/token",
+            "scopes": ["mcp:use"],
+            "resource": "https://ardot.tencent.com/mcp",
+            "registration_endpoint": "https://ardot.tencent.com/oauth/register",
+            "token_endpoint_auth_method": "none",
+        }
+    )
+    assert dcr is not None and "client_id" not in dcr
+    assert dcr["resource"] == "https://ardot.tencent.com/mcp"
     with pytest.raises(OAuthError) as exc:
         validate_oauth_config({"authorize_url": "http://insecure", "token_url": "https://t", "client_id": "c"})
     assert exc.value.code == "invalid_oauth"

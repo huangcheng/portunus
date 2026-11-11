@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -42,6 +43,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .db.models import Server, VaultEntry
 from .registry import RegistryError
 from .vault import Vault, VaultError
+
+log = logging.getLogger("portunus.remote")
 
 LOOPBACK_ALLOWLIST_ENV = "PORTUNUS_REMOTE_LOOPBACK_ALLOWLIST"
 # Prefer the current MCP revision; fall back to the newest initialize-handshake revision.
@@ -220,23 +223,28 @@ class RemoteClient:
 
         return await self._run(op)
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], *, timeout_s: float | None = None
+    ) -> dict[str, Any]:
         async def op(s: _Session) -> dict[str, Any]:
             return await s.rpc("tools/call", {"name": name, "arguments": arguments})
 
-        return await self._run(op)
+        return await self._run(op, timeout_s=timeout_s)
 
     # ---- session ----
 
-    async def _run(self, op: Callable[[_Session], Awaitable[Any]]) -> Any:
+    async def _run(
+        self, op: Callable[[_Session], Awaitable[Any]], *, timeout_s: float | None = None
+    ) -> Any:
         self._parse_start()  # fail fast on malformed URLs before opening anything
+        budget = float(self.policy.timeout_s if timeout_s is None else timeout_s)
         try:
-            async with asyncio.timeout(self.policy.timeout_s):
+            async with asyncio.timeout(budget):
                 async with httpx.AsyncClient(
                     transport=self._transport,
                     follow_redirects=False,
                     trust_env=False,  # env proxies would bypass DNS pinning
-                    timeout=httpx.Timeout(self.policy.timeout_s),
+                    timeout=httpx.Timeout(budget),
                 ) as http:
                     session = _Session(self, http)
                     await session.connect()
@@ -408,9 +416,10 @@ class _Session:
             "accept": "application/json, text/event-stream",
             "content-type": "application/json",
             **self.c._headers,
+            # Always advertise the negotiated / intended revision (legacy initialize needs
+            # this before a session id exists; peers like flomo reject 2026-only probes).
+            "mcp-protocol-version": self.protocol,
         }
-        if self.modern or self.session_id:
-            h["mcp-protocol-version"] = self.protocol
         if self.modern and method:
             h["mcp-method"] = method
             if method in _METHODS_WITH_NAME and isinstance(params, dict):
@@ -422,13 +431,53 @@ class _Session:
         return h
 
     @staticmethod
-    def _check_status(response: httpx.Response) -> None:
+    def _body_excerpt(data: bytes, limit: int = 512) -> str:
+        text = data[:limit].decode("utf-8", errors="replace").replace("\n", " ").strip()
+        return text[:limit]
+
+    @classmethod
+    def _log_upstream_failure(
+        cls,
+        *,
+        phase: str,
+        status: int,
+        data: bytes,
+        method: str | None = None,
+    ) -> None:
+        log.warning(
+            "remote upstream failure phase=%s method=%s status=%s body=%r",
+            phase,
+            method or "-",
+            status,
+            cls._body_excerpt(data),
+        )
+
+    @staticmethod
+    def _is_premodern_http(code: int) -> bool:
+        """HTTP 4xx on the discover probe that means 'peer does not speak 2026-07-28'.
+
+        Auth / size errors still hard-fail. Spec-legal peers may reject an unknown protocol
+        version with plain 400 rather than JSON-RPC -32601.
+        """
+        return 400 <= code < 500 and code not in (401, 403, 413)
+
+    def _check_status(
+        self,
+        response: httpx.Response,
+        data: bytes = b"",
+        *,
+        method: str | None = None,
+        phase: str = "rpc",
+    ) -> None:
         code = response.status_code
         if code in (401, 403):
+            self._log_upstream_failure(phase=phase, status=code, data=data, method=method)
             raise PortunusError("auth_required", "remote server requires authorization")
         if code == 413:
+            self._log_upstream_failure(phase=phase, status=code, data=data, method=method)
             raise PortunusError("payload_too_large", "remote rejected payload as too large")
         if code not in (200, 202):
+            self._log_upstream_failure(phase=phase, status=code, data=data, method=method)
             raise PortunusError("upstream_crash", f"remote server returned HTTP {code}")
 
     async def _post(
@@ -438,7 +487,7 @@ class _Session:
         response, data = await self.c.send(
             self.http, "POST", body=body, headers=self._headers(method=method, params=params)
         )
-        self._check_status(response)
+        self._check_status(response, data, method=method, phase="rpc")
         return response, data
 
     async def connect(self) -> None:
@@ -453,18 +502,44 @@ class _Session:
         self._next_id += 1
         mid = self._next_id
         params = {"_meta": self._client_meta()}
-        response, data = await self._post(
-            {"jsonrpc": "2.0", "id": mid, "method": "server/discover", "params": params},
-            method="server/discover",
-            params=params,
+        message = {"jsonrpc": "2.0", "id": mid, "method": "server/discover", "params": params}
+        body = json.dumps(message, separators=(",", ":")).encode()
+        response, data = await self.c.send(
+            self.http,
+            "POST",
+            body=body,
+            headers=self._headers(method="server/discover", params=params),
         )
+        code = response.status_code
+        if code in (401, 403):
+            self._log_upstream_failure(
+                phase="discover", status=code, data=data, method="server/discover"
+            )
+            raise PortunusError("auth_required", "remote server requires authorization")
+        if code == 413:
+            self._log_upstream_failure(
+                phase="discover", status=code, data=data, method="server/discover"
+            )
+            raise PortunusError("payload_too_large", "remote rejected payload as too large")
+        if code not in (200, 202):
+            # Pre-2026 peers often answer unknown protocol with plain HTTP 4xx.
+            if self._is_premodern_http(code):
+                self._log_upstream_failure(
+                    phase="discover-fallback", status=code, data=data, method="server/discover"
+                )
+                self.modern = False
+                return False
+            self._log_upstream_failure(
+                phase="discover", status=code, data=data, method="server/discover"
+            )
+            raise PortunusError("upstream_crash", f"remote server returned HTTP {code}")
         msg = _extract_response(response, data, mid)
         if "error" in msg:
             err = msg["error"] if isinstance(msg["error"], dict) else {}
-            code = err.get("code")
+            rpc_code = err.get("code")
             # Only unknown/invalid method means "pre-2026 peer"; transport errors must surface.
-            if code not in (-32601, -32600):
-                raise PortunusError("upstream_crash", f"upstream JSON-RPC error {code}")
+            if rpc_code not in (-32601, -32600):
+                raise PortunusError("upstream_crash", f"upstream JSON-RPC error {rpc_code}")
             self.modern = False
             return False
         result = msg.get("result")
@@ -614,6 +689,13 @@ class RemoteProxy:
         return await (await self._client(server_id)).list_tools()
 
     async def invoke(
-        self, server_id: uuid.UUID, tool: str, arguments: dict[str, Any]
+        self,
+        server_id: uuid.UUID,
+        tool: str,
+        arguments: dict[str, Any],
+        *,
+        timeout_s: float | None = None,
     ) -> dict[str, Any]:
-        return await (await self._client(server_id)).call_tool(tool, arguments)
+        return await (await self._client(server_id)).call_tool(
+            tool, arguments, timeout_s=timeout_s
+        )

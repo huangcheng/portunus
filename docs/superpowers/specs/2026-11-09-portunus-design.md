@@ -95,7 +95,7 @@ Default-deny non-public IPs except loopback allowlist; DNS pin per redirect hop;
 
 ### 6.4 Errors
 
-`unauthorized`, `revoked`, `not_granted`, `server_disabled`, `tool_disabled`, `tool_missing`, `schema_mismatch`, `payload_too_large`, `upstream_timeout`, `upstream_crash`, `cancelled`, `auth_required`, `child_cap`, `rate_limited`, `runner_unavailable`, `spawn_rejected`, `spawn_failed`, `unsupported`.
+`unauthorized`, `revoked`, `not_granted`, `server_disabled`, `tool_disabled`, `tool_missing`, `schema_mismatch`, `schema_drift`, `invalid_tool_arguments`, `invalid_gateway_arguments`, `invalid_cursor`, `payload_too_large`, `upstream_timeout`, `upstream_crash`, `upstream_error`, `cancelled`, `auth_required`, `child_cap`, `rate_limited`, `runner_unavailable`, `spawn_rejected`, `spawn_failed`, `unsupported`.
 
 ## 7. Vault / trust
 

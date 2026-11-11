@@ -5,11 +5,15 @@ description = "Portunus gateway: registry, vault, keys/grants, MCP front door"
 requires-python = ">=3.12"
 dependencies = [
     "portunus-shared",
+    "portunus-skill-bridge",
     "cryptography>=43",
     "aiosqlite>=0.20",
+    "asyncpg>=0.29",
+    "psycopg[binary]>=3.2",
     "alembic>=1.13",
     "sqlalchemy[asyncio]>=2.0",
     "fastapi>=0.162.2",
+    "httpx>=0.28.1",
     "mcp>=2.3.0",
     "argon2-cffi>=25.1.0",
     "uvicorn>=0.30",
@@ -18,13 +22,13 @@ dependencies = [
 [dependency-groups]
 dev = [
     "anyio>=4.16.0",
-    "httpx>=0.28.1",
     "portunus-runner",
     "pytest>=8",
 ]
 
 [tool.uv.sources]
 portunus-shared = { path = "../packages/portunus_shared", editable = true }
+portunus-skill-bridge = { path = "../packages/portunus_skill_bridge", editable = true }
 portunus-runner = { path = "../runner", editable = true }
 
 [build-system]

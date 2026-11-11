@@ -7,6 +7,8 @@ replace it through ``app.dependency_overrides``. Yields the operator identity fo
 
 from __future__ import annotations
 
+import html
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -25,8 +27,11 @@ from .operator_auth import (
     CsrfError,
     OperatorAuth,
 )
-from .oauth import OAuthError, OAuthStore, exchange_code
+from .catalog import CatalogStore
+from .oauth import OAuthError, OAuthStore, exchange_code, register_oauth_client
 from .registry import Registry, RegistryError
+
+logger = logging.getLogger("portunus.oauth")
 
 SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
 
@@ -56,6 +61,10 @@ def get_registry(request: Request) -> Registry:
     return request.app.state.registry
 
 
+def get_catalog(request: Request) -> CatalogStore:
+    return request.app.state.catalog
+
+
 class CreateServer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -77,6 +86,7 @@ class UpdateServer(BaseModel):
     preferred_regions: list[str] | None = None
     oauth: dict[str, Any] | None = None
     oauth_client_secret: str | None = Field(default=None, max_length=4096)
+    env: dict[str, str] | None = None
 
 
 class EnableBody(BaseModel):
@@ -97,7 +107,103 @@ class OAuthStartBody(BaseModel):
     redirect_uri: str = Field(min_length=1, max_length=2048)
 
 
+class CreateCatalogApp(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slug: str = Field(pattern=SLUG_PATTERN)
+    label: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=2000)
+    connection: Literal["oauth", "http", "webdav", "stdio", "skill_bridge"]
+    spec: dict[str, Any] = Field(default_factory=dict)
+    popular: bool = False
+    categories: list[str] = Field(default_factory=list, max_length=16)
+    tags: list[str] = Field(default_factory=list, max_length=16)
+    sort_order: int = Field(default=100, ge=0, le=10_000)
+
+
+class UpdateCatalogApp(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str | None = Field(default=None, min_length=1, max_length=200)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, min_length=1, max_length=2000)
+    popular: bool | None = None
+    categories: list[str] | None = Field(default=None, max_length=16)
+    tags: list[str] | None = Field(default=None, max_length=16)
+    sort_order: int | None = Field(default=None, ge=0, le=10_000)
+    spec: dict[str, Any] | None = None
+
+
 router = APIRouter(prefix="/api")
+
+
+@router.get("/apps")
+async def list_catalog_apps(
+    actor: str = Depends(require_operator),
+    catalog: CatalogStore = Depends(get_catalog),
+) -> list[dict[str, Any]]:
+    return await catalog.list_apps()
+
+
+@router.post("/apps", status_code=201)
+async def create_catalog_app(
+    body: CreateCatalogApp,
+    actor: str = Depends(require_operator),
+    catalog: CatalogStore = Depends(get_catalog),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    view = await catalog.create(
+        slug=body.slug,
+        label=body.label,
+        name=body.name,
+        description=body.description,
+        connection=body.connection,
+        spec=body.spec,
+        popular=body.popular,
+        categories=body.categories,
+        tags=body.tags,
+        sort_order=body.sort_order,
+        actor=actor,
+    )
+    await _audit(registry, actor, "catalog.create", view["slug"], {"connection": body.connection})
+    return view
+
+
+@router.patch("/apps/{app_id}")
+async def update_catalog_app(
+    app_id: uuid.UUID,
+    body: UpdateCatalogApp,
+    actor: str = Depends(require_operator),
+    catalog: CatalogStore = Depends(get_catalog),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    view = await catalog.update(
+        app_id,
+        actor=actor,
+        label=body.label,
+        name=body.name,
+        description=body.description,
+        popular=body.popular,
+        categories=body.categories,
+        tags=body.tags,
+        sort_order=body.sort_order,
+        spec=body.spec,
+    )
+    await _audit(registry, actor, "catalog.update", view["slug"], {})
+    return view
+
+
+@router.delete("/apps/{app_id}", status_code=204)
+async def delete_catalog_app(
+    app_id: uuid.UUID,
+    actor: str = Depends(require_operator),
+    catalog: CatalogStore = Depends(get_catalog),
+    registry: Registry = Depends(get_registry),
+) -> None:
+    view = await catalog.get(app_id)
+    await catalog.delete(app_id, actor=actor)
+    await _audit(registry, actor, "catalog.delete", view["slug"], {})
 
 
 @router.post("/servers", status_code=201)
@@ -136,6 +242,7 @@ async def update_server(
         preferred_regions=body.preferred_regions,
         oauth=body.oauth,
         oauth_client_secret=body.oauth_client_secret,
+        env=body.env,
     )
 
 
@@ -165,6 +272,27 @@ async def probe_server(
     return await registry.probe(server_id, actor)
 
 
+class SkillAuthBody(BaseModel):
+    action: str = "login"
+    # oauth_link: pasted authorization code from the vendor authorize page.
+    token: str | None = None
+    # oauth_link: background login job id returned by the initial login call.
+    job_id: str | None = None
+
+
+@router.post("/servers/{server_id}/skill-auth")
+async def skill_auth_server(
+    server_id: uuid.UUID,
+    body: SkillAuthBody,
+    actor: str = Depends(require_operator),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    """Platform device_qr / oauth_link login for skill-bridge apps (Connect)."""
+    return await registry.skill_auth(
+        server_id, body.action, actor, token=body.token, job_id=body.job_id
+    )
+
+
 @router.post("/servers/{server_id}/auth/token")
 async def set_server_token(
     server_id: uuid.UUID,
@@ -184,52 +312,145 @@ async def oauth_start(
     actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
-    """Begin OAuth code+PKCE; returns the authorize URL the operator should open."""
+    """Begin OAuth code+PKCE; returns the authorize URL the operator should open.
+
+    If the server has no ``client_id`` but a ``registration_endpoint`` (e.g. Ardot),
+    register a public client first and persist the issued id.
+    """
     cfg = await registry.remote_oauth_config(server_id)
+    redirect_uri = body.redirect_uri.strip()
+    client_id = cfg.get("client_id")
+    if not client_id:
+        reg = cfg.get("registration_endpoint")
+        if not isinstance(reg, str) or not reg:
+            raise RegistryError(422, "invalid_oauth", "oauth client_id is not configured")
+        registered = await register_oauth_client(
+            registration_endpoint=reg,
+            redirect_uri=redirect_uri,
+            scopes=list(cfg.get("scopes") or []),
+            token_endpoint_auth_method=str(cfg.get("token_endpoint_auth_method") or "none"),
+        )
+        client_id = registered["client_id"]
+        await registry.update_server(
+            server_id,
+            actor=actor,
+            oauth={**cfg, "client_id": client_id},
+        )
     store: OAuthStore = request.app.state.oauth
     started = store.start(
         server_id=server_id,
         authorize_url=cfg["authorize_url"],
         token_url=cfg["token_url"],
-        client_id=cfg["client_id"],
+        client_id=client_id,
         scopes=list(cfg.get("scopes") or []),
-        redirect_uri=body.redirect_uri.strip(),
+        redirect_uri=redirect_uri,
+        resource=cfg.get("resource"),
     )
     await _audit(registry, actor, "server.oauth_start", str(server_id), {})
     return started
 
 
+def _is_prefetch(request: Request) -> bool:
+    """Browsers/CDNs sometimes prefetch the redirect URL; never exchange codes for those."""
+    purpose = (request.headers.get("purpose") or request.headers.get("sec-purpose") or "").lower()
+    return "prefetch" in purpose or "prerender" in purpose
+
+
+def _oauth_fail_html(message: str, *, status: int) -> HTMLResponse:
+    # Keep the window open so the operator can read the upstream error.
+    safe = html.escape(message or "oauth failed")
+    return HTMLResponse(
+        "<html><body style='font:14px/1.45 system-ui;padding:24px;max-width:40rem'>"
+        "<p><strong>OAuth failed</strong></p>"
+        f"<p>{safe}</p>"
+        "<p style='color:#666'>You can close this window and retry Authorize.</p>"
+        "</body></html>",
+        status_code=status if status < 600 else 502,
+    )
+
+
+async def _oauth_callback_result(
+    request: Request,
+    *,
+    code: str,
+    state: str,
+    error: str,
+) -> Response:
+    """Shared GET/POST callback handler (query + form_post response modes)."""
+    if _is_prefetch(request):
+        return Response(status_code=204)
+
+    registry: Registry = request.app.state.registry
+    store: OAuthStore = request.app.state.oauth
+    if error:
+        store.discard(state)
+        return _oauth_fail_html(f"authorization server: {error}", status=400)
+    try:
+        # Peek first so a duplicate/racy hit does not drop PKCE before exchange runs.
+        pending = store.get(state)
+        cfg = await registry.remote_oauth_config(pending.server_id)
+        # Never send client_secret Basic auth for public clients (Ardot: auth method none).
+        method = cfg.get("token_endpoint_auth_method") or "none"
+        secret = None
+        if method != "none":
+            secret = await registry.read_oauth_client_secret(pending.server_id)
+        authorization = await exchange_code(pending, code, client_secret=secret)
+        store.discard(state)
+        await registry.store_authorization_header(
+            pending.server_id, authorization, actor="oauth-callback"
+        )
+    except (RegistryError, OAuthError) as e:
+        logger.warning(
+            "oauth callback failed code=%s status=%s msg=%s",
+            getattr(e, "code", type(e).__name__),
+            getattr(e, "status", "?"),
+            getattr(e, "message", str(e)),
+        )
+        # Drop state after a real attempt so the one-time code cannot be replayed forever.
+        if not (isinstance(e, OAuthError) and e.message == "unknown or expired oauth state"):
+            store.discard(state)
+        return _oauth_fail_html(e.message or e.code, status=e.status)
+    return HTMLResponse(
+        "<html><body style='font:14px/1.45 system-ui;padding:24px'>"
+        "<p>Connected. You can close this window.</p>"
+        "<script>window.opener&&window.opener.postMessage({portunusOauth:'ok'},'*');"
+        "window.close()</script></body></html>"
+    )
+
+
 @router.get("/oauth/callback")
-async def oauth_callback(
+async def oauth_callback_get(
     request: Request,
     code: str = "",
     state: str = "",
     error: str = "",
 ) -> Response:
-    """Browser redirect target after the upstream IdP; stores the token then closes the window."""
-    registry: Registry = request.app.state.registry
-    store: OAuthStore = request.app.state.oauth
-    if error:
-        return HTMLResponse(
-            f"<html><body><p>OAuth error: {error}</p><script>window.close()</script></body></html>",
-            status_code=400,
-        )
-    try:
-        pending = store.pop(state)
-        secret = await registry.read_oauth_client_secret(pending.server_id)
-        authorization = await exchange_code(pending, code, client_secret=secret)
-        await registry.store_authorization_header(
-            pending.server_id, authorization, actor="oauth-callback"
-        )
-    except (RegistryError, OAuthError) as e:
-        return HTMLResponse(
-            f"<html><body><p>{e.message or e.code}</p><script>window.close()</script></body></html>",
-            status_code=e.status,
-        )
-    return HTMLResponse(
-        "<html><body><p>Connected. You can close this window.</p>"
-        "<script>window.opener&&window.opener.postMessage({portunusOauth:'ok'},'*');"
-        "window.close()</script></body></html>"
+    """Browser redirect target after the upstream IdP (``response_mode=query``)."""
+    return await _oauth_callback_result(request, code=code, state=state, error=error)
+
+
+@router.post("/oauth/callback")
+async def oauth_callback_post(request: Request) -> Response:
+    """``response_mode=form_post`` variant used by some authorization servers."""
+    form = await request.form()
+    return await _oauth_callback_result(
+        request,
+        code=str(form.get("code") or ""),
+        state=str(form.get("state") or ""),
+        error=str(form.get("error") or ""),
+    )
+
+
+@router.options("/oauth/callback")
+async def oauth_callback_options() -> Response:
+    """Some browsers preflight the redirect URL; allow GET/POST without auth."""
+    return Response(
+        status_code=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        },
     )
 
 
@@ -241,6 +462,16 @@ async def enable_server(
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     return await registry.set_server_enabled(server_id, (body or EnableBody()).enabled, actor)
+
+
+@router.post("/tools/{tool_id}/enable")
+async def enable_tool(
+    tool_id: uuid.UUID,
+    body: EnableBody | None = None,
+    actor: str = Depends(require_operator),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    return await registry.set_tool_enabled(tool_id, (body or EnableBody()).enabled, actor)
 
 
 # ---- auth routes ------------------------------------------------------------------------
@@ -288,6 +519,20 @@ async def login(body: PasswordBody, request: Request, response: Response):
 async def session_info(request: Request, actor: str = Depends(require_operator)) -> dict[str, Any]:
     row = await _auth(request).lookup_session(request.cookies.get(SESSION_COOKIE))
     return {"authenticated": True, "csrf_token": row.csrf_token if row else None}
+
+
+@router.get("/status")
+async def operator_status(
+    request: Request, actor: str = Depends(require_operator)
+) -> dict[str, Any]:
+    """Authenticated fleet status (public ``/healthz`` omits runner counts — review #8)."""
+    pool = getattr(request.app.state, "runner_pool", None)
+    connected = list(pool.connected()) if pool is not None else []
+    return {
+        "ok": True,
+        "runner_connected": bool(connected),
+        "runners_connected": len(connected),
+    }
 
 
 @router.post("/auth/logout", status_code=204)
@@ -455,6 +700,7 @@ def create_app(registry: Registry, auth: OperatorAuth | None = None) -> FastAPI:
     app.state.registry = registry
     app.state.auth = auth
     app.state.oauth = OAuthStore()
+    app.state.catalog = CatalogStore(registry.session_factory)
     app.include_router(router)
 
     @app.exception_handler(RegistryError)

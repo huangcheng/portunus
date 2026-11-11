@@ -1,0 +1,21 @@
+{
+  "name": "@guangyapan/drive-skill",
+  "version": "1.0.2",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "guangyapan": "./bin/guangyapan.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "darwin",
+    "win32",
+    "linux"
+  ],
+  "guangyapanRuntime": {
+    "markerRequired": true,
+    "edition": "bundled"
+  }
+}

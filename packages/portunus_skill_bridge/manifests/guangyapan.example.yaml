@@ -1,0 +1,230 @@
+# 光鸭云盘 — JSON CLI skill (bundled Node). Auth is platform-owned (Connect/login
+# outside MCP); no login tools exposed to agents.
+# SKILL_ROOT / STATE_DIR are expanded from the child environment.
+
+name: guangyapan
+version: "1.0.2"
+backend: json_cli
+
+auth:
+  type: device_qr
+  # Platform Connect injects these only for login/status/logout skill_exec.
+  login_env:
+    GUANGYAPAN_DRIVE_LOGIN_MODE: device
+  qr_path_field: qr_code_path
+
+cli:
+  command: ["node", "bin/guangyapan.mjs"]
+  cwd: ${SKILL_ROOT}
+  identity:
+    agent_name: Portunus
+    agent_profile_dir: ${STATE_DIR}
+  run_wrapper: run_operation
+
+tools:
+  - name: list
+    description: List files in a cloud directory
+    operation: list
+    input:
+      remote_parent_id:
+        type: string
+        description: Parent folder id (empty = root)
+      file_types:
+        type: array
+        items:
+          type: string
+      page:
+        type: integer
+      page_size:
+        type: integer
+
+  - name: search
+    description: Search cloud drive files
+    operation: search
+    input:
+      keyword:
+        type: string
+        required: true
+      remote_parent_id:
+        type: string
+      file_types:
+        type: array
+        items:
+          type: string
+      page:
+        type: integer
+      page_size:
+        type: integer
+
+  - name: search_share
+    description: Search within a share link
+    operation: search_share
+    input:
+      share_url:
+        type: string
+        required: true
+      keyword:
+        type: string
+      code:
+        type: string
+      page:
+        type: integer
+      page_size:
+        type: integer
+
+  - name: upload
+    description: Upload a local file to the cloud drive
+    operation: upload
+    input:
+      local_path:
+        type: string
+        required: true
+      remote_parent_id:
+        type: string
+
+  - name: download
+    description: Download a cloud file to a local directory
+    operation: download
+    input:
+      remote_id:
+        type: string
+        required: true
+      local_dir:
+        type: string
+        required: true
+
+  - name: move
+    description: Move a cloud file or folder
+    operation: move
+    input:
+      remote_id:
+        type: string
+        required: true
+      target_parent_id:
+        type: string
+        required: true
+
+  - name: copy
+    description: Copy a cloud file or folder
+    operation: copy
+    input:
+      remote_id:
+        type: string
+        required: true
+      target_parent_id:
+        type: string
+        required: true
+
+  - name: rename
+    description: Rename a cloud file or folder
+    operation: rename
+    input:
+      remote_id:
+        type: string
+        required: true
+      new_name:
+        type: string
+        required: true
+
+  - name: create_folder
+    description: Create a folder in the cloud drive
+    operation: create_folder
+    input:
+      name:
+        type: string
+        required: true
+      remote_parent_id:
+        type: string
+
+  - name: create_share
+    description: Create a share link for cloud items
+    operation: create_share
+    input:
+      remote_ids:
+        type: array
+        required: true
+        items:
+          type: string
+      title:
+        type: string
+      validity_seconds:
+        type: integer
+      share_type:
+        type: string
+      code:
+        type: string
+      download_type:
+        type: string
+
+  - name: save_share
+    description: Save items from a share link into the drive
+    operation: save_share
+    input:
+      share_url:
+        type: string
+        required: true
+      target_parent_id:
+        type: string
+      code:
+        type: string
+      remote_ids:
+        type: array
+        items:
+          type: string
+
+  - name: return_text
+    description: Read text content of a cloud file
+    operation: return_text
+    input:
+      remote_id:
+        type: string
+        required: true
+
+  - name: resolve_cloud_collection
+    description: Resolve a cloud-collection URL or torrent
+    operation: resolve_cloud_collection
+    input:
+      url:
+        type: string
+      torrent_path:
+        type: string
+
+  - name: account_rights
+    description: Query account storage and membership rights
+    operation: account_rights
+    input: {}
+
+  - name: cloud_collection_add
+    description: Add a cloud-collection task
+    operation: cloud_collection_add
+    input:
+      url:
+        type: string
+      torrent_path:
+        type: string
+      remote_parent_id:
+        type: string
+      selection_mode:
+        type: string
+      new_name:
+        type: string
+
+  - name: cloud_collection_delete
+    description: Delete cloud-collection tasks
+    operation: cloud_collection_delete
+    input:
+      task_ids:
+        type: array
+        required: true
+        items:
+          type: string
+      delete_files:
+        type: boolean
+
+  - name: status
+    description: Poll a background batch by id
+    cli: status
+    input:
+      batch_id:
+        type: string
+        required: true

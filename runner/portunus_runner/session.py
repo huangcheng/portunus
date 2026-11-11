@@ -9,15 +9,21 @@ every child and reaps until none remain *before* any inventory can be advertised
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hmac
+import json
 import logging
+import os
+import re
+import shutil
 import socket
 import struct
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from portunus_shared import (
@@ -38,11 +44,53 @@ log = logging.getLogger("portunus.runner")
 
 SpawnFn = Callable[[dict], Awaitable[ChildHandle]]
 
+
+async def _kill_and_reap_handle(handle: ChildHandle) -> None:
+    """SIGKILL a probe child and wait until it exits (best-effort)."""
+    with contextlib.suppress(ProcessLookupError, OSError):
+        handle.kill()
+    wait = getattr(handle, "wait", None)
+    if callable(wait):
+        with contextlib.suppress(Exception):
+            await wait()
+        return
+    proc = getattr(handle, "proc", None)
+    if proc is not None:
+        with contextlib.suppress(Exception):
+            await proc.wait()
+
+
 # Gap threshold = 3 heartbeat intervals (10s heartbeat -> 30s gap, spec §6.1).
 GAP_FACTOR = 3
 
 # v1 runners (and unconfigured v2 runners) belong to this single placeholder site/region.
 DEFAULT_SITE_ID = "local"
+
+# Platform-owned skill CLI auth (device_qr / oauth_link). Paths under these roots.
+_SKILL_ROOT_PREFIX = Path("/var/lib/portunus/skills").resolve()
+_STATE_ROOT_PREFIX = Path("/var/lib/portunus/skill-state").resolve()
+# Concrete verbs come from manifest auth.actions; keep names constrained.
+_SKILL_AUTH_ACTION_RE = re.compile(r"^[a-z][a-z0-9\-]{0,64}$")
+_AUTH_URL_RE = re.compile(r"https://[^\s\"'<>）\]]+")
+_SKILL_EXEC_MAX_S = 120.0
+_OAUTH_URL_FILE = "oauth-auth-url.txt"
+_OAUTH_JOBS: dict[str, "_OauthJob"] = {}
+
+
+@dataclass
+class _OauthJob:
+    """Background oauth_link login: browser shim captures URL; CLI keeps polling."""
+
+    job_id: str
+    proc: asyncio.subprocess.Process
+    state_dir: Path
+    auth_url_file: Path
+    task: asyncio.Task[tuple[bytes, bytes]]
+    auth_url: str | None = None
+    exit_code: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    result: Any = None
 
 
 def peer_cred(sock: Any) -> tuple[int | None, int]:
@@ -262,6 +310,8 @@ class Runner:
             await self._do_signal(sess, msg, op)
         elif op == "probe":
             await self._do_probe(sess, msg)
+        elif op == "skill_exec":
+            await self._do_skill_exec(sess, msg)
         elif op == "rpc":
             self._start_rpc(sess, msg)
         else:
@@ -367,6 +417,19 @@ class Runner:
         alive = rec.handle.returncode is None
         await self._reply(sess, msg, child_id=child_id, pid=rec.handle.pid, alive=alive)
 
+    async def _do_skill_exec(self, sess: Session, msg: dict) -> None:
+        """One-shot skill CLI under /var/lib/portunus/skills (platform login, not agent MCP)."""
+        try:
+            result = await _run_skill_exec(msg)
+        except PortunusError as e:
+            await self._error(sess, msg, e.code, e.message or "skill_exec failed", with_token=True)
+            return
+        except Exception:
+            log.exception("skill_exec failed")
+            await self._error(sess, msg, "spawn_failed", "skill_exec failed", with_token=True)
+            return
+        await self._reply(sess, msg, **result)
+
     # ---- tools/list probes -----------------------------------------------------------
 
     async def _start_tools_probe(self, sess: Session, msg: dict) -> None:
@@ -403,7 +466,7 @@ class Runner:
             await self._error(sess, msg, "spawn_failed", "probe failed", with_token=True)
         finally:
             if handle is not None:
-                await _kill_and_reap(handle)
+                await _kill_and_reap_handle(handle)
 
     # ---- rpc ---------------------------------------------------------------------
 
@@ -525,18 +588,440 @@ class Runner:
             await self.children.kill_all_and_reap()
 
 
-async def _kill_and_reap(handle: ChildHandle) -> None:
-    """SIGKILL and wait; shielded so a cancelled probe still reaps its child."""
-    with contextlib.suppress(ProcessLookupError):
-        handle.kill()
-    waiter = asyncio.ensure_future(handle.wait())
+def _under(root: Path, path: Path) -> Path:
+    resolved = path.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise PortunusError("spawn_rejected", f"path escapes {root}")
+    return resolved
+
+
+def _extract_auth_url(parsed: Any) -> str | None:
+    if not isinstance(parsed, dict):
+        return None
+    msg = parsed.get("msg")
+    if isinstance(msg, str):
+        m = _AUTH_URL_RE.search(msg)
+        if m:
+            return m.group(0)
+    data = parsed.get("data") if isinstance(parsed.get("data"), dict) else {}
+    if isinstance(data, dict):
+        for key in ("auth_url", "authorize_url", "url", "revokeUrl"):
+            val = data.get(key)
+            if isinstance(val, str) and val.startswith("http"):
+                return val
+    return None
+
+
+def _parse_cli_json(out: str) -> Any:
     try:
-        await asyncio.shield(waiter)
-    except asyncio.CancelledError:
-        await asyncio.gather(waiter, return_exceptions=True)
-        raise
+        if out:
+            last = out.splitlines()[-1].strip()
+            return json.loads(last)
+        return None
+    except json.JSONDecodeError:
+        return {"raw_stdout": out}
+
+
+def _normalize_openclaw_device_name(skill_root: Path) -> None:
+    """OpenClaw skills persist QEMU DMI names under openclaw/config.json — shorten for QR."""
+    cfg = skill_root / "openclaw" / "config.json"
+    if not cfg.is_file():
+        return
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+    if data.get("platform") == "Portunus":
+        return
+    data["platform"] = "Portunus"
+    try:
+        cfg.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return
+
+
+def _install_browser_shim(state_dir: Path, url_file: Path) -> Path:
+    """Fake xdg-open/open (+ short device name): keep page_code polling on headless runners."""
+    shim_dir = state_dir / "browser-shim"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    script = shim_dir / "xdg-open"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'URL_FILE="{url_file}"\n'
+        'for a in "$@"; do\n'
+        '  case "$a" in\n'
+        '    http://*|https://*) printf "%s\\n" "$a" > "$URL_FILE"; exit 0 ;;\n'
+        "  esac\n"
+        "done\n"
+        'printf "%s\\n" "$1" > "$URL_FILE"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    open_shim = shim_dir / "open"
+    if open_shim.exists() or open_shim.is_symlink():
+        open_shim.unlink()
+    open_shim.symlink_to(script.name)
+    # Quark reads `cat /sys/class/dmi/id/product_name` when no persisted platform exists.
+    cat_shim = shim_dir / "cat"
+    cat_shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$#" -eq 1 ] && [ "$1" = "/sys/class/dmi/id/product_name" ]; then\n'
+        '  printf "%s\\n" "Portunus"\n'
+        "  exit 0\n"
+        "fi\n"
+        'exec /bin/cat "$@"\n',
+        encoding="utf-8",
+    )
+    cat_shim.chmod(0o755)
+    return shim_dir
+
+
+async def _cancel_oauth_job(job_id: str | None) -> None:
+    if not job_id:
+        return
+    job = _OAUTH_JOBS.pop(job_id, None)
+    if job is None:
+        return
+    if job.proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            job.proc.kill()
+        with contextlib.suppress(Exception):
+            await job.proc.wait()
+    if not job.task.done():
+        job.task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await job.task
+
+
+async def _finish_oauth_job(job: _OauthJob) -> None:
+    if job.exit_code is not None:
+        return
+    try:
+        out_b, err_b = await job.task
     except Exception:
-        pass
+        out_b, err_b = b"", b""
+    job.exit_code = job.proc.returncode
+    job.stdout = out_b.decode("utf-8", errors="replace").strip()
+    job.stderr = err_b.decode("utf-8", errors="replace").strip()
+    job.result = _parse_cli_json(job.stdout)
+
+
+async def _oauth_job_status(job_id: str) -> dict[str, Any]:
+    job = _OAUTH_JOBS.get(job_id)
+    if job is None:
+        raise PortunusError("spawn_rejected", f"unknown oauth job: {job_id}")
+    alive = job.proc.returncode is None
+    if not alive:
+        await _finish_oauth_job(job)
+    auth_url = job.auth_url
+    if auth_url is None and job.auth_url_file.is_file():
+        raw = job.auth_url_file.read_text(encoding="utf-8", errors="replace").strip()
+        if raw.startswith("http"):
+            auth_url = raw
+            job.auth_url = auth_url
+    logged_in = False
+    result = job.result
+    if isinstance(result, dict) and result.get("code") == 0:
+        logged_in = True
+    if not alive:
+        _OAUTH_JOBS.pop(job_id, None)
+    return {
+        "exit_code": job.exit_code,
+        "result": result,
+        "stderr": job.stderr or None,
+        "auth_url": auth_url,
+        "oauth_job_id": job_id,
+        "pending": alive and not logged_in,
+        "logged_in": logged_in,
+        "qr_png_base64": None,
+        "qr_code_path": None,
+    }
+
+
+async def _start_oauth_capture_login(
+    *,
+    skill_root: Path,
+    state_dir: Path,
+    script: Path,
+    action: str,
+    agent_name: str | None,
+    agent_profile_dir: str | None,
+    extra_env: dict[str, str],
+    extra_args: list[str],
+    timeout_s: float,
+) -> dict[str, Any]:
+    """Start login with browser shim; return auth_url as soon as Quark opens it."""
+    # One active capture per state dir.
+    for jid, existing in list(_OAUTH_JOBS.items()):
+        if existing.state_dir == state_dir:
+            await _cancel_oauth_job(jid)
+
+    url_file = state_dir / _OAUTH_URL_FILE
+    with contextlib.suppress(FileNotFoundError):
+        url_file.unlink()
+    _normalize_openclaw_device_name(skill_root)
+    shim_dir = _install_browser_shim(state_dir, url_file)
+
+    node = shutil.which("node", path="/usr/local/bin:/usr/bin:/bin")
+    if not node:
+        raise PortunusError("spawn_rejected", "node not found")
+
+    argv = [node, str(script), action]
+    if isinstance(agent_name, str) and agent_name.strip():
+        argv += ["--agent-name", agent_name.strip()]
+    if isinstance(agent_profile_dir, str) and agent_profile_dir.strip():
+        profile = _under(_STATE_ROOT_PREFIX, Path(agent_profile_dir))
+        profile.mkdir(parents=True, exist_ok=True)
+        argv += ["--agent-profile-dir", str(profile)]
+    argv.extend(extra_args)
+
+    env = {
+        "PATH": f"{shim_dir}:/usr/local/bin:/usr/bin:/bin",
+        "HOME": str(state_dir),
+        "BROWSER": str(shim_dir / "xdg-open"),
+        **extra_env,
+    }
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        cwd=str(skill_root),
+        env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    job_id = uuid.uuid4().hex
+    task = asyncio.create_task(proc.communicate())
+    job = _OauthJob(
+        job_id=job_id,
+        proc=proc,
+        state_dir=state_dir,
+        auth_url_file=url_file,
+        task=task,
+    )
+    _OAUTH_JOBS[job_id] = job
+
+    # Wait for shim to capture the authorize URL (Quark calls xdg-open immediately).
+    deadline = asyncio.get_running_loop().time() + min(20.0, timeout_s)
+    auth_url: str | None = None
+    while asyncio.get_running_loop().time() < deadline:
+        if url_file.is_file():
+            raw = url_file.read_text(encoding="utf-8", errors="replace").strip()
+            if raw.startswith("http"):
+                auth_url = raw
+                break
+        if proc.returncode is not None:
+            break
+        await asyncio.sleep(0.2)
+
+    if auth_url is None:
+        # Fall back: process already exited (old cancel path) — parse stdout.
+        await _finish_oauth_job(job)
+        _OAUTH_JOBS.pop(job_id, None)
+        parsed = job.result
+        auth_url = _extract_auth_url(parsed)
+        return {
+            "exit_code": job.exit_code,
+            "result": parsed,
+            "stderr": job.stderr or None,
+            "auth_url": auth_url,
+            "oauth_job_id": None,
+            "pending": False,
+            "logged_in": isinstance(parsed, dict) and parsed.get("code") == 0,
+            "qr_png_base64": None,
+            "qr_code_path": None,
+        }
+
+    job.auth_url = auth_url
+
+    async def _reap() -> None:
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.wait()
+        finally:
+            await _finish_oauth_job(job)
+
+    asyncio.create_task(_reap())
+    return {
+        "exit_code": None,
+        "result": {
+            "code": -106,
+            "msg": "等待扫码授权",
+            "action": action,
+            "type": "result",
+            "data": {},
+        },
+        "stderr": None,
+        "auth_url": auth_url,
+        "oauth_job_id": job_id,
+        "pending": True,
+        "logged_in": False,
+        "qr_png_base64": None,
+        "qr_code_path": None,
+    }
+
+
+async def _run_skill_exec(msg: dict) -> dict[str, Any]:
+    """Run ``node <skill_root>/<entrypoint> <action> [identity…] [extra…]``.
+
+    Identity flags and auth env come from the skill manifest — no vendor hardcoding.
+    """
+    skill_root_raw = msg.get("skill_root")
+    state_dir_raw = msg.get("state_dir")
+    entrypoint = msg.get("entrypoint")
+    action = msg.get("action")
+    agent_name = msg.get("agent_name")
+    agent_profile_dir = msg.get("agent_profile_dir")
+    extra_env = msg.get("env") or {}
+    extra_args = msg.get("extra_args") or []
+    qr_path_field = msg.get("qr_path_field") or "qr_code_path"
+    oauth_capture = msg.get("oauth_capture") is True
+    oauth_job_id = msg.get("oauth_job_id")
+    oauth_cancel = msg.get("oauth_cancel") is True
+    raw_timeout = msg.get("timeout_s")
+    timeout_s = _SKILL_EXEC_MAX_S
+    if isinstance(raw_timeout, (int, float)) and not isinstance(raw_timeout, bool) and raw_timeout > 0:
+        timeout_s = min(float(raw_timeout), _SKILL_EXEC_MAX_S)
+
+    if oauth_cancel and isinstance(oauth_job_id, str):
+        await _cancel_oauth_job(oauth_job_id)
+        return {
+            "exit_code": 0,
+            "result": {"code": 0, "msg": "cancelled", "action": "oauth-cancel", "type": "result"},
+            "stderr": None,
+            "auth_url": None,
+            "oauth_job_id": None,
+            "pending": False,
+            "logged_in": False,
+            "qr_png_base64": None,
+            "qr_code_path": None,
+        }
+
+    if isinstance(oauth_job_id, str) and msg.get("oauth_poll") is True:
+        return await _oauth_job_status(oauth_job_id)
+
+    if not isinstance(skill_root_raw, str) or not skill_root_raw:
+        raise PortunusError("spawn_rejected", "skill_root required")
+    if not isinstance(state_dir_raw, str) or not state_dir_raw:
+        raise PortunusError("spawn_rejected", "state_dir required")
+    if not isinstance(entrypoint, str) or not entrypoint or entrypoint.startswith("/"):
+        raise PortunusError("spawn_rejected", "entrypoint must be a relative path")
+    if not isinstance(action, str) or not _SKILL_AUTH_ACTION_RE.fullmatch(action):
+        raise PortunusError("spawn_rejected", f"action not allowed: {action!r}")
+    if not isinstance(extra_env, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in extra_env.items()
+    ):
+        raise PortunusError("spawn_rejected", "env must map strings to strings")
+    if agent_name is not None and (not isinstance(agent_name, str) or not agent_name.strip()):
+        raise PortunusError("spawn_rejected", "agent_name must be a non-empty string when set")
+    if agent_profile_dir is not None and (
+        not isinstance(agent_profile_dir, str) or not agent_profile_dir.strip()
+    ):
+        raise PortunusError("spawn_rejected", "agent_profile_dir must be a non-empty string when set")
+    if not isinstance(extra_args, list) or not all(isinstance(a, str) for a in extra_args):
+        raise PortunusError("spawn_rejected", "extra_args must be a list of strings")
+    if not isinstance(qr_path_field, str) or not qr_path_field.strip() or "/" in qr_path_field:
+        raise PortunusError("spawn_rejected", "qr_path_field must be a simple key")
+
+    skill_root = _under(_SKILL_ROOT_PREFIX, Path(skill_root_raw))
+    state_dir = _under(_STATE_ROOT_PREFIX, Path(state_dir_raw))
+    script = _under(skill_root, skill_root / entrypoint)
+    if not script.is_file():
+        raise PortunusError("spawn_rejected", f"entrypoint missing: {script}")
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    # Token login supersedes any in-flight capture job for this state dir.
+    if extra_args:
+        for jid, existing in list(_OAUTH_JOBS.items()):
+            if existing.state_dir == state_dir:
+                await _cancel_oauth_job(jid)
+
+    if oauth_capture:
+        return await _start_oauth_capture_login(
+            skill_root=skill_root,
+            state_dir=state_dir,
+            script=script,
+            action=action,
+            agent_name=agent_name if isinstance(agent_name, str) else None,
+            agent_profile_dir=agent_profile_dir if isinstance(agent_profile_dir, str) else None,
+            extra_env=extra_env,
+            extra_args=extra_args,
+            timeout_s=timeout_s,
+        )
+
+    node = shutil.which("node", path="/usr/local/bin:/usr/bin:/bin")
+    if not node:
+        raise PortunusError("spawn_rejected", "node not found")
+
+    argv = [node, str(script), action]
+    if isinstance(agent_name, str) and agent_name.strip():
+        argv += ["--agent-name", agent_name.strip()]
+    if isinstance(agent_profile_dir, str) and agent_profile_dir.strip():
+        profile = _under(_STATE_ROOT_PREFIX, Path(agent_profile_dir))
+        profile.mkdir(parents=True, exist_ok=True)
+        argv += ["--agent-profile-dir", str(profile)]
+    argv.extend(extra_args)
+
+    env = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "HOME": str(state_dir),
+        **extra_env,
+    }
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        cwd=str(skill_root),
+        env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout_s)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+        raise PortunusError("upstream_timeout", "skill_exec timed out") from None
+
+    out = out_b.decode("utf-8", errors="replace").strip()
+    err = err_b.decode("utf-8", errors="replace").strip()
+    parsed = _parse_cli_json(out)
+
+    qr_b64 = None
+    qr_path = None
+    if isinstance(parsed, dict):
+        data = parsed.get("data") if isinstance(parsed.get("data"), dict) else {}
+        if isinstance(data, dict):
+            raw_path = data.get(qr_path_field.strip())
+            if raw_path is None:
+                raw_path = data.get("qrImagePath")
+            qr_path = raw_path if isinstance(raw_path, str) else None
+        if isinstance(qr_path, str) and qr_path:
+            for root in (state_dir, skill_root):
+                try:
+                    qp = _under(root, Path(qr_path))
+                    if qp.is_file() and qp.stat().st_size <= 512 * 1024:
+                        qr_b64 = base64.b64encode(qp.read_bytes()).decode("ascii")
+                        break
+                except PortunusError:
+                    continue
+
+    return {
+        "exit_code": proc.returncode,
+        "result": parsed,
+        "stderr": err or None,
+        "qr_png_base64": qr_b64,
+        "qr_code_path": qr_path if isinstance(qr_path, str) else None,
+        "auth_url": _extract_auth_url(parsed),
+        "pending": False,
+        "logged_in": isinstance(parsed, dict) and parsed.get("code") == 0,
+    }
 
 
 async def _close_writer(writer: asyncio.StreamWriter) -> None:

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { AppsPage } from "./AppsPage";
+import { BrandMark, Icon } from "./icons/ui";
 import { KeysPage } from "./KeysPage";
 import { Login } from "./Login";
-import { ServersPage } from "./ServersPage";
 
-type View = "apps" | "servers" | "keys";
+type View = "apps" | "keys";
 
 async function copyText(text: string) {
   await navigator.clipboard.writeText(text);
@@ -31,6 +31,7 @@ function EndpointRow({ label, url }: { label: string; url: string }) {
         </span>
       </div>
       <button type="button" className="outline sm endpoint-copy" onClick={() => void copy()} title={`Copy ${url}`}>
+        <Icon name={copied ? "check" : "copy"} size={14} />
         {copied ? "Copied" : "Copy"}
       </button>
     </div>
@@ -66,10 +67,9 @@ function ApiEndpoints() {
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
+        <Icon name="terminal" size={14} />
         <span>API endpoints</span>
-        <span className="chev" aria-hidden>
-          {open ? "▴" : "▾"}
-        </span>
+        <Icon name="chevron-down" size={13} className="chev" />
       </button>
       {open && (
         <div className="api-endpoints-pop" role="dialog" aria-label="API endpoints">
@@ -85,7 +85,6 @@ function Shell({
   view,
   setView,
   runners,
-  serverCount,
   keyCount,
   onLogout,
   children,
@@ -93,50 +92,43 @@ function Shell({
   view: View;
   setView: (v: View) => void;
   runners: number | null;
-  serverCount: number | null;
   keyCount: number | null;
   onLogout: () => void;
   children: ReactNode;
 }) {
-  const title = view === "apps" ? "Apps" : view === "servers" ? "Servers" : "Agent keys";
+  const title = view === "apps" ? "Apps" : "Agent keys";
   const description =
     view === "apps"
-      ? "Connect well-known MCP apps. Custom and stdio servers live under Servers."
-      : view === "servers"
-        ? "Register remote HTTP/SSE or local stdio MCP servers, probe tools, then enable for agents."
-        : "Bearer keys for /mcp — every key can use every server.";
+      ? "One control plane for every tool your agents use."
+      : "Create, distribute, and revoke agent credentials from one secure inventory.";
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">
+        Skip to content
+      </a>
       <aside className="sidebar">
         <div className="sidebar-header">
-          <div className="sidebar-mark" aria-hidden>
-            P
-          </div>
+          <BrandMark />
           <div>
             <div className="sidebar-brand-title">Portunus</div>
-            <div className="sidebar-brand-sub">Gateway console</div>
+            <div className="sidebar-brand-sub">MCP control plane</div>
           </div>
         </div>
         <div className="sidebar-content">
-          <div className="nav-group">
-            <div className="nav-group-label">Operator</div>
+          <nav className="nav-group" aria-label="Operator navigation">
+            <div className="nav-group-label">Workspace</div>
             <button
               type="button"
               className="nav-item"
               aria-current={view === "apps" ? "page" : undefined}
               onClick={() => setView("apps")}
             >
-              Apps
-            </button>
-            <button
-              type="button"
-              className="nav-item"
-              aria-current={view === "servers" ? "page" : undefined}
-              onClick={() => setView("servers")}
-            >
-              Servers
-              <span className="count">{serverCount ?? "—"}</span>
+              <span className="nav-item-label">
+                <Icon name="apps" size={16} />
+                Apps
+              </span>
+              <Icon name="arrow-up-right" size={13} className="nav-arrow" />
             </button>
             <button
               type="button"
@@ -144,30 +136,59 @@ function Shell({
               aria-current={view === "keys" ? "page" : undefined}
               onClick={() => setView("keys")}
             >
-              Agent keys
+              <span className="nav-item-label">
+                <Icon name="key" size={16} />
+                Agent keys
+              </span>
               <span className="count">{keyCount ?? "—"}</span>
             </button>
+          </nav>
+          <div className="sidebar-note">
+            <Icon name="layers" size={16} />
+            <p>One gateway.<br />Every tool in reach.</p>
+            <span>Apps in. Agents out.</span>
           </div>
         </div>
         <div className="sidebar-footer">
-          <span className={`health ${runners && runners > 0 ? "ok" : ""}`}>
-            <span className="dot" aria-hidden />
-            {runners == null ? "checking…" : `${runners} runner${runners === 1 ? "" : "s"} live`}
-          </span>
+          <div className="gateway-status">
+            <span className="gateway-status-label">Gateway status</span>
+            <span className={`health ${runners && runners > 0 ? "ok" : ""}`}>
+              <span className="dot" aria-hidden />
+              <span>{runners == null ? "Checking runners" : `${runners} runner${runners === 1 ? "" : "s"} live`}</span>
+            </span>
+          </div>
           <ApiEndpoints />
-          <button type="button" className="ghost" onClick={onLogout}>
-            Sign out
+          <button type="button" className="ghost sidebar-signout" onClick={onLogout} aria-label="Sign out">
+            <Icon name="logout" size={14} />
+            <span>Sign out</span>
           </button>
         </div>
       </aside>
       <div className="inset">
-        <header className="page-header">
-          <div className="page-header-text">
-            <h1>{title}</h1>
-            <p className="lede">{description}</p>
+        <header className="utility-bar">
+          <div className="breadcrumb">
+            <span>Portunus</span>
+            <Icon name="chevron-right" size={11} />
+            <strong>{title}</strong>
+          </div>
+          <div className="environment-badge">
+            <span className="environment-dot" aria-hidden />
+            Private gateway
           </div>
         </header>
-        <div className="page-body">{children}</div>
+        <main className="page-body" id="main-content" tabIndex={-1}>
+          <div className={`page-intro ${view}`}>
+            <div>
+              <p className="page-eyebrow">{view === "apps" ? "Integration directory" : "Access control"}</p>
+              <h1>{view === "apps" ? "Your toolstack, connected." : "Keys to your gateway."}</h1>
+              <p className="lede">{description}</p>
+            </div>
+            <div className="page-intro-index" aria-hidden="true">
+              {view === "apps" ? "01" : "02"}
+            </div>
+          </div>
+          {children}
+        </main>
       </div>
     </div>
   );
@@ -177,7 +198,6 @@ export function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [view, setView] = useState<View>("apps");
   const [runners, setRunners] = useState<number | null>(null);
-  const [serverCount, setServerCount] = useState<number | null>(null);
   const [keyCount, setKeyCount] = useState<number | null>(null);
 
   useEffect(() => {
@@ -192,14 +212,12 @@ export function App() {
     let cancelled = false;
     const tick = async () => {
       try {
-        const [h, servers, keys] = await Promise.all([
-          fetch("/healthz", { credentials: "same-origin" }).then((r) => r.json()),
-          api.servers().catch(() => null),
+        const [status, keys] = await Promise.all([
+          api.status().catch(() => null),
           api.keys().catch(() => null),
         ]);
         if (cancelled) return;
-        setRunners(typeof h.runners_connected === "number" ? h.runners_connected : null);
-        if (servers) setServerCount(servers.length);
+        setRunners(typeof status?.runners_connected === "number" ? status.runners_connected : null);
         if (keys) setKeyCount(keys.length);
       } catch {
         if (!cancelled) setRunners(null);
@@ -234,11 +252,10 @@ export function App() {
       view={view}
       setView={setView}
       runners={runners}
-      serverCount={serverCount}
       keyCount={keyCount}
       onLogout={() => api.logout().finally(() => setAuthed(false))}
     >
-      {view === "apps" ? <AppsPage /> : view === "servers" ? <ServersPage /> : <KeysPage />}
+      {view === "apps" ? <AppsPage /> : <KeysPage />}
     </Shell>
   );
 }

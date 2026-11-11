@@ -75,6 +75,7 @@ def test_constants():
             "cancel",
             "heartbeat",
             "child_exited",
+            "skill_exec",
         }
     )
 

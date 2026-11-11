@@ -2,6 +2,11 @@
 
 from dataclasses import dataclass
 
+# Skill-bridge reads its JSON manifest from this env (gateway injects at start/probe).
+# It is the only PORTUNUS_* name allowed through gateway/runner validate_env.
+SKILL_BRIDGE_MANIFEST_ENV = "PORTUNUS_MANIFEST"
+ALLOWED_PORTUNUS_ENV = frozenset({SKILL_BRIDGE_MANIFEST_ENV})
+
 
 @dataclass(frozen=True)
 class Defaults:

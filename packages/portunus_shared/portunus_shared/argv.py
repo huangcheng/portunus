@@ -18,6 +18,9 @@ _NPX_PKG = re.compile(rf"{_NPM_NAME}@{_SEMVER}", re.ASCII)
 _UVX_PKG = re.compile(rf"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?=={_SEMVER}", re.ASCII)
 
 _BASENAMES = frozenset({"npx", "uvx"})
+_PYTHON = frozenset({"python", "python3"})
+_SKILL_BRIDGE_MODULE = "portunus_skill_bridge"
+_SKILL_BRIDGE_ENV_FLAGS = frozenset({"--manifest-env", "--manifest-stdin"})
 
 
 class ArgvError(PortunusError):
@@ -84,6 +87,13 @@ def validate_stdio_command(
             _validate_uvx(args, trailing_allowlist)
         return
 
+    if command in _PYTHON:
+        resolved = which(command, path=os.pathsep.join(trusted_path))
+        if not resolved:
+            raise _reject(f"{command} not found in trusted_path")
+        _validate_python_skill_bridge(args)
+        return
+
     if os.path.isabs(command):
         real = os.path.realpath(command)
         allowed = {os.path.realpath(p) for p in binary_allowlist}
@@ -94,4 +104,20 @@ def validate_stdio_command(
                 raise _reject(f"arg not in trailing_allowlist: {a!r}")
         return
 
-    raise _reject("command must be npx, uvx, or an allowlisted absolute path")
+    raise _reject("command must be npx, uvx, python -m portunus_skill_bridge, or an allowlisted absolute path")
+
+
+def _validate_python_skill_bridge(args: list[str]) -> None:
+    """Only ``python -m portunus_skill_bridge --manifest-env VAR`` (or ``--manifest-stdin``)."""
+    if len(args) < 2 or args[0] != "-m" or args[1] != _SKILL_BRIDGE_MODULE:
+        raise _reject("python only allows -m portunus_skill_bridge")
+    rest = args[2:]
+    if not rest or rest[0] not in _SKILL_BRIDGE_ENV_FLAGS:
+        raise _reject("portunus_skill_bridge requires --manifest-env VAR or --manifest-stdin")
+    if rest[0] == "--manifest-stdin":
+        if len(rest) != 1:
+            raise _reject("unexpected args after --manifest-stdin")
+        return
+    # --manifest-env VAR
+    if len(rest) != 2 or not rest[1] or rest[1].startswith("-") or "\x00" in rest[1]:
+        raise _reject("--manifest-env requires a single env var name")

@@ -152,6 +152,28 @@ async def test_malformed_argv_and_env_rejected(srv_factory, sock_path):
     c.close()
 
 
+def test_validate_env_allows_skill_bridge_manifest():
+    from portunus_shared import SKILL_BRIDGE_MANIFEST_ENV
+
+    env = spawn_mod.validate_env({SKILL_BRIDGE_MANIFEST_ENV: "{}", "WEREAD_API_KEY": "k"})
+    assert env[SKILL_BRIDGE_MANIFEST_ENV] == "{}"
+    with pytest.raises(PortunusError) as ei:
+        spawn_mod.validate_env({"PORTUNUS_TOKEN": "x"})
+    assert "not allowed" in ei.value.message
+
+
+def test_resolve_exec_resolves_python_via_trusted_path(tmp_path):
+    from portunus_runner.policy import Policy
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    py = bindir / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+    policy = Policy(trusted_path=[str(bindir)], binary_allowlist=[])
+    assert spawn_mod.resolve_exec("python", policy) == str(py.resolve())
+
+
 async def test_missing_or_bad_policy_fails_closed(srv_factory, sock_path, env_dir):
     srv, c = await _client(srv_factory, sock_path, policy_path=str(env_dir / "nope.json"))
     rep = await c.call(_start(c, "k", [SLEEP, "30"], trailing_allowlist=["30"]))
