@@ -392,12 +392,20 @@ async def _oauth_callback_result(
     # RFC 9207 §2.4: validate the response issuer before trusting anything else in it —
     # on mismatch the code must not be exchanged and the error params must not be shown.
     if pending is not None and not iss_matches(iss, pending):
+        logger.warning(
+            "oauth callback iss mismatch server=%s expected=%r got=%r",
+            pending.server_id,
+            pending.issuer or pending.issuer_origin,
+            iss[:256],
+        )
         store.discard(state)
         return _oauth_fail_html("authorization response issuer (iss) mismatch", status=400)
     if error:
         store.discard(state)
         return _oauth_fail_html(f"authorization server: {error}", status=400)
     if pending is None:
+        # Public unauthenticated endpoint: this warning is the only probe/replay signal.
+        logger.warning("oauth callback with unknown or expired state")
         return _oauth_fail_html("unknown or expired oauth state", status=400)
     try:
         cfg = await registry.remote_oauth_config(pending.server_id)

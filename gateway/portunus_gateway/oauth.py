@@ -243,6 +243,16 @@ class OAuthStore:
         self._pending.pop(state, None)
 
 
+def _dcr_application_type(redirect_uri: str) -> str:
+    """OIDC ``application_type`` derived from the redirect target (MCP 2026-07-28 client MUST).
+
+    OIDC requires web clients to register https redirect URIs; plain-http redirects (dev
+    dashboards, loopback) fit the native profile instead. An AS enforcing the rule would
+    reject a hardcoded "web" over an http redirect with ``invalid_redirect_uri``.
+    """
+    return "web" if redirect_uri.strip().lower().startswith("https://") else "native"
+
+
 async def register_oauth_client(
     *,
     registration_endpoint: str,
@@ -259,10 +269,9 @@ async def register_oauth_client(
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": token_endpoint_auth_method,
-        # MCP 2026-07-28 client requirement: application_type must be explicit (OIDC
-        # defaults omitted values to "web"; ours *is* a web app — the redirect target is
-        # the operator dashboard's https callback, not a loopback native URI).
-        "application_type": "web",
+        # MCP 2026-07-28 client MUST: application_type must be explicit (OIDC defaults
+        # an omitted value to "web", which then conflicts with non-https redirects).
+        "application_type": _dcr_application_type(redirect_uri),
     }
     if scopes:
         body["scope"] = " ".join(scopes)

@@ -466,16 +466,14 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
                 />
               </label>
             </div>
-            <div className="form-grid">
-              <label className="field">
-                Issuer (optional, RFC 9207)
-                <input
-                  value={String(spec.issuer ?? "")}
-                  onChange={(e) => patchSpec({ issuer: e.target.value })}
-                  placeholder="https://idp.example (exact iss match)"
-                />
-              </label>
-            </div>
+            <label className="field">
+              Issuer (optional, RFC 9207)
+              <input
+                value={String(spec.issuer ?? "")}
+                onChange={(e) => patchSpec({ issuer: e.target.value })}
+                placeholder="https://idp.example (exact iss match)"
+              />
+            </label>
             <label className="field">
               Token endpoint auth method
               <select

@@ -373,6 +373,14 @@ async def test_dcr_body_includes_application_type():
     assert out["client_id"] == "reg-1"
     body = json.loads(seen[0].content)
     assert body["application_type"] == "web"
+    # Plain-http redirect (dev dashboard / loopback) fits the OIDC native profile instead.
+    seen.clear()
+    await register_oauth_client(
+        registration_endpoint="https://idp.example/register",
+        redirect_uri="http://127.0.0.1:8080/api/oauth/callback",
+        transport=httpx.MockTransport(handler),
+    )
+    assert json.loads(seen[0].content)["application_type"] == "native"
 
 
 async def test_callback_rejects_iss_mismatch_without_exchange(http, monkeypatch):
@@ -488,3 +496,33 @@ async def test_callback_accepts_matching_iss(http, monkeypatch):
     )
     assert r.status_code == 200
     assert "Connected" in r.text
+
+
+def test_catalog_spec_round_trips_issuer():
+    """The catalog allowlist must keep spec.issuer or the dashboard field is dead on save."""
+    from portunus_gateway.catalog import validate_spec
+
+    spec = validate_spec(
+        "oauth",
+        {
+            "url": "https://mcp.example.com/mcp",
+            "authorize_url": "https://idp.example/authorize",
+            "token_url": "https://idp.example/token",
+            "scopes": [],
+            "issuer": "https://issuer.example/real",
+        },
+    )
+    assert spec["issuer"] == "https://issuer.example/real"
+    import pytest as _pytest
+
+    with _pytest.raises(Exception):
+        validate_spec(
+            "oauth",
+            {
+                "url": "https://mcp.example.com/mcp",
+                "authorize_url": "https://idp.example/authorize",
+                "token_url": "https://idp.example/token",
+                "scopes": [],
+                "issuer": "idp.example",
+            },
+        )

@@ -315,7 +315,7 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
             if not isinstance(client_id, str) or not client_id.strip():
                 raise RegistryError(422, "invalid_request", "spec.client_id must be a non-empty string")
             out["client_id"] = client_id.strip()
-        for opt in ("resource", "registration_endpoint"):
+        for opt in ("resource", "registration_endpoint", "issuer"):
             raw = spec.get(opt)
             if raw is None or raw == "":
                 continue
