@@ -44,16 +44,14 @@ def upgrade() -> None:
             )
         )
         return
-    # SQLite: recreate via batch with an explicit fixed name.
+    # SQLite: recreate via batch. The constraint is stored under the models' naming
+    # convention ("ck_%(table_name)s_%(constraint_name)s" applied to the explicit name,
+    # i.e. the doubled form) and alembic expands the passed name by exactly one
+    # convention application — so dropping/creating the *single* name is what matches.
+    # Dropping the doubled name here was the original failure: it expanded to the
+    # tripled form, missed, and batch raises at context exit (uncatchable per-op).
     with op.batch_alter_table("catalog_apps", naming_convention=None) as batch:
-        for name in (
-            "ck_catalog_apps_connection",
-            "ck_catalog_apps_ck_catalog_apps_connection",
-        ):
-            try:
-                batch.drop_constraint(name, type_="check")
-            except Exception:
-                pass
+        batch.drop_constraint("ck_catalog_apps_connection", type_="check")
         batch.create_check_constraint("ck_catalog_apps_connection", _NEW)
 
 
