@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
+import subprocess
 import tempfile
 import uuid
 
 import pytest
 from portunus_shared import PortunusError, encode_frame, read_frame
 
-from portunus_gateway.runner_client import RunnerClient, RunnerRequestError
+from portunus_gateway.runner_client import DEFAULT_SITE_ID, RunnerClient, RunnerRequestError
+from portunus_runner.main import RunnerNetServer, _server_ssl_context
 from portunus_gateway.slots import SlotManager
 
 pytestmark = pytest.mark.anyio
@@ -406,3 +409,126 @@ async def test_malformed_fleet_fields_fall_back_to_defaults(sock_path, fields):
         assert c.site_id == "local" and c.regions == ["local"]
         assert c.egress_class is None and c.capacity is None
     await srv.close()
+
+
+# ---- networked (tls://) runner links ------------------------------------------------------
+
+
+def _self_signed_cert(tmp_path):
+    """Generate a throwaway self-signed cert via the openssl CLI (standard on macOS/Linux)."""
+    cert = tmp_path / "runner.crt"
+    key = tmp_path / "runner.key"
+    subprocess.run(
+        [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", str(key), "-out", str(cert), "-days", "2",
+            "-subj", "/CN=127.0.0.1",
+            "-addext", "subjectAltName=IP:127.0.0.1",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return str(cert), str(key)
+
+
+def _policy_file(tmp_path):
+    p = tmp_path / "policy.json"
+    p.write_text(json.dumps({"trusted_path": [], "binary_allowlist": []}))
+    return str(p)
+
+
+async def test_tls_link_hello_inventory_and_bad_token(tmp_path, monkeypatch):
+    """Real runner on TLS loopback; gateway client authenticates via CA-pinned TLS + token."""
+    cert, key = _self_signed_cert(tmp_path)
+    monkeypatch.setenv("PORTUNUS_RUNNER_CA", cert)
+
+    async def serve(token: str):
+        srv = RunnerNetServer(
+            host="127.0.0.1",
+            port=0,
+            ssl_ctx=_server_ssl_context(),
+            token=token,
+            heartbeat_s=5.0,
+            dev=True,
+            policy_path=_policy_file(tmp_path),
+        )
+        await srv.start()
+        return srv
+
+    # _server_ssl_context reads env for cert/key; set them around server construction.
+    monkeypatch.setenv("PORTUNUS_TLS_CERT", cert)
+    monkeypatch.setenv("PORTUNUS_TLS_KEY", key)
+    srv = await serve(TOKEN)
+    url = f"tls://127.0.0.1:{srv.port}"
+    client = RunnerClient(url, TOKEN, retry_initial_s=0.02, retry_max_s=0.05)
+    client.start()
+    await client.wait_connected(5)
+    try:
+        inv = await client.request("inventory", timeout=5)
+        assert inv["ok"] is True
+        assert client.site_id == DEFAULT_SITE_ID
+
+        # A second client with a wrong token must never reach "connected".
+        bad = RunnerClient(url, "wrong-token", retry_initial_s=0.02, retry_max_s=0.05)
+        bad.start()
+        with pytest.raises(TimeoutError):
+            await bad.wait_connected(0.6)
+        assert bad.connected is False
+        await bad.close()
+    finally:
+        await client.close()
+        await srv.close()
+
+
+async def test_tls_link_rejects_untrusted_ca(tmp_path, monkeypatch):
+    """Default context (no CA pinned): a self-signed runner is not our runner."""
+    cert, key = _self_signed_cert(tmp_path)
+    monkeypatch.setenv("PORTUNUS_TLS_CERT", cert)
+    monkeypatch.setenv("PORTUNUS_TLS_KEY", key)
+    srv = RunnerNetServer(
+        host="127.0.0.1",
+        port=0,
+        ssl_ctx=_server_ssl_context(),
+        token=TOKEN,
+        heartbeat_s=5.0,
+        dev=True,
+        policy_path=_policy_file(tmp_path),
+    )
+    await srv.start()
+    monkeypatch.delenv("PORTUNUS_RUNNER_CA", raising=False)
+    client = RunnerClient(
+        f"tls://127.0.0.1:{srv.port}", TOKEN, retry_initial_s=0.02, retry_max_s=0.05
+    )
+    client.start()
+    try:
+        with pytest.raises(TimeoutError):
+            await client.wait_connected(0.8)
+        assert client.connected is False
+    finally:
+        await client.close()
+        await srv.close()
+
+
+async def test_tcp_loopback_link_hello_and_rpc(tmp_path, monkeypatch):
+    """Cleartext loopback link works end-to-end (dev harness); server binds without ssl kwargs."""
+    srv = RunnerNetServer(
+        host="127.0.0.1",
+        port=0,
+        ssl_ctx=None,
+        token=TOKEN,
+        heartbeat_s=5.0,
+        dev=True,
+        policy_path=_policy_file(tmp_path),
+    )
+    await srv.start()
+    client = RunnerClient(
+        f"tcp://127.0.0.1:{srv.port}", TOKEN, retry_initial_s=0.02, retry_max_s=0.05
+    )
+    client.start()
+    await client.wait_connected(5)
+    try:
+        inv = await client.request("inventory", timeout=5)
+        assert inv["ok"] is True
+    finally:
+        await client.close()
+        await srv.close()

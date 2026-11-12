@@ -158,6 +158,41 @@ site that started it, so if that site dies its invokes return `runner_unavailabl
 `scripts/e2e_two_runners.sh` exercises this locally (two runners, kill one, check fallback); it uses only
 temp sockets/secrets under `/tmp`. Design: `docs/superpowers/specs/2026-11-09-portunus-fleet-design.md`.
 
+### Remote runner links (TLS)
+
+Runners on other hosts — or other countries — listen on TCP with TLS instead of a Unix socket. The link
+carries the same frame protocol; TLS plus the runner token (and optionally a client certificate) replaces
+the SO_PEERCRED uid gate. This is the intended shape for geo-split fleets: runners needing overseas egress
+(Dropbox, Google) live outside the restricted network, China-service runners stay inside, and
+`preferred_regions` routes each server's children accordingly.
+
+Runner side:
+
+| Env | Meaning |
+| --- | --- |
+| `PORTUNUS_LISTEN=tls://0.0.0.0:443` | listen on TCP+TLS instead of the Unix socket |
+| `PORTUNUS_TLS_CERT` / `PORTUNUS_TLS_KEY` | server certificate (required for `tls://`) |
+| `PORTUNUS_TLS_CLIENT_CA` | optional: require gateway client certificates (mTLS) |
+
+Gateway side — list the link in `PORTUNUS_RUNNERS` with the URL form (token file after the last colon):
+
+```bash
+PORTUNUS_RUNNERS='cn=/run/portunus/runner.sock:/run/portunus/token,hk=tls://runner-hk.example.com:443:/etc/portunus/hk.token'
+```
+
+| Env | Meaning |
+| --- | --- |
+| `PORTUNUS_RUNNER_CA` | CA bundle that signs the runner's certificate (pin a private CA; default: system roots) |
+| `PORTUNUS_RUNNER_TLS_CERT` / `PORTUNUS_RUNNER_TLS_KEY` | optional client certificate for mTLS runners |
+| `PORTUNUS_RUNNER_TLS_INSECURE=1` | dev only: skip certificate verification |
+
+`tcp://host:port` (cleartext) exists for loopback/dev only and is refused off-loopback outside dev, per the
+fleet design. Ops notes for links crossing restrictive networks: terminate on :443 with a clean IP and an
+ordinary-looking certificate, keep one connection per site (the runner accepts a single client anyway),
+and raise `PORTUNUS_HEARTBEAT_S` on both ends if the path is lossy — reconnection reconciles slot state
+from the runner's inventory, so a dropped link never strands children. An all-remote fleet needs no local
+`portunus-runner` user (the uid gate applies to Unix links only).
+
 ## Tests
 
 ```bash

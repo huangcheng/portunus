@@ -1,16 +1,21 @@
 """Long-lived gateway -> runner client (spec §3, §6.1, §6.2).
 
-The runner listens on a Unix socket and the gateway is its sole client. This client:
+The runner listens on a Unix socket (local fleet) or a TCP/TLS listener (remote fleet
+sites; ``tls://host:port`` addresses — same frame protocol, TLS carriage per the fleet
+design) and the gateway is its sole client. This client:
 
-* connects (retrying with capped backoff until accepted -- the runner rejects a connection
-  while it is still closing the previous one), then sends ``hello`` carrying the process-wide
-  ``gateway_epoch`` and a fresh per-connection ``conn_id``;
+* connects (retrying with capped, jittered backoff until accepted -- the runner rejects a
+  connection while it is still closing the previous one), then sends ``hello`` carrying the
+  process-wide ``gateway_epoch`` and a fresh per-connection ``conn_id``;
 * stamps token + ``gateway_epoch`` + ``conn_id`` on every request;
 * heartbeats every ``heartbeat_s`` and treats a missed heartbeat reply as a dead connection;
 * correlates replies by ``request_id`` and delivers async ``child_exited`` frames;
 * on loss of the connection fails every in-flight request with ``runner_unavailable`` and
   reconnects. ``conn_seq`` increments per established connection so callers can detect that
   work they started belongs to an older connection.
+
+Unix links additionally gate the peer by SO_PEERCRED uid (``expected_uid``); network links
+authenticate with the TLS handshake (plus optional client certificate) and the in-band token.
 
 After each successful (re)connect ``on_connected`` runs (the slot manager requests inventory
 and reconciles there). If it raises, the connection is dropped and the cycle retries.
@@ -22,13 +27,18 @@ import asyncio
 import contextlib
 import hmac
 import inspect
+import ipaddress
 import logging
+import os
+import random
 import socket
+import ssl
 import struct
 import sys
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import urlparse
 
 from portunus_shared import (
     DEFAULTS,
@@ -44,6 +54,18 @@ log = logging.getLogger("portunus.gateway.runner")
 
 DEFAULT_SOCKET = "/run/portunus/runner.sock"
 DEFAULT_SITE_ID = "local"  # v1 runners advertise no fleet metadata: they are the one local site
+
+# Seconds a single frame write may take; a wedged link must hand over to reconnect.
+SEND_TIMEOUT_S: float = 5.0
+
+
+def is_network_address(address: str) -> bool:
+    """Whether a runner address names a TCP/TLS listener (``tls://`` / ``tcp://``) vs a Unix path.
+
+    Single source of truth for the transport decision, shared by ``RunnerClient`` and the
+    fleet link parser so the uid gate and the transport cannot drift apart.
+    """
+    return urlparse(address).scheme in ("tls", "tcp")
 
 
 def _fleet_from_hello(reply: dict) -> tuple[str, list[str], str | None, int | None]:
@@ -109,7 +131,11 @@ class _Conn:
         data = encode_frame(frame)  # FrameError before anything is written
         async with self._lock:
             self.writer.write(data)
-            await self.writer.drain()
+            # Bounded (runner-side mirror): a black-holed link would otherwise park the
+            # heartbeat's drain too, so the missed-heartbeat reconnect never fires.
+            # TimeoutError is an OSError: request() aborts and reports runner_unavailable.
+            async with asyncio.timeout(SEND_TIMEOUT_S):
+                await self.writer.drain()
 
     def abort(self) -> None:
         with contextlib.suppress(Exception):
@@ -123,28 +149,82 @@ class _HandshakeError(Exception):
 class RunnerClient:
     def __init__(
         self,
-        socket_path: str = DEFAULT_SOCKET,
+        address: str = DEFAULT_SOCKET,
         token: str = "",
         *,
         epoch: str | None = None,
         heartbeat_s: float = DEFAULTS.heartbeat_s,
         hello_timeout_s: float = 5.0,
+        connect_timeout_s: float = 10.0,
         retry_initial_s: float = 0.2,
         retry_max_s: float = 5.0,
         expected_uid: int | None = None,
+        dev: bool = False,
         on_connected: Callable[[], Awaitable[None]] | None = None,
         on_disconnected: Callable[[], Awaitable[None] | None] | None = None,
         on_child_exited: Callable[[str], Awaitable[None] | None] | None = None,
     ) -> None:
         if not token:
             raise ValueError("token required")
-        self.socket_path = socket_path
+        self.address = address
+        # ``tls://host:port`` / ``tcp://host:port`` name a network runner; anything else is a
+        # Unix socket path (v1 fleet). is_network_address() owns the transport decision.
+        self._dev = dev
+        self._net = is_network_address(address)
+        parsed = urlparse(address) if self._net else None
+        self._host = parsed.hostname if parsed else None
+        try:
+            self._port = parsed.port if parsed else None
+        except ValueError as e:  # non-numeric / out-of-range port
+            raise ValueError(f"runner address {address!r} must name a host and port") from e
+        self._scheme = parsed.scheme if parsed else None
+        if self._net and (not self._host or not self._port):
+            # `not self._port` also rejects 0: an ephemeral-port target can never be dialled.
+            raise ValueError(f"runner address {address!r} must name a host and port")
+        if self._net and expected_uid is not None:
+            # Fail fast: the handshake-time check retries forever and looks like "runner down".
+            raise ValueError("expected_uid applies to Unix runner links only")
+        cert = os.environ.get("PORTUNUS_RUNNER_TLS_CERT", "").strip()
+        key = os.environ.get("PORTUNUS_RUNNER_TLS_KEY", "").strip()
+        if self._scheme == "tls" and bool(cert) != bool(key):
+            # A half-configured client cert fails every handshake against an mTLS runner
+            # with only a generic SSLError; treat it as the config error it is.
+            raise ValueError(
+                "PORTUNUS_RUNNER_TLS_CERT and PORTUNUS_RUNNER_TLS_KEY must be set together"
+            )
+        # Build (and thereby validate) once: unreadable CA/cert/key files must fail at
+        # startup, not surface as a transient-looking connect retry loop.
+        try:
+            self._ssl_ctx = self._client_ssl_context()
+        except OSError as e:
+            raise ValueError(f"runner TLS configuration for {address!r}: {e}") from e
+        if self._scheme == "tcp" and not self._dev:
+            # Numeric loopback literals only: a *name* like localhost resolves at connect
+            # time, so a hosts/DNS override would silently send the token off-box in the
+            # clear. 127.0.0.2 and the v4-mapped [::ffff:127.0.0.1] stay allowed; the
+            # runner-side listener applies the same policy (portunus_runner.main).
+            try:
+                ip: Any = ipaddress.ip_address(self._host)
+            except ValueError:
+                ip = None
+            if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+                ip = ip.ipv4_mapped
+            loopback = ip is not None and ip.is_loopback
+            if not loopback:
+                # Cleartext carries the runner token in the clear; the fleet design allows
+                # it for loopback/dev only (see README: Remote runner links).
+                raise ValueError(
+                    f"runner address {address!r} is cleartext: loopback/dev only (use tls://)"
+                )
+        self._connect_failures = 0
+        self.socket_path = address  # legacy alias: the Unix path, or the URL for logs
         self._token = token
         self._token_b = token.encode()
         # Minted once per gateway process lifetime (spec §3): a restarted gateway is a new epoch.
         self.epoch = epoch or uuid.uuid4().hex
         self.heartbeat_s = heartbeat_s
         self.hello_timeout_s = hello_timeout_s
+        self.connect_timeout_s = connect_timeout_s
         self.retry_initial_s = retry_initial_s
         self.retry_max_s = retry_max_s
         self.expected_uid = expected_uid
@@ -254,13 +334,78 @@ class RunnerClient:
 
     # ---- connection loop ---------------------------------------------------------
 
+    def _client_ssl_context(self) -> ssl.SSLContext | None:
+        """Client TLS context for ``tls://`` links (env-configured so tests/operators can pin CAs).
+
+        ``PORTUNUS_RUNNER_CA`` trusts a private CA — and *only* that CA: links crossing
+        untrusted networks must not remain reachable through any public CA that happens to
+        sign the runner's hostname. ``PORTUNUS_RUNNER_TLS_CERT``/``_KEY`` present a client
+        certificate to runners requiring mTLS; ``PORTUNUS_RUNNER_TLS_INSECURE=1`` disables
+        verification for dev experiments only.
+        """
+        if self._scheme != "tls":
+            return None
+        cafile = os.environ.get("PORTUNUS_RUNNER_CA", "").strip() or None
+        if cafile:
+            # A pinned CA must be the only trust anchor; create_default_context() would
+            # load it on top of the system roots and silently weaken the pin.
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.load_verify_locations(cafile=cafile)
+        else:
+            ctx = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
+        cert = os.environ.get("PORTUNUS_RUNNER_TLS_CERT", "").strip()
+        key = os.environ.get("PORTUNUS_RUNNER_TLS_KEY", "").strip()
+        if cert and key:  # pair validated in __init__
+            ctx.load_cert_chain(cert, key)
+        if self._dev and os.environ.get("PORTUNUS_RUNNER_TLS_INSECURE") == "1":
+            # Dev escape hatch only: the runner token rides this link, an ungated switch
+            # would silently expose it to MITM in production.
+            log.warning("runner TLS verification disabled (dev only): %s", self.address)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        if self._net:
+            extra: dict[str, Any] = {}
+            if self._ssl_ctx is not None:
+                # Mirror the runner's bound: a silently-dropped remote link would otherwise
+                # stall the graceful SSL shutdown (and with it the reconnect loop) for the
+                # 30s default while waiting for a close_notify that never comes.
+                extra["ssl_shutdown_timeout"] = 2.0
+            return await asyncio.open_connection(
+                self._host,
+                self._port,
+                ssl=self._ssl_ctx,
+                server_hostname=self._host if self._scheme == "tls" else None,
+                **extra,
+            )
+        return await asyncio.open_unix_connection(self.socket_path)
+
     async def _supervise(self) -> None:
         delay = self.retry_initial_s
         while not self._closing:
             try:
-                reader, writer = await asyncio.open_unix_connection(self.socket_path)
-            except OSError:
-                await asyncio.sleep(delay)
+                # Bound the attempt: an ACL-dropped remote otherwise hangs in the kernel's
+                # connect timeout (minutes), during which this loop can neither retry nor
+                # observe _closing. TimeoutError is an OSError, handled like a refused link.
+                async with asyncio.timeout(self.connect_timeout_s):
+                    reader, writer = await self._open()
+                self._connect_failures = 0
+            except OSError as e:
+                # Warn on the first failure and then occasionally: a TLS misconfiguration is
+                # otherwise indistinguishable from a runner that is simply down.
+                self._connect_failures += 1
+                if self._connect_failures == 1 or self._connect_failures % 10 == 0:
+                    log.warning(
+                        "runner connect failed (attempt %d): %s: %s",
+                        self._connect_failures,
+                        self.address,
+                        e,
+                    )
+                # Jittered capped backoff: remote links cross lossy networks; a synchronized
+                # retry storm from many gateway processes would only make that worse.
+                await asyncio.sleep(delay * random.uniform(0.8, 1.2))
                 delay = min(delay * 2, self.retry_max_s)
                 continue
             try:
@@ -277,7 +422,7 @@ class RunnerClient:
                     writer.close()
                     await writer.wait_closed()
             if not self._closing:
-                await asyncio.sleep(delay)
+                await asyncio.sleep(delay * random.uniform(0.8, 1.2))
 
     def _token_ok(self, msg: dict) -> bool:
         tok = msg.get("token")
@@ -286,7 +431,7 @@ class RunnerClient:
     async def _handshake(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, conn_id: str
     ) -> dict:
-        if self.expected_uid is not None:
+        if self.expected_uid is not None:  # network links are rejected in __init__
             try:
                 uid = _peer_uid(writer.get_extra_info("socket"))
             except Exception as e:  # fail closed

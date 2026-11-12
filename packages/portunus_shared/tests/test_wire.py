@@ -7,6 +7,7 @@ from portunus_shared.errors import PortunusError
 from portunus_shared.wire import (
     MAX_FRAME_BODY,
     OPS,
+    skill_exec,
     WIRE_VERSION,
     FrameError,
     cancel,
@@ -160,6 +161,7 @@ def test_helpers_build_versioned_messages():
         "cancel": cancel(**common, target_request_id="r0"),
         "heartbeat": heartbeat(**common),
         "child_exited": child_exited(**common, child_id="c1", exit_code=0),
+        "skill_exec": skill_exec(**common, child_id="c1", payload={"argv": ["ls"]}),
     }
     assert set(msgs) == OPS
     for op, m in msgs.items():

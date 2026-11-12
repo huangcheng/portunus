@@ -66,6 +66,13 @@ GAP_FACTOR = 3
 # v1 runners (and unconfigured v2 runners) belong to this single placeholder site/region.
 DEFAULT_SITE_ID = "local"
 
+# Seconds an unauthenticated network connection may hold the sole-client slot
+# (network links only; Unix peers are gated by SO_PEERCRED before this matters).
+HELLO_DEADLINE_S = 5.0
+
+# Seconds a single reply write may take; a stalled peer must not wedge the slot holder.
+SEND_TIMEOUT_S = 5.0
+
 # Platform-owned skill CLI auth (device_qr / oauth_link). Paths under these roots.
 _SKILL_ROOT_PREFIX = Path("/var/lib/portunus/skills").resolve()
 _STATE_ROOT_PREFIX = Path("/var/lib/portunus/skill-state").resolve()
@@ -118,13 +125,23 @@ class Session:
     closed: bool = False
     _send_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
+    def abort(self) -> None:
+        """Hard-close the transport so the session's blocked reader wakes immediately."""
+        with contextlib.suppress(Exception):
+            self.writer.transport.abort()
+
     async def send(self, frame: dict) -> None:
         if self.closed:
             return
         try:
             async with self._send_lock:
                 self.writer.write(encode_frame(frame))
-                await self.writer.drain()
+                # Bounded: a peer that advertises a tiny window and never reads would
+                # otherwise park drain() forever while its handler holds the sole slot.
+                async with asyncio.timeout(SEND_TIMEOUT_S):
+                    await self.writer.drain()
+        except TimeoutError:
+            self.abort()  # cannot drain: treat like a broken link so the slot is released
         except (ConnectionError, OSError):
             pass  # read loop observes the broken connection
 
@@ -146,6 +163,7 @@ class Runner:
         regions: Sequence[str] = (DEFAULT_SITE_ID,),
         egress_class: str | None = None,
         capacity: int | None = None,
+        peer_mode: str = "unix",
     ) -> None:
         if not token:
             raise ValueError("token required")
@@ -160,10 +178,18 @@ class Runner:
             raise ValueError("capacity must be a non-negative integer")
         # Fleet metadata advertised on the hello reply (soft region affinity; informational).
         self.site_id = site_id.strip()
+        # unix (SO_PEERCRED uid gate) vs tcp (TLS handshake + in-band token gate).
+        self.peer_mode = peer_mode
         self.regions = regions
         self.egress_class = egress_class or None
         self.capacity = capacity
-        if not dev and expected_uid is None:
+        if peer_mode not in ("unix", "tcp"):
+            # This flag selects the peer-credential gate; an unrecognized value must fail
+            # closed rather than silently disabling SO_PEERCRED on a Unix listener.
+            raise ValueError(f"peer_mode must be 'unix' or 'tcp' (got {peer_mode!r})")
+        if peer_mode == "unix" and not dev and expected_uid is None:
+            # Network peers authenticate with the TLS handshake + in-band token instead;
+            # a remote runner host needs no local gateway user.
             raise ValueError("expected_uid required outside dev mode")
         self._token = token
         self._token_b = token.encode()
@@ -223,6 +249,11 @@ class Runner:
     # ---- connection handling -----------------------------------------------------
 
     def _peer_ok(self, writer: asyncio.StreamWriter) -> bool:
+        if self.peer_mode != "unix":
+            # Network link: there is no SO_PEERCRED. Authentication is the TLS handshake
+            # (client certs too when PORTUNUS_TLS_CLIENT_CA is set) plus the in-band
+            # hello token, exactly as over the Unix socket.
+            return True
         if self.dev:
             return True  # dev: skip uid check only; token is still required
         try:
@@ -235,32 +266,59 @@ class Runner:
     async def handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        if self._session is not None or self._closing:
-            await _close_writer(writer)  # sole client: reject concurrent connection
+        if self._closing:
+            await _close_writer(writer)
             return
+        if not self._peer_ok(writer):
+            await _close_writer(writer)
+            return
+        if self._session is not None:
+            cur = self._session
+            if self.peer_mode == "unix" or cur.authenticated:
+                # Sole client (Unix: the uid gate already proved the incumbent's peer).
+                await _close_writer(writer)
+                return
+            # Unauthenticated incumbent (network link): evict it. A legitimate gateway is
+            # mid-hello for milliseconds, and _do_hello's sess.closed guards make eviction
+            # safe; an attacker holding the slot with junk frames (or a stalled drain) is
+            # exactly what must not lock the real gateway out. _peer_ok ran first, so only
+            # a credentialed peer (or TLS passer) can evict.
+            log.warning("evicting unauthenticated session for a new peer (network link)")
+            cur.closed = True
+            cur.abort()
         sess = Session(reader, writer, last_heartbeat=asyncio.get_running_loop().time())
         self._session = sess
         try:
-            if self._peer_ok(writer):
-                await self._serve(sess)
+            await self._serve(sess)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("session error")
         finally:
             sess.closed = True
-            await self._cancel_probes()  # probe children never outlive their session
+            if self._session is sess:
+                # Probe children never outlive their session — but an evicted (silent)
+                # incumbent owns nothing; only the slot owner may touch global task sets.
+                await self._cancel_probes()
             await _close_writer(writer)  # fully closed before the slot is released
-            if sess.authenticated:
-                self._arm_grace()
-            self._session = None
+            if self._session is sess:
+                # Arm grace only for the session that still owns the slot: an evicted
+                # pre-auth session could otherwise arm the timer under the successor.
+                if sess.authenticated:
+                    self._arm_grace()
+                self._session = None
 
     async def _serve(self, sess: Session) -> None:
         loop = asyncio.get_running_loop()
         while True:
             remaining = sess.last_heartbeat + self.gap_s - loop.time()
+            if self.peer_mode != "unix" and not sess.authenticated:
+                # Network link: until a *valid* hello authenticates, the connection may not
+                # occupy the sole-client slot for the whole heartbeat gap. frames_read is
+                # no guard here — it counts pre-token frames too (slot-starvation DoS).
+                remaining = min(remaining, HELLO_DEADLINE_S)
             if remaining <= 0:
-                return  # heartbeat gap
+                return  # heartbeat gap (or hello deadline on a network link)
             try:
                 msg = await asyncio.wait_for(read_frame(sess.reader), remaining)
             except (TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
@@ -323,8 +381,15 @@ class Runner:
         if not (isinstance(epoch, str) and epoch and isinstance(conn_id, str) and conn_id):
             await self._error(sess, msg, "unsupported", "hello needs gateway_epoch and conn_id")
             return False
+        # Safety nets, not reachable today: eviction only targets frame-less sessions, and
+        # _do_hello runs after a frame was read. If the eviction rule ever broadens, a
+        # supplanted session must still not touch runner state (disarm/reap/epoch).
+        if sess.closed:
+            return False
         await self._disarm_grace()
         async with self._reap_lock:
+            if sess.closed:
+                return False
             if epoch != self._epoch:
                 # New epoch (or first ever): kill + reap to empty before replying.
                 await self.children.kill_all_and_reap()

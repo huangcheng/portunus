@@ -24,6 +24,7 @@ import pwd
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -37,7 +38,7 @@ from .omni import Omni, ServerStateCache
 from .operator_auth import INSECURE_COOKIE_ENV, OperatorAuth
 from .registry import Registry
 from .remote import RemoteProxy
-from .runner_client import RunnerClient
+from .runner_client import RunnerClient, is_network_address
 from .runner_pool import RunnerPool
 from . import __version__ as gateway_version
 from .slots import SlotManager
@@ -82,10 +83,13 @@ def load_runner_token(*, dev: bool) -> str:
 
 
 def parse_runner_links(raw: str) -> list[tuple[str | None, str, str]]:
-    """Parse ``PORTUNUS_RUNNERS``: comma-separated ``[site=]socket_path:token_file`` entries.
+    """Parse ``PORTUNUS_RUNNERS``: comma-separated ``[site=]address:token_file`` entries.
 
-    Returns ``(pinned_site | None, socket_path, token_file)``. Without ``site=`` the link's site
-    key is whatever the runner advertises on hello. Paths may not contain ``,`` or ``:``.
+    ``address`` is a Unix socket path or a network URL (``tls://host:port`` / ``tcp://host:port``
+    for remote fleet sites; the URL is separated from the token file at the *last* colon since
+    URLs contain colons of their own). Returns ``(pinned_site | None, address, token_file)``.
+    Without ``site=`` the link's site key is whatever the runner advertises on hello. Paths may
+    not contain ``,`` or ``:``.
     """
     out: list[tuple[str | None, str, str]] = []
     for part in (p.strip() for p in raw.split(",")):
@@ -97,6 +101,33 @@ def parse_runner_links(raw: str) -> list[tuple[str | None, str, str]]:
             site = site.strip()
             if not site:
                 raise ConfigError("PORTUNUS_RUNNERS: empty site name before '='")
+            part = part.strip()  # tolerate whitespace after `=` for network URLs too
+        try:
+            network_link = is_network_address(part)
+        except ValueError:  # urlparse: malformed bracketed host, e.g. tls://[::1:9000:/tok
+            raise ConfigError(
+                "PORTUNUS_RUNNERS: malformed runner address (invalid IPv6 host?)"
+            ) from None
+        if network_link:
+            # token_file is everything after the LAST colon, so it cannot itself contain one.
+            addr, sep, token_file = part.rpartition(":")
+            try:
+                parsed = urlparse(addr)
+                ok = bool(
+                    sep
+                    and token_file.strip()
+                    and parsed.hostname
+                    and parsed.port  # truthy: present and non-zero (>65535 already raises)
+                )
+            except ValueError:  # urlparse: port present but not numeric
+                ok = False
+            if not ok:
+                raise ConfigError(
+                    "PORTUNUS_RUNNERS network links must look like "
+                    "[site=]tls://host:port:token_file (or tcp://host:port)"
+                )
+            out.append((site, addr.strip(), token_file.strip()))
+            continue
         sock, sep, token_file = part.partition(":")
         if not sep or not sock.strip() or not token_file.strip() or ":" in token_file:
             raise ConfigError("PORTUNUS_RUNNERS entries must look like [site=]socket_path:token_file")
@@ -120,28 +151,54 @@ def build_runner_pool(*, dev: bool, heartbeat_s: float) -> tuple[RunnerPool, Run
     """Pool from ``PORTUNUS_RUNNERS`` (fleet) or the single ``PORTUNUS_SOCKET`` (default).
 
     Returns the pool and its first client (kept as ``app.state.runner`` for v1 callers).
+    The SO_PEERCRED uid gate applies to Unix links only — network (``tls://``) links
+    authenticate with TLS + the runner token, so an all-remote fleet needs no local
+    ``portunus-runner`` user.
     """
-    uid = expected_runner_uid(dev=dev)
     raw = os.environ.get("PORTUNUS_RUNNERS", "").strip()
     pool = RunnerPool()
     if not raw:
-        client = RunnerClient(
-            os.environ.get("PORTUNUS_SOCKET", DEFAULT_SOCKET),
-            load_runner_token(dev=dev),
-            heartbeat_s=heartbeat_s,
-            expected_uid=uid,
-        )
+        sock = os.environ.get("PORTUNUS_SOCKET", DEFAULT_SOCKET)
+        try:
+            sock_is_network = is_network_address(sock)
+        except ValueError:  # urlparse: malformed bracketed host
+            raise ConfigError("PORTUNUS_SOCKET: malformed runner address") from None
+        if sock_is_network:
+            # The single-link default is a Unix path by contract; a remote link belongs in
+            # PORTUNUS_RUNNERS where the transport-aware uid gate and site pinning apply.
+            raise ConfigError(
+                "PORTUNUS_SOCKET is a Unix socket path; list remote runners in PORTUNUS_RUNNERS"
+            )
+        uid = expected_runner_uid(dev=dev)  # unix-only link; computed pre-try for a clean
+        # blame when PORTUNUS_RUNNER_UID itself is malformed
+        try:
+            client = RunnerClient(
+                sock,
+                load_runner_token(dev=dev),
+                heartbeat_s=heartbeat_s,
+                expected_uid=uid,
+                dev=dev,
+            )
+        except ValueError as e:
+            raise ConfigError(f"PORTUNUS_SOCKET: {e}") from e
         pool.add(client)
         return pool, client
+    links = parse_runner_links(raw)
+    any_unix = any(not is_network_address(addr) for _, addr, _ in links)
+    uid = expected_runner_uid(dev=dev) if any_unix else None
     first: RunnerClient | None = None
-    for site, sock, token_file in parse_runner_links(raw):
-        client = RunnerClient(
-            sock, _read_token_file(token_file), heartbeat_s=heartbeat_s, expected_uid=uid
-        )
+    for site, address, token_file in links:
         try:
+            client = RunnerClient(
+                address,
+                _read_token_file(token_file),
+                heartbeat_s=heartbeat_s,
+                expected_uid=None if is_network_address(address) else uid,
+                dev=dev,
+            )
             pool.add(client, site_id=site)
         except ValueError as e:
-            raise ConfigError(f"PORTUNUS_RUNNERS: {e}") from None
+            raise ConfigError(f"PORTUNUS_RUNNERS: {e}") from e
         first = first or client
     assert first is not None
     return pool, first
