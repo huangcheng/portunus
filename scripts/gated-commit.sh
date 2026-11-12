@@ -65,11 +65,20 @@ if ! ocr review --audience agent >"$OUT" 2>&1; then
   exit 1
 fi
 # A *partial* review (files it could not read) is not a clean review: ocr exits 0 and
-# reports 0 findings while having skipped content. Refuse on its error markers.
-if grep -qE '^\[ocr\][[:space:]]+✘|^\[ocr\].*failed:' "$OUT"; then
-  echo "gated-commit: REFUSING — ocr review reported internal errors (incomplete review):" >&2
-  grep -E '^\[ocr\][[:space:]]+✘|^\[ocr\].*failed:' "$OUT" >&2 || true
-  exit 1
+# reports 0 findings while having skipped content. Refuse on its error markers unless
+# --allow explicitly records that the ocr malfunction itself is accepted (AGENTS.md:
+# say so, never silently skip) — the marker lines are echoed into the commit body path.
+OCR_ERRS="$(grep -E '^\[ocr\][[:space:]]+✘|^\[ocr\].*failed:' "$OUT" || true)"
+if [[ -n "$OCR_ERRS" ]]; then
+  if [[ -z "${ALLOW_SET:-}" ]] || ! grep -qi "ocr internal error" <<<"$ALLOW"; then
+    echo "gated-commit: REFUSING — ocr review reported internal errors (incomplete review):" >&2
+    printf "%s\n" "$OCR_ERRS" >&2
+    echo 'To record an accepted ocr malfunction (AGENTS.md: say so, never silently skip):' >&2
+    echo '  --allow "ocr internal error: <the lines above>"' >&2
+    exit 1
+  fi
+  echo "== ocr internal errors accepted (recorded below) =="
+  printf "%s\n" "$OCR_ERRS"
 fi
 
 # ocr may print intermediate "Review (partially) complete" lines; the FINAL summary is last.
@@ -109,7 +118,14 @@ if [[ "$COUNT" != "0" ]]; then
   fi
   echo
   echo "Committing with recorded override: $ALLOW"
-  git commit "${ARGS[@]}" -m "ocr-gate: $COUNT finding(s) accepted — $ALLOW"
+  TRAILER="ocr-gate: $COUNT finding(s) accepted — $ALLOW"
+  if [[ -n "$OCR_ERRS" ]]; then
+    TRAILER="$TRAILER
+
+ocr internal error lines (accepted):
+$OCR_ERRS"
+  fi
+  git commit "${ARGS[@]}" -m "$TRAILER"
 else
   git commit "${ARGS[@]}"
 fi

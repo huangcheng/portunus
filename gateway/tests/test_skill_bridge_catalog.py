@@ -78,3 +78,60 @@ def test_argv_skill_bridge_rejects_other_module(monkeypatch):
             trusted_path=["/usr/bin"],
             binary_allowlist=[],
         )
+
+
+@pytest.mark.anyio
+async def test_bearer_env_skill_app_not_flagged_auth_required(db, pepper_file):
+    """http_rpc apps (bearer_env) have no login session and must not show auth_required.
+
+    Regression: ``requires_skill_session`` used to be true for every skill_bridge slug,
+    so WeRead-style API-key apps were permanently ``auth_required`` despite working.
+    """
+    import os
+    import uuid as _uuid
+
+    from portunus_gateway.db.models import CatalogApp, Server, Tool
+    from portunus_gateway.db.session import async_session
+    from portunus_gateway.registry import Registry
+    from portunus_gateway.runner_pool import RunnerPool
+    from portunus_gateway.vault import Vault
+
+    async with async_session() as s:
+        s.add(
+            CatalogApp(
+                id=_uuid.uuid4(),
+                slug="bearerdrive",
+                label="BearerDrive",
+                name="BearerDrive",
+                description="API-key skill app",
+                connection="skill_bridge",
+                spec={
+                    "manifest": {"auth": {"type": "bearer_env", "env": "K", "header": "Authorization"}},
+                    "secrets": [{"name": "K", "label": "Key", "secret": True}],
+                    "env_defaults": {},
+                },
+                sort_order=1,
+            )
+        )
+        sid = _uuid.uuid4()
+        srv = Server(
+            id=sid, name="BearerDrive", slug="bearerdrive", kind="stdio", enabled=True,
+            command="python", args=["-c", "pass"],
+        )
+        s.add(srv)
+        s.add(Tool(server_id=sid, upstream_name="t", schema={}, schema_hash="h"))
+        await s.commit()
+
+    reg = Registry(
+        async_session,
+        Vault({1: os.urandom(32)}),
+        RunnerPool([]),
+        trusted_path=["/usr/bin"],
+        binary_allowlist=[],
+    )
+    async with async_session() as s:
+        server = (await s.execute(__import__("sqlalchemy").select(Server).where(Server.slug == "bearerdrive"))).scalar_one()
+    health = await reg.health_by_server_ids([server])
+    # No SKILL_SESSION vault entry, no login ever: still not auth_required — the app's
+    # auth model does not have a session to require.
+    assert health[sid]["status"] != "auth_required", health[sid]

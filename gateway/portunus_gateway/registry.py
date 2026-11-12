@@ -317,12 +317,26 @@ class Registry:
     # ---- health observations -----------------------------------------------------
 
     async def _skill_bridge_slugs(self, s: AsyncSession) -> set[str]:
+        """skill_bridge apps whose auth is a *login session* (flows that write SKILL_SESSION).
+
+        Env-backed apps (``bearer_env``/``header_env``, WeRead-style http_rpc) authenticate
+        every request from the vault and have no session at all — they must not be
+        flagged ``auth_required`` for lacking one. Absent/unknown auth blocks stay
+        session-requiring (the conservative pre-existing behavior for cli/oauth_link).
+        """
         rows = (
             await s.execute(
-                select(CatalogApp.slug).where(CatalogApp.connection == "skill_bridge")
+                select(CatalogApp.slug, CatalogApp.spec).where(
+                    CatalogApp.connection == "skill_bridge"
+                )
             )
-        ).scalars()
-        return {str(slug) for slug in rows}
+        ).all()
+        out: set[str] = set()
+        for slug, spec in rows:
+            auth = ((spec or {}).get("manifest") or {}).get("auth") or {}
+            if auth.get("type") not in ("bearer_env", "header_env"):
+                out.add(str(slug))
+        return out
 
     async def _enabled_tool_counts(
         self, s: AsyncSession, server_ids: list[uuid.UUID] | None = None

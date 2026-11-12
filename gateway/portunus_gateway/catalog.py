@@ -228,16 +228,26 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "slug": "pikpak",
         "label": "PikPak",
         "name": "PikPak",
-        "description": "PikPak cloud drive via the official remote MCP (PAT as Bearer).",
-        "connection": "http",
+        "description": "PikPak cloud drive via the official remote MCP (OAuth 2.1 + PKCE).",
+        "connection": "oauth",
         "popular": True,
         "categories": ["Storage"],
-        "tags": ["pikpak", "drive", "mcp", "http"],
+        "tags": ["pikpak", "drive", "mcp", "oauth"],
         "sort_order": 78,
         "spec": {
             "url": "https://pikpak.ai/mcp",
-            "auth_header": "Authorization",
-            "token_prefix": "Bearer ",
+            "authorize_url": "https://mypikpak.com/drive/auth-center",
+            "token_url": "https://user.mypikpak.com/v1/auth/token",
+            # Exact RFC 9207 iss validation (the AS advertises its issuer identifier).
+            "issuer": "https://user.mypikpak.com",
+            "resource": "https://pikpak.ai/mcp",
+            "scopes": [
+                "files:read", "files:write", "files:manage", "files:purge",
+                "cloud_download", "share", "account",
+            ],
+            # Public client; DCR is available when no client_id is configured.
+            "registration_endpoint": "https://user.mypikpak.com/v1/clients-registrations/openid-connect",
+            "token_endpoint_auth_method": "none",
         },
     },
 ]
