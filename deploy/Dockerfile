@@ -40,6 +40,9 @@ RUN pip install --no-cache-dir ${PIP_INDEX:+-i ${PIP_INDEX}} "uv==0.9.30" \
 ARG WITH_POSTGRES=0
 WORKDIR /app
 COPY packages/portunus_shared packages/portunus_shared
+# gateway/uv.lock pins portunus_skill_bridge as a path dependency; the COPY was
+# missing after fee5547, breaking clean-checkout builds (prod had a local hotfix).
+COPY packages/portunus_skill_bridge packages/portunus_skill_bridge
 COPY runner runner
 COPY gateway gateway
 # Re-declare so this layer sees the index (ARG scope is per-stage otherwise).
