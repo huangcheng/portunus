@@ -127,5 +127,12 @@ $OCR_ERRS"
   fi
   git commit "${ARGS[@]}" -m "$TRAILER"
 else
-  git commit "${ARGS[@]}"
+  if [[ -n "$OCR_ERRS" ]]; then
+    git commit "${ARGS[@]}" \
+      -m "ocr-gate: accepted ocr malfunction ($COUNT findings) — $ALLOW" \
+      -m "ocr internal error lines (accepted):
+$OCR_ERRS"
+  else
+    git commit "${ARGS[@]}"
+  fi
 fi
