@@ -155,9 +155,14 @@ class RunnerPool:
         preferred_regions: Iterable[str] = (),
         *,
         loads: Mapping[str, int] | None = None,
+        exclude_sites: frozenset[str] = frozenset(),
     ) -> ScheduleDecision | None:
         """Soft-affinity pick over live runners; ``None`` means no runner (-> runner_unavailable)."""
-        return pick_runner(self.connected(loads), preferred_regions=preferred_regions)
+        return pick_runner(
+            self.connected(loads),
+            preferred_regions=preferred_regions,
+            exclude_sites=exclude_sites,
+        )
 
     # ---- routing -----------------------------------------------------------------
 

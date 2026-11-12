@@ -24,7 +24,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 # oauth_link browser_capture jobs live in runner memory — status polls must hit the same site.
@@ -32,11 +32,11 @@ _OAUTH_JOB_SITES: dict[str, tuple[str, float]] = {}  # job_id -> (site_id, expir
 _OAUTH_JOB_SITE_TTL_S = 300.0
 
 from portunus_shared import ALLOWED_PORTUNUS_ENV, DEFAULTS, PortunusError, validate_stdio_command
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import case, func, literal, or_, select, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .db.models import AuditEvent, CatalogApp, Server, Tool, VaultEntry
+from .db.models import AuditEvent, CatalogApp, Server, SiteHealth, Tool, VaultEntry
 from .health import (
     HealthFacts,
     health_fields,
@@ -55,6 +55,21 @@ from .runner_pool import RunnerPool
 from .vault import Vault, VaultError
 
 log = logging.getLogger("portunus.gateway.registry")
+
+# Failure codes that implicate the runner site's network path (not the server itself):
+# a request timeout on a live child, or the gateway<->runner link failing, say "this
+# site cannot reach the upstream right now" — the signal auto-failover keys on
+# (GFW-class partitions included). ``spawn_failed`` is excluded: it fires before the
+# hosting site is known. ``runner_unavailable`` with no site attached is a no-op.
+NETWORK_FAILURE_CODES = frozenset({"upstream_timeout", "runner_unavailable"})
+
+
+class SiteHealthPolicy:
+    """When a (server, site) pair is considered unhealthy and how long the mark lasts."""
+
+    threshold: int = 2  # consecutive network-class failures before the scheduler avoids it
+    ttl_s: float = 15 * 60  # mark expires even without a success (networks heal)
+
 
 MAX_ENV_ENTRIES = 256  # mirrors the runner's bound
 MAX_ENV_BYTES = 128 * 1024
@@ -377,13 +392,25 @@ class Registry:
         is_probe: bool = False,
         message: str = "",
         caller_shortened_timeout: bool = False,
+        site_id: str | None = None,
     ) -> None:
         """Persist a call/probe observation. ``code is None`` means success.
 
-        Best-effort: DB failures are logged and swallowed so bookkeeping never
-        masks the invoke/probe outcome the caller already has.
+        ``site_id`` (the runner site that hosted the child) also feeds the learned
+        per-site health used for auto placement/failover. Best-effort: DB failures
+        are logged and swallowed so bookkeeping never masks the invoke/probe outcome.
         """
         try:
+            if code is None or should_record_failure(
+                code, message=message, caller_shortened_timeout=caller_shortened_timeout
+            ):
+                # Same suppression gate as the server-level write (a caller-chosen tiny
+                # timeout must not mark a healthy site), in its own try so a site-health
+                # failure can never drop the server-level update below.
+                try:
+                    await self._record_site_outcome(server_id, code, site_id)
+                except (SQLAlchemyError, OSError):  # storage/IO only — bugs must surface
+                    log.exception("site health update failed for %s", server_id)
             await self._record_outcome(
                 server_id,
                 code,
@@ -450,6 +477,138 @@ class Registry:
             server.last_error_code = code
             server.last_error_at = now
             await s.commit()
+
+    async def _record_site_outcome(
+        self, server_id: uuid.UUID, code: str | None, site_id: str | None
+    ) -> None:
+        """Update the learned (server, site) health row.
+
+        Only network-class failures and successes touch the row: other codes say nothing
+        about the site's path (and must not refresh a mark's TTL window). The failure
+        increment is one atomic UPDATE whose CASE rebases the streak to 1 when the
+        previous error is older than the TTL — concurrent invokes cannot lose counts,
+        and an expired mark needs a fresh ``threshold`` run, not one lucky timeout.
+        Success writes are throttled like the server-level ``last_ok_at``.
+        """
+        if not site_id:
+            return
+        if code is not None and code not in NETWORK_FAILURE_CODES:
+            return
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=SiteHealthPolicy.ttl_s)
+        async with self._sf() as s:
+            if code is None:
+                row = await s.get(SiteHealth, (server_id, site_id))
+                if row is None:
+                    try:
+                        s.add(SiteHealth(server_id=server_id, site_id=site_id, last_ok_at=now))
+                        await s.commit()
+                        return
+                    except IntegrityError:
+                        await s.rollback()  # concurrent first insert: re-fetch, reset below
+                        row = await s.get(SiteHealth, (server_id, site_id))
+                healthy_recent = (
+                    row.consecutive_failures == 0
+                    and row.last_ok_at is not None
+                    and should_throttle_success(
+                        status_now="ok",
+                        last_ok_at=row.last_ok_at,  # should_throttle_success normalizes naive datetimes
+                        now=now,
+                    )
+                )
+                if not healthy_recent:
+                    row.last_ok_at = now
+                    row.consecutive_failures = 0
+                    await s.commit()
+                return
+            # Network-class failure: increment in the database, rebase on a stale mark.
+            res = await s.execute(
+                update(SiteHealth)
+                .where(SiteHealth.server_id == server_id, SiteHealth.site_id == site_id)
+                .values(
+                    last_error_code=code,
+                    last_error_at=now,
+                    consecutive_failures=case(
+                        (
+                            or_(
+                                SiteHealth.last_error_at.is_(None),
+                                SiteHealth.last_error_at < cutoff,
+                            ),
+                            literal(1),
+                        ),
+                        else_=SiteHealth.consecutive_failures + 1,
+                    ),
+                )
+            )
+            if res.rowcount == 0:
+                try:
+                    s.add(
+                        SiteHealth(
+                            server_id=server_id,
+                            site_id=site_id,
+                            last_error_code=code,
+                            last_error_at=now,
+                            consecutive_failures=1,
+                        )
+                    )
+                    await s.commit()
+                except IntegrityError:
+                    await s.rollback()
+                    # Lost a first-insert race: replay the same TTL-rebasing increment.
+                    await s.execute(
+                        update(SiteHealth)
+                        .where(
+                            SiteHealth.server_id == server_id,
+                            SiteHealth.site_id == site_id,
+                        )
+                        .values(
+                            last_error_code=code,
+                            last_error_at=now,
+                            consecutive_failures=case(
+                                (
+                                    or_(
+                                        SiteHealth.last_error_at.is_(None),
+                                        SiteHealth.last_error_at < cutoff,
+                                    ),
+                                    literal(1),
+                                ),
+                                else_=SiteHealth.consecutive_failures + 1,
+                            ),
+                        )
+                    )
+                    await s.commit()
+            else:
+                await s.commit()
+
+    async def unhealthy_sites(
+        self, server_id: uuid.UUID, *, now: datetime | None = None
+    ) -> set[str]:
+        """Runner sites the scheduler should avoid for this server (learned, TTL-bounded)."""
+        if now is None:
+            now = datetime.now(timezone.utc)
+        elif now.tzinfo is None:  # callers may inject naive UTC (tests); normalize
+            now = now.replace(tzinfo=timezone.utc)
+        async with self._sf() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(SiteHealth).where(
+                            SiteHealth.server_id == server_id,
+                            SiteHealth.consecutive_failures >= SiteHealthPolicy.threshold,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        out: set[str] = set()
+        for row in rows:
+            err_at = row.last_error_at
+            if err_at is not None and err_at.tzinfo is None:
+                err_at = err_at.replace(tzinfo=timezone.utc)
+            if err_at is not None and (now - err_at).total_seconds() <= SiteHealthPolicy.ttl_s:
+                out.add(row.site_id)
+        return out
 
     async def health_by_server_ids(
         self, servers: list[Server]

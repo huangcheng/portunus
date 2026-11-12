@@ -1030,7 +1030,13 @@ class Omni:
                     e.code,
                     message=e.message,
                     caller_shortened_timeout=caller_shortened_timeout,
+                    # Cold-start failures raise before the dispatch bag knows the site;
+                    # SlotManager attaches it to the error (slot.site_id).
+                    site_id=self._invoke_site() or getattr(e, "site_id", None),
                 )
+                # Failover needs no extra push here: upstream_timeout already retires the
+                # pair in _run_invoke and link loss reconciles via reconnect; the learned
+                # streak recorded above is what moves the *next* placement.
                 raise
             code = _error_code_from_result(result)
             await self.registry.record_outcome(
@@ -1038,6 +1044,7 @@ class Omni:
                 code,
                 message="",
                 caller_shortened_timeout=caller_shortened_timeout,
+                site_id=self._invoke_site(),
             )
             return result
         finally:
@@ -1046,6 +1053,17 @@ class Omni:
                 self._inflight[key_id] = left
             else:
                 self._inflight.pop(key_id, None)
+
+    @staticmethod
+    def _invoke_site() -> str | None:
+        """The hosting runner site for the in-flight invoke, read from the dispatch bag.
+
+        Read fresh (never a snapshot taken before the run): the bag dict is mutated in
+        place by ``_note_invoke`` once the slot reservation names the site.
+        """
+        bag = _invoke_attrs.get()
+        site = bag.get("site_id") if isinstance(bag, dict) else None
+        return site if isinstance(site, str) else None
 
     def _note_invoke(self, **fields: Any) -> None:
         bag = _invoke_attrs.get()

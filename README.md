@@ -152,9 +152,13 @@ By default one gateway talks to one runner. Several runners can be pooled on one
 sockets and token files in the gateway's `PORTUNUS_RUNNERS`
 (`site-a=/run/a.sock:/path/a.token,site-b=/run/b.sock:/path/b.token`; the `site=` prefix is optional).
 
-A server's `preferred_regions` is a soft preference: new children go to a live runner in a preferred region
-when there is one, otherwise to any live runner (a `preferred_miss`, logged and audited). A child stays on the
-site that started it, so if that site dies its invokes return `runner_unavailable` instead of silently moving.
+A server's `preferred_regions` is a soft preference honored only among *healthy* sites — it degrades
+to a hint, never a pin into a partition. On top of it the gateway learns per-(server, site) network
+health: consecutive network-class failures (`upstream_timeout`, `spawn_failed`) on one runner site
+mark that (server, site) pair, the scheduler stops placing new children there (they cold-start on
+another site), and the stuck pair is retired at the threshold. Any success clears the mark, and marks
+expire after 15 minutes — a GFW-shaped partition fails over without operator action. A child stays on
+the site that started it until then, so a dead link surfaces as `runner_unavailable`, not silent moves.
 `scripts/e2e_two_runners.sh` exercises this locally (two runners, kill one, check fallback); it uses only
 temp sockets/secrets under `/tmp`. Design: `docs/superpowers/specs/2026-11-09-portunus-fleet-design.md`.
 

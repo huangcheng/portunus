@@ -27,8 +27,9 @@ import asyncio
 import contextlib
 import enum
 import logging
+import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Protocol
 
@@ -112,6 +113,7 @@ class SlotManager:
         stop_retry_s: float = 1.0,
         server_enabled: Callable[[uuid.UUID], bool] | None = None,
         vault_version: Callable[[uuid.UUID], int | None] | None = None,
+        unhealthy_sites: Callable[[uuid.UUID], Awaitable[Iterable[str]]] | None = None,
     ) -> None:
         self.client = client  # a RunnerClient or a RunnerPool; routing always goes via the pool
         self.pool = RunnerPool.ensure(client)
@@ -121,6 +123,10 @@ class SlotManager:
         self.start_ack_s = start_ack_s
         self.kill_ack_s = kill_ack_s
         self.stop_retry_s = stop_retry_s
+        # Learned per-(server, site) network health (registry): auto-failover feed.
+        self.unhealthy_sites = unhealthy_sites
+        self._exclusion_cache: dict[uuid.UUID, tuple[float, frozenset[str], bool]] = {}
+        self._exclusion_cache_s = 5.0
         self.server_enabled = server_enabled
         self.vault_version = vault_version
         self._slots: dict[str, Slot] = {}
@@ -163,6 +169,29 @@ class SlotManager:
     def site_of(self, child_id: str) -> str | None:
         slot = self._slots.get(child_id)
         return slot.site_id if slot is not None else None
+
+    async def _site_exclusions(self, server_id: uuid.UUID) -> tuple[frozenset[str], bool]:
+        """``(excluded_sites, every_live_site_marked)`` with a short in-memory cache.
+
+        The learned look-up is a DB round trip and ``reserve_and_start`` is the invoke
+        hot path (inside the per-pair lock), so answers are cached briefly — marks are
+        TTL-based anyway, and a few seconds of staleness cannot strand a child: the
+        failure that set the mark already retired the pair through its own error path.
+        """
+        now = time.monotonic()
+        hit = self._exclusion_cache.get(server_id)
+        if hit is not None and now - hit[0] < self._exclusion_cache_s:
+            return hit[1], hit[2]
+        excluded: frozenset[str] = frozenset()
+        if self.unhealthy_sites is not None:
+            try:
+                excluded = frozenset(await self.unhealthy_sites(server_id))
+            except Exception:  # noqa: BLE001 — placement must never fail on health lookups
+                log.exception("unhealthy_sites lookup failed; placing unfiltered")
+        live = {info.site_id for info in self.pool.connected()}
+        all_marked = bool(live) and live <= set(excluded)
+        self._exclusion_cache[server_id] = (now, excluded, all_marked)
+        return excluded, all_marked
 
     def _loads(self) -> dict[str, int]:
         loads: dict[str, int] = {}
@@ -276,17 +305,34 @@ class SlotManager:
         lock = self._pair_locks.setdefault(pair, asyncio.Lock())
         async with lock:
             self._admit(key_id, server_id)  # state may have changed while queued
+            excluded, all_marked = await self._site_exclusions(server_id)
             existing = self._by_pair.get(pair)
             if existing is not None:
                 if existing.state is SlotState.COMMITTED and not existing.pending_stop:
-                    if not self._vault_stale(existing):
+                    if existing.site_id in excluded and not all_marked:
+                        # Healthy-looking child on a site we learned is partitioned for
+                        # this server: retire it and re-place on the next invoke rather
+                        # than reusing into the same black hole. When every live site
+                        # is marked we keep reusing — the scheduler's "a partition
+                        # beats a hard refusal" fallback.
+                        self._mark_pending_stop(existing)
+                        raise PortunusError(
+                            "runner_unavailable",
+                            "child on a network-marked site; re-placing",
+                        )
+                    elif not self._vault_stale(existing):
                         return ReserveResult(existing.child_id, cold_start=False)
-                    self._mark_pending_stop(existing)
+                    else:
+                        self._mark_pending_stop(existing)
                 # Unresolved start or a child still being stopped: never double-spawn.
                 raise PortunusError(
                     "runner_unavailable", "previous child for this server/key still resolving"
                 )
-            decision = self.pool.pick(preferred_regions, loads=self._loads())
+            decision = self.pool.pick(
+                preferred_regions,
+                loads=self._loads(),
+                exclude_sites=frozenset() if all_marked else excluded,
+            )
             if decision is None:
                 raise PortunusError("runner_unavailable", "runner not connected")
             self._check_caps(key_id)  # reserve is synchronous with the check: no overshoot
@@ -311,7 +357,14 @@ class SlotManager:
                 slot.site_id,
                 slot.preferred_miss,
             )
-            child_id = await self._start(slot, argv, trailing, env)
+            try:
+                child_id = await self._start(slot, argv, trailing, env)
+            except PortunusError as e:
+                # Cold-start failures (start-ack timeout, link loss) must still name the
+                # hosting site so the learned health can mark it (see registry).
+                if getattr(e, "site_id", None) is None:
+                    e.site_id = slot.site_id  # type: ignore[attr-defined]
+                raise
             return ReserveResult(child_id, cold_start=True)
 
     async def _start(

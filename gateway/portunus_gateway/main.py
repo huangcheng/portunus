@@ -261,7 +261,15 @@ def create_gateway_app() -> FastAPI:
     # SlotManager/Omni get the same object injected so revokes/grants cannot diverge.
     store = authz.authz_store
     cache = ServerStateCache()
-    slots = SlotManager(pool, store, server_enabled=cache.enabled, vault_version=cache.vault_version)
+    # `registry` is bound a few lines below; the lambda resolves it at call time so
+    # placement always consults the learned (server, site) health (auto failover).
+    slots = SlotManager(
+        pool,
+        store,
+        server_enabled=cache.enabled,
+        vault_version=cache.vault_version,
+        unhealthy_sites=lambda sid: registry.unhealthy_sites(sid),
+    )
     slots.attach(pool)
     remote = RemoteProxy(async_session, vault)
     registry = Registry(

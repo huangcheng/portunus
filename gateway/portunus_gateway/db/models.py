@@ -244,3 +244,24 @@ class CatalogApp(Base):
     @validates("slug")
     def _casefold_slug(self, _key: str, value: str) -> str:
         return value.casefold()
+
+
+class SiteHealth(Base):
+    """Learned per-(server, runner-site) network health for auto placement/failover.
+
+    Fed from invoke/probe outcomes that name the hosting site. Consecutive network-class
+    failures at or above ``SiteHealthPolicy.threshold`` within the TTL make the scheduler
+    avoid the site for that server (new children land elsewhere); any success clears it.
+    ``preferred_regions`` remains an operator *hint* honored only among healthy sites.
+    """
+
+    __tablename__ = "site_health"
+
+    server_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("servers.id", ondelete="CASCADE"), primary_key=True
+    )
+    site_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
