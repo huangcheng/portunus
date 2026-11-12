@@ -228,22 +228,16 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "slug": "pikpak",
         "label": "PikPak",
         "name": "PikPak",
-        "description": "PikPak cloud drive via official CLI MCP (pikpak mcp --stdio + PAT).",
-        "connection": "stdio",
+        "description": "PikPak cloud drive via the official remote MCP (PAT as Bearer).",
+        "connection": "http",
         "popular": True,
         "categories": ["Storage"],
-        "tags": ["pikpak", "drive", "mcp", "stdio"],
+        "tags": ["pikpak", "drive", "mcp", "http"],
         "sort_order": 78,
         "spec": {
-            "command": "pikpak",
-            "args": ["mcp", "--stdio"],
-            "env": [
-                {"name": "PIKPAK_TOKEN", "label": "Personal Access Token", "secret": True},
-            ],
-            "env_defaults": {
-                "PIKPAK_DIR": "/var/lib/portunus/skill-state/pikpak",
-                "PIKPAK_NO_UPDATE_NOTIFIER": "1",
-            },
+            "url": "https://pikpak.ai/mcp",
+            "auth_header": "Authorization",
+            "token_prefix": "Bearer ",
         },
     },
 ]
