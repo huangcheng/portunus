@@ -18,6 +18,11 @@ Policy
   dropped for that and every later hop. A redirect from a non-loopback origin to loopback is
   refused even if the target is allowlisted.
 * Vault credentials (headers) are decrypted just-in-time and never appear in error messages.
+* Modern (2026-07-28) client duties: ``mcp-method`` / ``mcp-name`` / ``Mcp-Param-*`` routing
+  headers (non-ASCII values use the ``=?base64?...?=`` sentinel), ``x-mcp-header`` annotations
+  validated before a tool is stored or mirrored, and 4xx discover bodies inspected for the
+  modern error codes before any legacy ``initialize`` fallback — ``-32022`` follows the
+  server's advertised version list instead of guessing the peer's era.
 """
 
 from __future__ import annotations
@@ -31,11 +36,23 @@ import os
 import re
 import socket
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from mcp.shared.inbound import (
+    encode_header_value,
+    find_invalid_x_mcp_header,
+    mcp_param_headers,
+    x_mcp_header_map,
+)
+from mcp_types import (
+    HEADER_MISMATCH,
+    MISSING_REQUIRED_CLIENT_CAPABILITY,
+    UNSUPPORTED_PROTOCOL_VERSION,
+)
+from mcp_types.version import HANDSHAKE_PROTOCOL_VERSIONS
 from portunus_shared import DEFAULTS, MAX_FRAME_BODY, PortunusError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -59,12 +76,53 @@ _FORBIDDEN_HEADERS = frozenset(
     {"host", "content-length", "transfer-encoding", "connection", "upgrade", "te", "trailer"}
 )
 # Headers that survive a cross-origin redirect: protocol plumbing, never credentials.
+# ``Mcp-Param-*`` mirrors argument values the (preserved) body already carries, so keeping
+# them costs no privacy and avoids a body/header mismatch a conforming server must reject.
 _CROSS_ORIGIN_KEEP = frozenset(
     {"accept", "content-type", "mcp-protocol-version", "mcp-method", "mcp-name"}
 )
+
+
+def _cross_origin_safe(name: str) -> bool:
+    low = name.lower()
+    return low in _CROSS_ORIGIN_KEEP or low.startswith("mcp-param-")
 _METHODS_WITH_NAME = frozenset({"tools/call", "resources/read", "prompts/get"})
+# Recognized modern JSON-RPC errors (spec 2026-07-28): a 4xx body carrying one of these
+# identifies a modern server, so the client must not fall back to ``initialize``.
+_MODERN_ERROR_CODES = frozenset({HEADER_MISMATCH, MISSING_REQUIRED_CLIENT_CAPABILITY})
 
 Resolver = Callable[[str, int], Awaitable[list[str]]]
+
+
+def _rpc_error_of(data: bytes) -> dict[str, Any] | None:
+    """The JSON-RPC ``error`` object when the body is a JSON-RPC error response, else ``None``."""
+    try:
+        raw = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    err = raw.get("error")
+    return err if isinstance(err, dict) else None
+
+
+def _drop_invalid_x_mcp_header_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Exclude tools whose ``inputSchema`` carries an invalid ``x-mcp-header`` annotation.
+
+    On Streamable HTTP such a tool definition is invalid as a whole (spec 2026-07-28): the
+    parameters could not be mirrored into ``Mcp-Param-*`` headers, so a conforming server
+    would reject every call. The drop is logged per the spec's SHOULD.
+    """
+    out: list[dict[str, Any]] = []
+    for tool in tools:
+        schema = tool.get("inputSchema") if isinstance(tool, dict) else None
+        reason = find_invalid_x_mcp_header(schema)
+        if reason is None:
+            out.append(tool)
+        else:
+            name = tool.get("name") if isinstance(tool.get("name"), str) else "<unnamed>"
+            log.warning("tools/list: dropping tool %r (invalid x-mcp-header: %s)", name, reason)
+    return out
 
 
 class SsrfError(PortunusError):
@@ -218,16 +276,25 @@ class RemoteClient:
                 tools.extend(page)
                 cursor = result.get("nextCursor")
                 if not cursor:
-                    return tools
+                    return _drop_invalid_x_mcp_header_tools(tools)
             raise PortunusError("upstream_crash", "tools/list pagination too long")
 
         return await self._run(op)
 
     async def call_tool(
-        self, name: str, arguments: dict[str, Any], *, timeout_s: float | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        timeout_s: float | None = None,
+        input_schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         async def op(s: _Session) -> dict[str, Any]:
-            return await s.rpc("tools/call", {"name": name, "arguments": arguments})
+            return await s.rpc(
+                "tools/call",
+                {"name": name, "arguments": arguments},
+                input_schema=input_schema,
+            )
 
         return await self._run(op, timeout_s=timeout_s)
 
@@ -329,7 +396,7 @@ class RemoteClient:
             nxt = await self._target(next_url, prev=target, start_loopback=start_loopback)
             if nxt.origin != target.origin:
                 # Never forward caller credentials across origins, on this or any later hop.
-                hdrs = {k: v for k, v in hdrs.items() if k in _CROSS_ORIGIN_KEEP}
+                hdrs = {k: v for k, v in hdrs.items() if _cross_origin_safe(k)}
             target = nxt
 
     async def _send_pinned(
@@ -411,7 +478,13 @@ class _Session:
             "io.modelcontextprotocol/clientCapabilities": {},
         }
 
-    def _headers(self, *, method: str | None = None, params: dict[str, Any] | None = None) -> dict[str, str]:
+    def _headers(
+        self,
+        *,
+        method: str | None = None,
+        params: dict[str, Any] | None = None,
+        input_schema: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
         h = {
             "accept": "application/json, text/event-stream",
             "content-type": "application/json",
@@ -425,7 +498,14 @@ class _Session:
             if method in _METHODS_WITH_NAME and isinstance(params, dict):
                 name = params.get("name") or params.get("uri")
                 if isinstance(name, str) and name:
-                    h["mcp-name"] = name
+                    # Non-ASCII / control-char values use the =?base64?...?= sentinel.
+                    h["mcp-name"] = encode_header_value(name)
+            if method == "tools/call" and input_schema is not None and isinstance(params, dict):
+                args = params.get("arguments")
+                # Only mirror from a schema whose annotations validate; an invalid one was
+                # supposed to be dropped at probe time (stored schemas come from there).
+                if isinstance(args, dict) and find_invalid_x_mcp_header(input_schema) is None:
+                    h.update(mcp_param_headers(x_mcp_header_map(input_schema), args))
         if self.session_id:
             h["mcp-session-id"] = self.session_id
         return h
@@ -481,11 +561,19 @@ class _Session:
             raise PortunusError("upstream_crash", f"remote server returned HTTP {code}")
 
     async def _post(
-        self, message: dict[str, Any], *, method: str | None = None, params: dict[str, Any] | None = None
+        self,
+        message: dict[str, Any],
+        *,
+        method: str | None = None,
+        params: dict[str, Any] | None = None,
+        input_schema: dict[str, Any] | None = None,
     ) -> tuple[httpx.Response, bytes]:
         body = json.dumps(message, separators=(",", ":")).encode()
         response, data = await self.c.send(
-            self.http, "POST", body=body, headers=self._headers(method=method, params=params)
+            self.http,
+            "POST",
+            body=body,
+            headers=self._headers(method=method, params=params, input_schema=input_schema),
         )
         self._check_status(response, data, method=method, phase="rpc")
         return response, data
@@ -495,6 +583,59 @@ class _Session:
         if await self._try_modern_discover():
             return
         await self._legacy_initialize()
+
+    @staticmethod
+    def _advertised_supported(err: Mapping[str, Any]) -> list[str]:
+        data = err.get("data")
+        supported = data.get("supported") if isinstance(data, dict) else None
+        return supported if isinstance(supported, list) else []
+
+    @staticmethod
+    def _unsupported_message(err: Mapping[str, Any]) -> str:
+        supported = _Session._advertised_supported(err)
+        if supported:
+            return f"remote server does not speak MCP {MODERN_PROTOCOL_VERSION} (supports {supported})"
+        return f"remote server does not speak MCP {MODERN_PROTOCOL_VERSION}"
+
+    def _select_advertised_version(self, err: Mapping[str, Any]) -> bool:
+        """On ``-32022`` pick a mutually supported version from the advertised list.
+
+        Spec 2026-07-28 era rules: a recognized modern error means a modern server, so the
+        fallback (when the list only offers handshake revisions) follows the server's own
+        advertisement rather than guessing "pre-modern peer". Returns False when no
+        mutually supported version exists.
+        """
+        handshake = [
+            v
+            for v in self._advertised_supported(err)
+            if isinstance(v, str) and v in HANDSHAKE_PROTOCOL_VERSIONS
+        ]
+        if not handshake:
+            return False
+        self.modern = False
+        self.protocol = max(handshake)  # date-shaped revisions sort newest-last
+        return True
+
+    def _handle_modern_error(self, err: Mapping[str, Any]) -> bool | None:
+        """Classify a JSON-RPC error seen on the discover probe.
+
+        Returns True (an advertised handshake version was selected — switch to legacy),
+        False (no mutually supported version — raise), or None (not a modern-era signal).
+        ``-32020`` / ``-32021`` raise directly: a modern server rejected our correct
+        headers or needs capabilities the gateway does not declare; guessing "legacy
+        peer" would erase the real cause.
+        """
+        rpc_code = err.get("code")
+        if isinstance(rpc_code, bool) or not isinstance(rpc_code, int):
+            # Malformed upstream error object (unhashable / non-numeric code): no era signal.
+            return None
+        if rpc_code == UNSUPPORTED_PROTOCOL_VERSION:
+            return self._select_advertised_version(err)
+        if rpc_code in _MODERN_ERROR_CODES:
+            # A modern server rejected our (correct) headers or requires capabilities the
+            # gateway does not declare: surface it instead of mis-erasing the peer.
+            raise PortunusError("unsupported", f"remote server rejected the probe: {rpc_code}")
+        return None
 
     async def _try_modern_discover(self) -> bool:
         self.modern = True
@@ -522,8 +663,20 @@ class _Session:
             )
             raise PortunusError("payload_too_large", "remote rejected payload as too large")
         if code not in (200, 202):
-            # Pre-2026 peers often answer unknown protocol with plain HTTP 4xx.
+            # Inspect the body before falling back: a recognized modern JSON-RPC error
+            # identifies a modern server even when it arrives as a plain 4xx.
+            err = _rpc_error_of(data)
+            if err is not None:
+                verdict = self._handle_modern_error(err)
+                if verdict is False:
+                    raise PortunusError("unsupported", self._unsupported_message(err))
+                if verdict is True:
+                    self._log_upstream_failure(
+                        phase="discover-advertised", status=code, data=data, method="server/discover"
+                    )
+                    return False
             if self._is_premodern_http(code):
+                # Pre-2026 peers often answer unknown protocol with plain HTTP 4xx.
                 self._log_upstream_failure(
                     phase="discover-fallback", status=code, data=data, method="server/discover"
                 )
@@ -536,6 +689,11 @@ class _Session:
         msg = _extract_response(response, data, mid)
         if "error" in msg:
             err = msg["error"] if isinstance(msg["error"], dict) else {}
+            verdict = self._handle_modern_error(err)
+            if verdict is False:
+                raise PortunusError("unsupported", self._unsupported_message(err))
+            if verdict is True:
+                return False
             rpc_code = err.get("code")
             # Only unknown/invalid method means "pre-2026 peer"; transport errors must surface.
             if rpc_code not in (-32601, -32600):
@@ -555,11 +713,12 @@ class _Session:
 
     async def _legacy_initialize(self) -> None:
         self.modern = False
-        self.protocol = HANDSHAKE_PROTOCOL_VERSION
+        if self.protocol == MODERN_PROTOCOL_VERSION:
+            self.protocol = HANDSHAKE_PROTOCOL_VERSION
         result = await self.rpc(
             "initialize",
             {
-                "protocolVersion": HANDSHAKE_PROTOCOL_VERSION,
+                "protocolVersion": self.protocol,
                 "capabilities": {},
                 "clientInfo": dict(CLIENT_INFO),
             },
@@ -569,7 +728,13 @@ class _Session:
             self.protocol = proto
         await self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-    async def rpc(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def rpc(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        input_schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         wire_params = dict(params)
         if self.modern:
             meta = wire_params.get("_meta")
@@ -582,6 +747,7 @@ class _Session:
             {"jsonrpc": "2.0", "id": mid, "method": method, "params": wire_params},
             method=method,
             params=wire_params,
+            input_schema=input_schema,
         )
         if method == "initialize":
             sid = response.headers.get("mcp-session-id")
@@ -695,7 +861,9 @@ class RemoteProxy:
         arguments: dict[str, Any],
         *,
         timeout_s: float | None = None,
+        input_schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Invoke one tool; ``input_schema`` (stored at probe time) drives ``Mcp-Param-*`` mirroring."""
         return await (await self._client(server_id)).call_tool(
-            tool, arguments, timeout_s=timeout_s
+            tool, arguments, timeout_s=timeout_s, input_schema=input_schema
         )

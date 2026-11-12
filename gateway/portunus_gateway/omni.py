@@ -1206,7 +1206,12 @@ class Omni:
         ) as remote_span:
             try:
                 result = await proxy.invoke(
-                    server.id, tool.upstream_name, arguments, timeout_s=timeout_s
+                    server.id,
+                    tool.upstream_name,
+                    arguments,
+                    timeout_s=timeout_s,
+                    # Stored (operator-approved) schema drives Mcp-Param-* mirroring.
+                    input_schema=tool.schema,
                 )
             except PortunusError as e:
                 self._note_invoke(upstream_ms=_ms_since(t_up))
