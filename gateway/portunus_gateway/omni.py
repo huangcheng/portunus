@@ -19,6 +19,11 @@ Invariants
 * A request body that is a JSON-RPC batch is refused with ``-32600`` before it reaches the
   transport, which would otherwise leak a pydantic traceback instead of a protocol error.
   Other envelope validation failures are refused here with ``-32602`` for the same reason.
+* A modern (2026-07-28+) envelope whose ``MCP-Protocol-Version`` header is missing or
+  disagrees with ``params._meta`` is refused here with ``400`` + ``HeaderMismatch``; the SDK
+  routes eras by the header alone and would otherwise serve the request under legacy rules.
+* HTTP-layer guard errors use application JSON-RPC codes below the JSON-RPC reserved range
+  (MCP 2026-07-28 forbids new codes in ``-32000..-32099``; ``-32002`` must never be emitted).
 * HTTP-layer guards (auth, body size) use the same JSON-RPC error envelope as the transport,
   with the Portunus string code preserved in ``error.data.code``.
 * ``serverInfo.version`` is the package version, never blank.
@@ -1241,13 +1246,19 @@ class Omni:
 
 # ---- ASGI gate -------------------------------------------------------------------------
 
-# Application-defined JSON-RPC codes for HTTP guards (-32000..-32099). String Portunus codes
+# Application-defined JSON-RPC codes for HTTP guards. MCP 2026-07-28 partitions -32000..-32019
+# (legacy, no new allocations; -32002 must never be emitted) and -32020..-32099 (spec-reserved),
+# so app codes live below the JSON-RPC reserved range (-32768..-32000). String Portunus codes
 # stay in ``error.data.code`` so clients that already branch on them keep working.
 _GUARD_RPC_CODES = {
-    "unauthorized": -32001,
-    "payload_too_large": -32002,
-    "forbidden": -32003,
+    "unauthorized": -40001,
+    "payload_too_large": -40002,
+    "forbidden": -40003,
 }
+_GUARD_RPC_DEFAULT = -40000
+# Ranges no application code may occupy: JSON-RPC reserved (-32768..-32000) and the MCP
+# spec-reserved block (-32020..-32099, which subsumes legacy -32000..-32019).
+_GUARD_CODES_RESERVED_RANGES = ((-32768, -32000), (-32099, -32020))
 _JSONRPC_ADAPTER = TypeAdapter(types.JSONRPCMessage)
 
 
@@ -1263,7 +1274,7 @@ def _error_response(status: int, code: str, message: str, headers: dict[str, str
         "jsonrpc": "2.0",
         "id": None,
         "error": {
-            "code": _GUARD_RPC_CODES.get(code, -32000),
+            "code": _GUARD_RPC_CODES.get(code, _GUARD_RPC_DEFAULT),
             "message": message,
             "data": {"code": code, "trace_id": _gate_trace_id()},
         },
@@ -1271,11 +1282,11 @@ def _error_response(status: int, code: str, message: str, headers: dict[str, str
     return JSONResponse(body, status, headers)
 
 
-def _rpc_error_response(status: int, code: int, message: str):
+def _rpc_error_response(status: int, code: int, message: str, request_id: Any = None):
     """A JSON-RPC level failure, shaped like the transport's own (e.g. -32700 on a parse error)."""
     body = {
         "jsonrpc": "2.0",
-        "id": None,
+        "id": request_id,
         "error": {
             "code": code,
             "message": message,
@@ -1285,14 +1296,29 @@ def _rpc_error_response(status: int, code: int, message: str):
     return JSONResponse(body, status)
 
 
-def _envelope_invalid(body: bytes) -> bool:
-    """True when the body is JSON but not a valid single JSON-RPC message."""
+_UNPARSABLE = object()  # distinct from JSON ``null`` so a null body still fails validation
+
+
+def _decode_body(body: bytes) -> Any:
+    """Decode the POST body once for every gate check.
+
+    Returns :data:`_UNPARSABLE` on failure so the transport still owns the ``-32700``
+    reply; JSON ``null`` (which decodes to ``None``) stays distinct and is rejected as
+    an invalid envelope here instead of leaking a pydantic traceback from the transport.
+    """
     try:
-        raw = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return False  # let the transport emit -32700
-    if isinstance(raw, list):
-        return False  # batch path already refused
+        return json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        return _UNPARSABLE
+
+
+def _envelope_invalid(raw: Any) -> bool:
+    """True when the body is JSON but not a valid single JSON-RPC message."""
+    if raw is _UNPARSABLE:
+        return False  # transport emits -32700
+    if raw is None or isinstance(raw, list):
+        # JSON null is not a message; a list is a batch the byte-level check may miss (BOM).
+        return True
     try:
         _JSONRPC_ADAPTER.validate_python(raw)
     except PydanticValidationError:
@@ -1300,17 +1326,41 @@ def _envelope_invalid(body: bytes) -> bool:
     return False
 
 
-def _rewrite_float_jsonrpc_id(body: bytes) -> tuple[bytes | None, str | None]:
+# ``params._meta`` key that carries the modern (2026-07-28+) per-request protocol version.
+_META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
+
+
+def _protocol_envelope(raw: Any) -> tuple[str | None, str | int | None]:
+    """``(meta protocol version, request id)`` from a decoded POST body, if parseable.
+
+    Legacy (initialize-era) envelopes carry no ``params._meta`` version and return
+    ``(None, id)``, which makes the gate's header cross-check a no-op for them.
+    """
+    if raw is _UNPARSABLE or not isinstance(raw, dict):
+        return None, None
+    rid = raw.get("id")
+    if isinstance(rid, bool):
+        rid = None
+    elif isinstance(rid, float):
+        # Mirror _rewrite_float_jsonrpc_id: 2.0 answers as 2 so the mismatch reply is correlatable.
+        rid = int(rid) if rid.is_integer() else None
+    elif not isinstance(rid, (str, int)):
+        rid = None
+    params = raw.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    version = meta.get(_META_PROTOCOL_VERSION) if isinstance(meta, dict) else None
+    if not isinstance(version, str) or not version:
+        version = None
+    return version, rid
+
+
+def _rewrite_float_jsonrpc_id(raw: Any) -> tuple[bytes | None, str | None]:
     """Coerce integer-valued float ``id`` to int; reject non-integer floats.
 
     The MCP SDK classifies float ``id`` as a notification (no response). JSON-RPC
     allows numeric ids; a request with ``id`` MUST get a response (compliance §4).
-    Returns ``(rewritten_body_or_None, error_message_or_None)``.
+    Takes the already-decoded body; returns ``(rewritten_body_or_None, error_message_or_None)``.
     """
-    try:
-        raw = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None, None
     if not isinstance(raw, dict) or "id" not in raw:
         return None, None
     rid = raw["id"]
@@ -1394,6 +1444,8 @@ class _Gate:
                 if not msg.get("more_body", False):
                     break
             body = b"".join(chunks)
+            if body[:3] == b"\xef\xbb\xbf":
+                body = body[3:]  # a BOM would hide a batch from the byte-level check below
             if body.lstrip()[:1] == b"[":
                 # JSON-RPC batching was dropped in MCP 2025-06-18, but the transport still
                 # negotiates 2024-11-05 for clients that ask, where a batch is legal. Refuse it
@@ -1402,13 +1454,31 @@ class _Gate:
                     400, -32600, "JSON-RPC batch is not supported; send one request per POST"
                 )(scope, receive, send)
                 return
-            rewritten, id_err = _rewrite_float_jsonrpc_id(body)
+            decoded = _decode_body(body)
+            meta_version, request_id = _protocol_envelope(decoded)
+            if meta_version is not None and headers.get("mcp-protocol-version") != meta_version:
+                # MCP 2026-07-28: the header MUST equal ``params._meta`` protocolVersion; a
+                # missing or disagreeing header is a 400 HeaderMismatch (-32020). The SDK
+                # era-routes on the header alone and the legacy path never compares the two,
+                # so a legacy-version header over a modern envelope would otherwise be served
+                # (audit 2026-11, probe case C).
+                await _rpc_error_response(
+                    400,
+                    types.HEADER_MISMATCH,
+                    (
+                        "mcp-protocol-version header does not match the request "
+                        "envelope's protocol version"
+                    ),
+                    request_id=request_id,
+                )(scope, receive, send)
+                return
+            rewritten, id_err = _rewrite_float_jsonrpc_id(decoded)
             if id_err:
                 await _rpc_error_response(400, -32600, id_err)(scope, receive, send)
                 return
             if rewritten is not None:
                 body = rewritten
-            if _envelope_invalid(body):
+            if _envelope_invalid(decoded):
                 # Same leak class as the batch path: transport echoes a full pydantic union dump.
                 await _rpc_error_response(400, -32602, "invalid JSON-RPC envelope")(
                     scope, receive, send
