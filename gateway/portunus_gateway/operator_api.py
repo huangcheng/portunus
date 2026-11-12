@@ -28,7 +28,7 @@ from .operator_auth import (
     OperatorAuth,
 )
 from .catalog import CatalogStore
-from .oauth import OAuthError, OAuthStore, exchange_code, register_oauth_client
+from .oauth import OAuthError, OAuthStore, exchange_code, iss_matches, register_oauth_client
 from .registry import Registry, RegistryError
 
 logger = logging.getLogger("portunus.oauth")
@@ -345,6 +345,7 @@ async def oauth_start(
         scopes=list(cfg.get("scopes") or []),
         redirect_uri=redirect_uri,
         resource=cfg.get("resource"),
+        issuer=cfg.get("issuer"),
     )
     await _audit(registry, actor, "server.oauth_start", str(server_id), {})
     return started
@@ -375,6 +376,7 @@ async def _oauth_callback_result(
     code: str,
     state: str,
     error: str,
+    iss: str = "",
 ) -> Response:
     """Shared GET/POST callback handler (query + form_post response modes)."""
     if _is_prefetch(request):
@@ -382,12 +384,22 @@ async def _oauth_callback_result(
 
     registry: Registry = request.app.state.registry
     store: OAuthStore = request.app.state.oauth
-    if error:
-        store.discard(state)
-        return _oauth_fail_html(f"authorization server: {error}", status=400)
     try:
         # Peek first so a duplicate/racy hit does not drop PKCE before exchange runs.
         pending = store.get(state)
+    except OAuthError:
+        pending = None
+    # RFC 9207 §2.4: validate the response issuer before trusting anything else in it —
+    # on mismatch the code must not be exchanged and the error params must not be shown.
+    if pending is not None and not iss_matches(iss, pending):
+        store.discard(state)
+        return _oauth_fail_html("authorization response issuer (iss) mismatch", status=400)
+    if error:
+        store.discard(state)
+        return _oauth_fail_html(f"authorization server: {error}", status=400)
+    if pending is None:
+        return _oauth_fail_html("unknown or expired oauth state", status=400)
+    try:
         cfg = await registry.remote_oauth_config(pending.server_id)
         # Never send client_secret Basic auth for public clients (Ardot: auth method none).
         method = cfg.get("token_endpoint_auth_method") or "none"
@@ -407,8 +419,7 @@ async def _oauth_callback_result(
             getattr(e, "message", str(e)),
         )
         # Drop state after a real attempt so the one-time code cannot be replayed forever.
-        if not (isinstance(e, OAuthError) and e.message == "unknown or expired oauth state"):
-            store.discard(state)
+        store.discard(state)
         return _oauth_fail_html(e.message or e.code, status=e.status)
     return HTMLResponse(
         "<html><body style='font:14px/1.45 system-ui;padding:24px'>"
@@ -424,9 +435,10 @@ async def oauth_callback_get(
     code: str = "",
     state: str = "",
     error: str = "",
+    iss: str = "",
 ) -> Response:
     """Browser redirect target after the upstream IdP (``response_mode=query``)."""
-    return await _oauth_callback_result(request, code=code, state=state, error=error)
+    return await _oauth_callback_result(request, code=code, state=state, error=error, iss=iss)
 
 
 @router.post("/oauth/callback")
@@ -438,6 +450,7 @@ async def oauth_callback_post(request: Request) -> Response:
         code=str(form.get("code") or ""),
         state=str(form.get("state") or ""),
         error=str(form.get("error") or ""),
+        iss=str(form.get("iss") or ""),
     )
 
 

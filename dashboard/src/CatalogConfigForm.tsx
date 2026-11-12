@@ -170,6 +170,8 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
       if (resource) out.resource = resource;
       const reg = String(spec.registration_endpoint ?? "").trim();
       if (reg) out.registration_endpoint = reg;
+      const issuer = String(spec.issuer ?? "").trim();
+      if (issuer) out.issuer = issuer;
       const method = String(spec.token_endpoint_auth_method ?? "").trim();
       if (method) out.token_endpoint_auth_method = method;
       return out;
@@ -461,6 +463,16 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
                   value={String(spec.registration_endpoint ?? "")}
                   onChange={(e) => patchSpec({ registration_endpoint: e.target.value })}
                   placeholder="https://… (DCR)"
+                />
+              </label>
+            </div>
+            <div className="form-grid">
+              <label className="field">
+                Issuer (optional, RFC 9207)
+                <input
+                  value={String(spec.issuer ?? "")}
+                  onChange={(e) => patchSpec({ issuer: e.target.value })}
+                  placeholder="https://idp.example (exact iss match)"
                 />
               </label>
             </div>

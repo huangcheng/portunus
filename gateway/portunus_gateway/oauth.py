@@ -41,6 +41,41 @@ class OAuthPending:
     redirect_uri: str
     created_at: float
     resource: str | None = None
+    # RFC 9207 mix-up defense: expected issuer (exact match when configured explicitly)
+    # and the authorize endpoint's origin (anchor when no explicit issuer is known).
+    issuer: str | None = None
+    issuer_origin: str | None = None
+
+
+def _origin_of(url: str) -> str | None:
+    """Normalized origin: lowercase scheme/host, explicit default port dropped (RFC 3986 §6.2.3)."""
+    parsed = urlparse(url.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    default_port = {"http": 80, "https": 443}.get(scheme)
+    if default_port is not None and netloc.endswith(f":{default_port}"):
+        netloc = netloc[: -len(f":{default_port}")]
+    return f"{scheme}://{netloc}"
+
+
+def iss_matches(iss: str | None, pending: OAuthPending) -> bool:
+    """Validate the RFC 9207 ``iss`` parameter of an authorization response.
+
+    Exact issuer comparison needs the AS's issuer identifier from metadata discovery,
+    which this operator-configured flow deliberately does not perform. With an explicit
+    ``issuer`` configured we compare exactly (RFC 3986 §6.2.1, no normalization);
+    otherwise we anchor on the authorize endpoint's origin — a response from a different
+    authority is rejected while tenant paths are tolerated. An absent ``iss`` cannot be
+    verified either way (only AS metadata says whether the AS sends it) and is accepted.
+    """
+    if not iss:
+        return True
+    if pending.issuer:
+        return iss == pending.issuer
+    got = _origin_of(iss)
+    return got is not None and got == pending.issuer_origin
 
 
 def _b64url(raw: bytes) -> str:
@@ -106,6 +141,12 @@ def validate_oauth_config(raw: Any) -> dict[str, Any] | None:
     resource = raw.get("resource")
     if resource:
         out["resource"] = _https_url("resource", resource)
+    issuer = raw.get("issuer")
+    if issuer is not None and issuer != "":
+        # Optional RFC 9207 issuer identifier; when set, callback ``iss`` must match exactly.
+        if not isinstance(issuer, str):
+            raise OAuthError(422, "invalid_oauth", "issuer must be a string")
+        out["issuer"] = _https_url("issuer", issuer)
     method = raw.get("token_endpoint_auth_method")
     if method:
         if method not in ("none", "client_secret_basic", "client_secret_post"):
@@ -123,6 +164,7 @@ def oauth_public_view(oauth: dict[str, Any] | None) -> dict[str, Any] | None:
         "client_id": oauth.get("client_id") or "",
         "scopes": list(oauth.get("scopes") or []),
         "resource": oauth.get("resource"),
+        "issuer": oauth.get("issuer"),
         "registration_endpoint": oauth.get("registration_endpoint"),
         "token_endpoint_auth_method": oauth.get("token_endpoint_auth_method"),
         "configured": bool(oauth.get("authorize_url") and oauth.get("token_url")),
@@ -152,6 +194,7 @@ class OAuthStore:
         scopes: list[str],
         redirect_uri: str,
         resource: str | None = None,
+        issuer: str | None = None,
     ) -> dict[str, str]:
         self._purge()
         verifier, challenge = new_pkce()
@@ -164,6 +207,8 @@ class OAuthStore:
             redirect_uri=redirect_uri,
             created_at=time.monotonic(),
             resource=resource,
+            issuer=issuer,
+            issuer_origin=_origin_of(authorize_url),
         )
         params = {
             "response_type": "code",
@@ -214,6 +259,10 @@ async def register_oauth_client(
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": token_endpoint_auth_method,
+        # MCP 2026-07-28 client requirement: application_type must be explicit (OIDC
+        # defaults omitted values to "web"; ours *is* a web app — the redirect target is
+        # the operator dashboard's https callback, not a loopback native URI).
+        "application_type": "web",
     }
     if scopes:
         body["scope"] = " ".join(scopes)

@@ -4,6 +4,11 @@ Portunus issues operator-managed bearer API keys (``pm-...``), not an OAuth
 authorization-server flow. The document still exists so standards-following
 clients can discover *how* to authenticate: Bearer header, no AS listed,
 documentation points at the operator dashboard.
+
+``authorization_servers`` is intentionally absent (deliberate deviation from the MCP
+authorization spec, which requires it only for servers implementing the OAuth framework —
+MCP 2026-07-28 allows custom credential strategies): there is no AS to list, and RFC 9728
+itself marks the field optional. See SECURITY.md "MCP authorization posture".
 """
 
 from __future__ import annotations

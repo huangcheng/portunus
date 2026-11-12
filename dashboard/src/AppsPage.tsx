@@ -129,6 +129,11 @@ function oauthBodyFromApp(
     existing?.oauth?.token_endpoint_auth_method ||
     "";
   if (method) body.token_endpoint_auth_method = method;
+  // RFC 9207 issuer (optional): app spec wins, else keep the live server's value so a
+  // re-authorize from the UI never silently downgrades exact iss validation.
+  const issuer =
+    specString(app.spec, "issuer") || existing?.oauth?.issuer || "";
+  if (issuer) body.issuer = issuer;
   return body;
 }
 

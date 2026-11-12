@@ -6,6 +6,7 @@ import os
 import uuid
 from urllib.parse import parse_qs, urlparse
 
+import json
 import httpx
 import pytest
 from portunus_gateway.db.models import VaultEntry
@@ -292,3 +293,198 @@ async def test_patch_remote_oauth_config_and_secret(http):
     assert body["oauth"]["client_id"] == "new-cid"
     assert body["oauth"]["scopes"] == ["files"]
     assert await registry.read_oauth_client_secret(uuid.UUID(sid)) == "rotated-secret"
+
+
+# ---- RFC 9207 iss validation + DCR application_type (audit M4) ---------------------------
+
+
+def test_iss_matches_semantics():
+    pending = OAuthPending(
+        server_id=uuid.uuid4(),
+        code_verifier="v",
+        token_url="https://idp.example/token",
+        client_id="cid",
+        redirect_uri="https://portunus.example/cb",
+        created_at=0.0,
+        issuer_origin="https://idp.example",
+    )
+    from portunus_gateway.oauth import iss_matches
+
+    # Absent iss: cannot be verified without AS metadata — accepted.
+    assert iss_matches("", pending) is True
+    assert iss_matches(None, pending) is True
+    # Origin anchor: same authority passes, tenant paths tolerated.
+    assert iss_matches("https://idp.example", pending) is True
+    assert iss_matches("https://idp.example/tenant1", pending) is True
+    # Authority normalization (RFC 3986 6.2.3): case + explicit default port.
+    assert iss_matches("https://IDP.example", pending) is True
+    assert iss_matches("https://idp.example:443", pending) is True
+    # Different authority / unparseable → rejected.
+    assert iss_matches("https://evil.example", pending) is False
+    assert iss_matches("not a url", pending) is False
+
+    exact = OAuthPending(
+        server_id=uuid.uuid4(),
+        code_verifier="v",
+        token_url="https://idp.example/token",
+        client_id="cid",
+        redirect_uri="https://portunus.example/cb",
+        created_at=0.0,
+        issuer="https://idp.example/tenant1",
+        issuer_origin="https://idp.example",
+    )
+    # Explicit issuer → exact string comparison, no path tolerance.
+    assert iss_matches("https://idp.example/tenant1", exact) is True
+    assert iss_matches("https://idp.example", exact) is False
+
+
+def test_store_start_records_issuer_anchor():
+    from portunus_gateway.oauth import OAuthStore
+
+    store = OAuthStore()
+    started = store.start(
+        server_id=uuid.uuid4(),
+        authorize_url="https://idp.example/authorize",
+        token_url="https://idp.example/token",
+        client_id="cid",
+        scopes=[],
+        redirect_uri="https://portunus.example/cb",
+        issuer="https://issuer.example/real",
+    )
+    pending = store.pop(started["state"])
+    assert pending.issuer == "https://issuer.example/real"
+    assert pending.issuer_origin == "https://idp.example"
+
+
+async def test_dcr_body_includes_application_type():
+    from portunus_gateway.oauth import register_oauth_client
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"client_id": "reg-1"})
+
+    out = await register_oauth_client(
+        registration_endpoint="https://idp.example/register",
+        redirect_uri="https://portunus.example/api/oauth/callback",
+        transport=httpx.MockTransport(handler),
+    )
+    assert out["client_id"] == "reg-1"
+    body = json.loads(seen[0].content)
+    assert body["application_type"] == "web"
+
+
+async def test_callback_rejects_iss_mismatch_without_exchange(http, monkeypatch):
+    client, _registry, _app = http
+    created = await client.post(
+        "/api/servers",
+        json={
+            "name": "R",
+            "slug": "iss-mismatch",
+            "kind": "remote",
+            "url": "https://mcp.example.com/mcp",
+            "oauth": {
+                "authorize_url": "https://idp.example/authorize",
+                "token_url": "https://idp.example/token",
+                "client_id": "cid",
+                "scopes": [],
+            },
+        },
+    )
+    sid = created.json()["id"]
+    start = await client.post(
+        f"/api/servers/{sid}/oauth/start", json={"redirect_uri": "http://test/api/oauth/callback"}
+    )
+    state = start.json()["state"]
+
+    async def must_not_exchange(*a, **kw):  # pragma: no cover - fails the test if reached
+        raise AssertionError("code must not be exchanged on iss mismatch")
+
+    monkeypatch.setattr("portunus_gateway.operator_api.exchange_code", must_not_exchange)
+    r = await client.get(
+        "/api/oauth/callback",
+        params={"code": "c", "state": state, "iss": "https://evil.example"},
+    )
+    assert r.status_code == 400
+    assert "issuer (iss) mismatch" in r.text
+    # State is consumed: a replay with a good iss still cannot exchange.
+    r2 = await client.get(
+        "/api/oauth/callback",
+        params={"code": "c", "state": state, "iss": "https://idp.example"},
+    )
+    assert r2.status_code == 400
+    assert "unknown or expired oauth state" in r2.text
+
+
+async def test_callback_iss_mismatch_masks_error_params(http, monkeypatch):
+    """RFC 9207: on mismatch the error params must not be shown or acted on."""
+    client, _registry, _app = http
+    created = await client.post(
+        "/api/servers",
+        json={
+            "name": "R",
+            "slug": "iss-error-mask",
+            "kind": "remote",
+            "url": "https://mcp.example.com/mcp",
+            "oauth": {
+                "authorize_url": "https://idp.example/authorize",
+                "token_url": "https://idp.example/token",
+                "client_id": "cid",
+                "scopes": [],
+            },
+        },
+    )
+    sid = created.json()["id"]
+    start = await client.post(
+        f"/api/servers/{sid}/oauth/start", json={"redirect_uri": "http://test/api/oauth/callback"}
+    )
+    state = start.json()["state"]
+    r = await client.get(
+        "/api/oauth/callback",
+        params={
+            "state": state,
+            "error": "access_denied",
+            "error_description": "secret-hint",
+            "iss": "https://evil.example",
+        },
+    )
+    assert r.status_code == 400
+    assert "issuer (iss) mismatch" in r.text
+    assert "access_denied" not in r.text
+    assert "secret-hint" not in r.text
+
+
+async def test_callback_accepts_matching_iss(http, monkeypatch):
+    client, registry, _app = http
+    created = await client.post(
+        "/api/servers",
+        json={
+            "name": "R",
+            "slug": "iss-ok",
+            "kind": "remote",
+            "url": "https://mcp.example.com/mcp",
+            "oauth": {
+                "authorize_url": "https://idp.example/authorize",
+                "token_url": "https://idp.example/token",
+                "client_id": "cid",
+                "scopes": [],
+            },
+        },
+    )
+    sid = created.json()["id"]
+    start = await client.post(
+        f"/api/servers/{sid}/oauth/start", json={"redirect_uri": "http://test/api/oauth/callback"}
+    )
+    state = start.json()["state"]
+
+    async def fake_exchange(pending, code, *, client_secret=None, transport=None):
+        return "Bearer ok"
+
+    monkeypatch.setattr("portunus_gateway.operator_api.exchange_code", fake_exchange)
+    r = await client.get(
+        "/api/oauth/callback",
+        params={"code": "c", "state": state, "iss": "https://idp.example/tenant7"},
+    )
+    assert r.status_code == 200
+    assert "Connected" in r.text

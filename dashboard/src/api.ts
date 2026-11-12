@@ -49,6 +49,7 @@ export type OAuthConfig = {
   client_id: string;
   scopes: string[];
   resource?: string | null;
+  issuer?: string | null;
   registration_endpoint?: string | null;
   token_endpoint_auth_method?: string | null;
   configured: boolean;
@@ -74,6 +75,8 @@ export type OAuthBody = {
   client_id?: string;
   scopes: string[];
   resource?: string;
+  /** RFC 9207 issuer identifier; enables exact `iss` validation on the callback. */
+  issuer?: string;
   registration_endpoint?: string;
   token_endpoint_auth_method?: string;
 };
