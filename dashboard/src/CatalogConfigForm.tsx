@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { api } from "./api";
+import { parseEnvRows, type EnvRow } from "./envRows";
 import { JsonObjectEditor } from "./JsonObjectEditor";
 import {
   WEBDAV_MCP_ARGS,
@@ -9,8 +10,6 @@ import {
 } from "./providers";
 
 const CONNECTIONS: CatalogConnection[] = ["oauth", "http", "webdav", "stdio", "skill_bridge"];
-
-type EnvRow = { name: string; label: string; secret: boolean };
 
 type Props = {
   initial?: CatalogApp | null;
@@ -30,16 +29,6 @@ function joinLabels(list: string[] | undefined): string {
   return (list ?? []).join(", ");
 }
 
-function asEnvRows(raw: unknown): EnvRow[] {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .filter((item): item is Record<string, unknown> => !!item && typeof item === "object")
-    .map((item) => ({
-      name: String(item.name ?? ""),
-      label: String(item.label ?? item.name ?? ""),
-      secret: item.secret !== false,
-    }));
-}
 
 function asStringMap(raw: unknown): Record<string, string> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
@@ -209,7 +198,7 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
       return {
         command: String(spec.command ?? "").trim(),
         args,
-        env: asEnvRows(spec.env).filter((r) => r.name.trim()),
+        env: parseEnvRows(spec.env).filter((r) => r.name.trim()),
       };
     }
     const trimmed = manifestJson.trim();
@@ -226,7 +215,7 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
           .filter(Boolean);
     return {
       manifest,
-      secrets: asEnvRows(spec.secrets).filter((r) => r.name.trim()),
+      secrets: parseEnvRows(spec.secrets).filter((r) => r.name.trim()),
       env_defaults: parseEnvDefaults(envDefaults),
       command: String(spec.command ?? "python").trim() || "python",
       args: args.length ? args : ["-m", "portunus_skill_bridge"],
@@ -283,7 +272,7 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
   const argsDisplay = Array.isArray(spec.args)
     ? (spec.args as string[]).join(" ")
     : String(spec.args ?? "");
-  const envRows = connection === "stdio" ? asEnvRows(spec.env) : asEnvRows(spec.secrets);
+  const envRows = connection === "stdio" ? parseEnvRows(spec.env) : parseEnvRows(spec.secrets);
 
   function updateEnvRow(index: number, patch: Partial<EnvRow>) {
     const key = connection === "stdio" ? "env" : "secrets";
@@ -595,6 +584,7 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
               onChange={updateEnvRow}
               onAdd={addEnvRow}
               onRemove={removeEnvRow}
+              supportsMultiline
             />
           </div>
         )}
@@ -616,6 +606,7 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
               onChange={updateEnvRow}
               onAdd={addEnvRow}
               onRemove={removeEnvRow}
+              supportsMultiline={false}
             />
             <label className="field">
               Env defaults (KEY=value per line)
@@ -673,12 +664,14 @@ function EnvRowsEditor({
   onChange,
   onAdd,
   onRemove,
+  supportsMultiline,
 }: {
   title: string;
   rows: EnvRow[];
   onChange: (index: number, patch: Partial<EnvRow>) => void;
   onAdd: () => void;
   onRemove: (index: number) => void;
+  supportsMultiline: boolean;
 }) {
   return (
     <div className="stack env-rows-editor">
@@ -709,6 +702,16 @@ function EnvRowsEditor({
               />
               Secret
             </label>
+            {supportsMultiline ? (
+              <label className="field checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={row.multiline === true}
+                  onChange={(e) => onChange(i, { multiline: e.target.checked })}
+                />
+                Multiline
+              </label>
+            ) : null}
             <button type="button" className="ghost sm" onClick={() => onRemove(i)} aria-label="Remove">
               Remove
             </button>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { api, type OAuthBody, type Server, type Tool } from "./api";
 import { CatalogConfigPage } from "./CatalogConfigPage";
+import { parseEnvRows } from "./envRows";
 import { CreateMcpForm } from "./CreateMcpForm";
 import { GatewayOverview } from "./GatewayOverview";
 import { AppBrandMark, appIconIdForSlug } from "./icons/apps";
@@ -1586,23 +1587,8 @@ function WebDavManagePanel({
   );
 }
 
-function stdioEnvDefs(app: StdioApp): { name: string; label: string; secret: boolean }[] {
-  const raw = app.spec.env;
-  if (!Array.isArray(raw)) return [];
-  const out: { name: string; label: string; secret: boolean }[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== "object") continue;
-    const name = (item as { name?: unknown }).name;
-    if (typeof name !== "string" || !name.trim()) continue;
-    const label = (item as { label?: unknown }).label;
-    const secret = (item as { secret?: unknown }).secret;
-    out.push({
-      name: name.trim(),
-      label: typeof label === "string" && label.trim() ? label.trim() : name.trim(),
-      secret: secret !== false,
-    });
-  }
-  return out;
+function stdioEnvDefs(app: StdioApp) {
+  return parseEnvRows(app.spec.env);
 }
 
 function stdioEnvDefaults(app: StdioApp): Record<string, string> {
@@ -1629,6 +1615,7 @@ function StdioManagePanel({
   const secretDefs = stdioEnvDefs(app);
   const envDefaults = stdioEnvDefaults(app);
   const [values, setValues] = useState<Record<string, string>>({});
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -1637,6 +1624,7 @@ function StdioManagePanel({
   useEffect(() => {
     setCurrent(server);
     setValues({});
+    setRevealed({});
     setError("");
     setNotice("");
   }, [server, app]);
@@ -1699,6 +1687,49 @@ function StdioManagePanel({
     }
   }
 
+  function renderEnvField(def: ReturnType<typeof stdioEnvDefs>[number]) {
+    if (def.multiline) {
+      // Mask-by-default applies only to an existing stored value: a fresh Connect
+      // must present an editable paste box.
+      if (active && def.secret && !revealed[def.name]) {
+        return (
+          <div className="multiline-secret">
+            <input type="password" value="••••••••••••" readOnly tabIndex={-1} />
+            <button
+              type="button"
+              className="ghost sm"
+              onClick={() => setRevealed((prev) => ({ ...prev, [def.name]: true }))}
+            >
+              Edit config
+            </button>
+          </div>
+        );
+      }
+      return (
+        <textarea
+          aria-label={def.label}
+          rows={7}
+          value={values[def.name] || ""}
+          onChange={(e) => setValues((prev) => ({ ...prev, [def.name]: e.target.value }))}
+          required={!active}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder={active ? undefined : "Paste the multi-line configuration value"}
+        />
+      );
+    }
+    return (
+      <input
+        type={def.secret ? "password" : "text"}
+        value={values[def.name] || ""}
+        onChange={(e) => setValues((prev) => ({ ...prev, [def.name]: e.target.value }))}
+        required={!active}
+        autoComplete="off"
+        placeholder={active && def.secret ? "••••••••" : undefined}
+      />
+    );
+  }
+
   return (
     <DrawerShell
       title={app.label}
@@ -1727,19 +1758,19 @@ function StdioManagePanel({
             </>
           ) : null}
         </p>
-        {secretDefs.map((def) => (
-          <label className="field" key={def.name}>
-            {def.label} {active ? "(leave blank to keep)" : ""}
-            <input
-              type={def.secret ? "password" : "text"}
-              value={values[def.name] || ""}
-              onChange={(e) => setValues((prev) => ({ ...prev, [def.name]: e.target.value }))}
-              required={!active}
-              autoComplete="off"
-              placeholder={active && def.secret ? "••••••••" : undefined}
-            />
-          </label>
-        ))}
+        {secretDefs.map((def) =>
+          def.multiline ? (
+            <div className="field" key={def.name}>
+              {def.label} {active ? "(leave blank to keep)" : ""}
+              {renderEnvField(def)}
+            </div>
+          ) : (
+            <label className="field" key={def.name}>
+              {def.label} {active ? "(leave blank to keep)" : ""}
+              {renderEnvField(def)}
+            </label>
+          ),
+        )}
         <div className="apps-actions">
           <button className="primary sm" type="submit" disabled={busy}>
             {current ? "Save" : "Connect"}

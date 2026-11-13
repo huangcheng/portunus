@@ -39,3 +39,7 @@ inventory/
 *.key
 id_rsa*
 id_ed25519*
+deploy/rclone-shim/rclone
+deploy/rclone.zip
+deploy/rclone-v*/
+deploy/rclone.SHA256SUMS

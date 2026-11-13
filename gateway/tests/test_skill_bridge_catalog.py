@@ -135,3 +135,19 @@ async def test_bearer_env_skill_app_not_flagged_auth_required(db, pepper_file):
     # No SKILL_SESSION vault entry, no login ever: still not auth_required — the app's
     # auth model does not have a session to require.
     assert health[sid]["status"] != "auth_required", health[sid]
+
+
+def test_rclone_drive_seeds_shape():
+    """Box/OneDrive ship as rclone-shim stdio apps with a multiline config paste."""
+    from portunus_gateway.catalog import DEFAULT_APPS, RCLONE_SHIM, validate_spec
+
+    for slug in ("box", "onedrive"):
+        raw = next(a for a in DEFAULT_APPS if a["slug"] == slug)
+        assert raw["connection"] == "stdio"
+        spec = validate_spec("stdio", raw["spec"])
+        assert spec["command"] == RCLONE_SHIM
+        assert spec["args"] == []
+        entry = spec["env"][0]
+        assert entry["name"] == "RCLONE_REMOTE_CONFIG"
+        assert entry["multiline"] is True
+        assert entry["secret"] is True

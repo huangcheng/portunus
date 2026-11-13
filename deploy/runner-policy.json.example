@@ -5,5 +5,7 @@
     "/usr/bin",
     "/bin"
   ],
-  "binary_allowlist": []
+  "binary_allowlist": [
+    "/var/lib/portunus/skills/rclone-shim/shim"
+  ]
 }

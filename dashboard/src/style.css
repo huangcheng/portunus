@@ -391,6 +391,7 @@ textarea { height: auto; padding: 11px 13px; resize: vertical; font-family: var(
 input:focus, textarea:focus, select:focus { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 13%, transparent); }
 select { height: 40px; font-size: 12.5px; width: auto; min-width: 140px; }
 label.field { display: flex; flex-direction: column; gap: 7px; min-width: 0; font-size: 12px; font-weight: 600; color: var(--secondary-foreground); }
+div.field { display: flex; flex-direction: column; gap: 7px; min-width: 0; font-size: 12px; font-weight: 600; color: var(--secondary-foreground); }
 label.field > :is(input, textarea, select) { font-weight: 400; }
 label.field input:read-only { background: var(--muted); color: var(--muted-foreground); cursor: default; }
 .stack { display: flex; flex-direction: column; gap: 16px; }
@@ -517,7 +518,11 @@ th.text-right { text-align: right; }
 .catalog-connection-segment { flex-wrap: wrap; }
 .env-rows-editor { gap: 10px; }
 .env-rows-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12.5px; font-weight: 600; }
-.env-row { display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 10px; align-items: end; }
+.env-row { display: grid; grid-template-columns: 1fr 1fr auto auto auto; gap: 10px; align-items: end; }
+
+.multiline-secret { display: flex; gap: 8px; align-items: center; }
+.multiline-secret input { flex: 1; }
+.multiline-secret input:read-only { background: color-mix(in oklch, var(--border) 40%, transparent); }
 .checkbox-field { display: flex; flex-direction: row; align-items: center; gap: 8px; font-size: 12.5px; }
 .checkbox-field input[type="checkbox"] { width: auto; height: auto; margin: 0; }
 .apps-categories { display: flex; flex-wrap: wrap; gap: 7px; margin: -12px 0 0; }

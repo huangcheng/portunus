@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,10 +16,16 @@ import portunus_skill_bridge
 from portunus_shared import SKILL_BRIDGE_MANIFEST_ENV
 from portunus_skill_bridge.manifest import load_manifest
 
-from .db.models import CATALOG_CONNECTIONS, CatalogApp, Server
+from .db.models import CATALOG_CONNECTIONS, CatalogApp, Server, VaultEntry
 from .registry import RegistryError
 
+log = logging.getLogger(__name__)
+
 WEBDAV_MCP_PACKAGE = "webdav-mcp-server@1.0.4"
+# Runner-local rclone connector shim (provisioned by deploy/ensure-state-dirs.sh
+# siblings; see deploy notes). Absolute path so the closed argv grammar admits it
+# via binary_allowlist. Bridges a pasted rclone remote config to webdav-mcp-server.
+RCLONE_SHIM = "/var/lib/portunus/skills/rclone-shim/shim"
 WEBDAV_MCP_ARGS = ["-y", "--ignore-scripts", WEBDAV_MCP_PACKAGE]
 
 # Stdio spawn for DB-backed skill manifests (injected as PORTUNUS_MANIFEST at start).
@@ -229,22 +237,28 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "label": "Box",
         "name": "Box",
         "description": (
-            "Box files via the official remote MCP (OAuth 2.0; bring your own Box app's "
-            "client id + secret from the Box developer console)."
+            "Box files via rclone (paste your `rclone config show box` output at "
+            "Connect; authorize first with `rclone authorize \"box\"`)."
         ),
-        "connection": "oauth",
+        "connection": "stdio",
         "popular": True,
         "categories": ["Storage"],
-        "tags": ["box", "files", "storage", "oauth"],
+        "tags": ["box", "files", "storage", "rclone"],
         "sort_order": 26,
         "spec": {
-            "url": "https://mcp.box.com/mcp",
-            "authorize_url": "https://account.box.com/api/oauth2/authorize",
-            "token_url": "https://api.box.com/oauth2/token",
-            # Box's AS advertises exactly this issuer; enables exact RFC 9207 iss checks.
-            "issuer": "https://api.box.com",
-            "resource": "https://mcp.box.com/",
-            "token_endpoint_auth_method": "client_secret_basic",
+            "command": RCLONE_SHIM,
+            "args": [],
+            "env": [
+                {
+                    "name": "RCLONE_REMOTE_CONFIG",
+                    "label": (
+                        "rclone remote config — run `rclone config show box` "
+                        "(authorize first with `rclone authorize \"box\"`)"
+                    ),
+                    "secret": True,
+                    "multiline": True,
+                },
+            ],
         },
     },
     {
@@ -252,36 +266,28 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "label": "OneDrive",
         "name": "OneDrive",
         "description": (
-            "OneDrive and Microsoft 365 files via ms-365-mcp-server (device-code login "
-            "with its built-in Microsoft app)."
+            "OneDrive files via rclone (paste your `rclone config show onedrive` "
+            "output at Connect; tokens stay encrypted in the gateway vault)."
         ),
         "connection": "stdio",
         "popular": True,
         "categories": ["Storage"],
-        "tags": ["onedrive", "microsoft", "files", "stdio"],
+        "tags": ["onedrive", "microsoft", "files", "rclone"],
         "sort_order": 36,
         "spec": {
-            "command": "npx",
-            "args": ["-y", "--ignore-scripts", "@softeria/ms-365-mcp-server@0.184.1"],
+            "command": RCLONE_SHIM,
+            "args": [],
             "env": [
                 {
-                    # Visible Connect field so work/school accounts can override the
-                    # default: consumers (personal) keeps refresh tokens alive; use
-                    # organizations for Microsoft 365 business accounts.
-                    "name": "MS365_MCP_TENANT_ID",
-                    "label": "Tenant (consumers for personal, organizations for work)",
-                    "secret": False,
+                    "name": "RCLONE_REMOTE_CONFIG",
+                    "label": (
+                        "rclone remote config — run `rclone config show onedrive` "
+                        "(authorize first with `rclone authorize \"onedrive\"`)"
+                    ),
+                    "secret": True,
+                    "multiline": True,
                 },
             ],
-            "env_defaults": {
-                "MS365_MCP_TENANT_ID": "consumers",
-                # Sandboxed runner: no OS credential store; keep auth state on the
-                # persistent skill-state mount (pre-created by deploy) so login
-                # survives child restarts.
-                "MS365_MCP_USE_KEYTAR": "0",
-                "MS365_MCP_TOKEN_CACHE_PATH": "/var/lib/portunus/skill-state/onedrive/token-cache.json",
-                "MS365_MCP_SELECTED_ACCOUNT_PATH": "/var/lib/portunus/skill-state/onedrive/account.json",
-            },
         },
     },
     {
@@ -437,6 +443,8 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
                 "name": item["name"].strip(),
                 "label": str(item.get("label") or item["name"]),
                 "secret": bool(item.get("secret", True)),
+                # Multi-line values (rclone config paste) render as a textarea.
+                "multiline": item.get("multiline") is True,
             }
         )
     out: dict[str, Any] = {"command": command, "args": list(args), "env": env_out}
@@ -555,6 +563,78 @@ class CatalogStore:
                     dirty = True
             if dirty:
                 await s.commit()
+
+        # Idempotent connector migration for the rclone switchover: box/onedrive rows
+        # seeded with the earlier oauth / ms-365 shapes would keep serving the old
+        # connectors forever (CatalogStore.update cannot change a row's connection).
+        # Refresh to the seed spec when the stored shape no longer matches, and bump
+        # linked stdio children so they respawn (same mechanism as skill_bridge).
+        async with self._sf() as s:
+            seed_by_slug = {a["slug"]: a for a in DEFAULT_APPS if a["slug"] in ("box", "onedrive")}
+            rows = (
+                await s.execute(select(CatalogApp).where(CatalogApp.slug.in_(list(seed_by_slug))))
+            ).scalars().all()
+            migrated = 0
+            for row in rows:
+                seed = seed_by_slug[row.slug]
+                # Narrow: only migrate rows still on a retired connector shape.
+                # The ms-365 marker lives in spec.args (command was bare `npx`);
+                # the oauth box row is caught by the connection check. Operator
+                # stdio specs without that marker are left alone.
+                stale = row.connection == "oauth" or "ms-365-mcp-server" in str(
+                    row.spec.get("args") or ""
+                )
+                if not stale:
+                    continue
+                row.connection = "stdio"
+                row.description = seed["description"]
+                row.tags = _normalize_labels(seed.get("tags"), field="tags")
+                row.spec = validate_spec("stdio", seed["spec"])
+                # Server rows copied command/args at create time; catalog specs do
+                # not overlay for stdio. Rewrite both shapes:
+                #   stdio + old argv (ms-365 npx) -> the shim command;
+                #   remote (old Box oauth)        -> a stdio row on the shim. Its
+                # stale Authorization header stays in the vault but is unused; the
+                # connector reads RCLONE_REMOTE_CONFIG, which appears in vault only
+                # after the operator pastes the rclone config in the manage panel
+                # (until then the server fails closed at start, never silently).
+                linked = (
+                    await s.execute(select(Server).where(Server.slug == row.slug))
+                ).scalars().all()
+                for srv in linked:
+                    # Targeted cleanup: drop only entries belonging to the retired
+                    # connectors (OneDrive MS365_* env; the Box remote's Bearer
+                    # header + dotted OAuth client secret). A blanket NOT IN
+                    # (seed env) delete would silently discard user env entries.
+                    retired = {"Authorization", "portunus.oauth_client_secret"}
+                    retired |= {f"MS365_MCP_{k}" for k in (
+                        "TENANT_ID", "USE_KEYTAR", "TOKEN_CACHE_PATH",
+                        "SELECTED_ACCOUNT_PATH", "CLIENT_ID", "CLIENT_SECRET",
+                    )}
+                    stale_env = (
+                        await s.execute(
+                            select(VaultEntry).where(
+                                VaultEntry.server_id == srv.id,
+                                VaultEntry.name.in_(sorted(retired)),
+                            )
+                        )
+                    ).scalars().all()
+                    for entry in stale_env:
+                        await s.delete(entry)
+                    if srv.kind == "stdio":
+                        srv.command = seed["spec"]["command"]
+                        srv.args = []
+                    elif srv.kind == "remote":
+                        srv.kind = "stdio"
+                        srv.command = seed["spec"]["command"]
+                        srv.args = []
+                        srv.url = None
+                        srv.oauth = None
+                    srv.vault_version = int(srv.vault_version or 0) + 1
+                migrated += 1
+            if migrated:
+                await s.commit()
+                log.info("rclone migration: refreshed %d catalog row(s)", migrated)
 
         # Idempotent: add new skill_bridge seeds (e.g. weread) on existing deploys,
         # and refresh skill_bridge manifests when the packaged seed grows (tool list).

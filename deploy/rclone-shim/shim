@@ -1,0 +1,314 @@
+#!/app/gateway/.venv/bin/python3
+"""Portunus rclone connector shim (runner-local).
+
+Launch form: absolute path, no args; all configuration arrives via env:
+
+  RCLONE_REMOTE_CONFIG   the pasted ``rclone config show <name>`` section
+                         (the ``[name]`` header line is optional)
+  RCLONE_SHIM_DIR        directory of this shim (rclone binary lives beside it)
+
+Security posture:
+* The backend type must be in ALLOWED_BACKENDS — a pasted ``local``/``alias``
+  remote would otherwise expose the runner filesystem over WebDAV. The pasted
+  section is otherwise TRUSTED OPERATOR INPUT (the operator connects their own
+  drive at Connect time; agents never see the paste), so backend options such as
+  a webdav ``url`` are accepted as configured.
+* Backend options go to rclone through a persistent 0600 config file (only the
+  path rides on argv). The WebDAV basic-auth pair rides on argv — a real
+  exposure via world-readable /proc/<pid>/cmdline — but the values are random
+  per run, scoped to the loopback listener, and carry no vendor material; the
+  pasted token itself never touches argv.
+* The MCP child gets a minimal environment (no RCLONE_REMOTE_CONFIG leak).
+* The VFS cache is a per-run mkdtemp (0700, size-capped) and is removed on exit.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import os
+import secrets
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.request
+from pathlib import Path
+from typing import NoReturn
+
+MCP_PACKAGE = "webdav-mcp-server@1.0.4"
+READY_TIMEOUT_S = 20.0
+STOP_GRACE_S = 5.0
+VFS_CACHE_MAX_SIZE = "2G"
+# Only cloud-storage backends: ``local``/``alias``/``union``/``crypt`` would turn
+# the runner filesystem (cwd "/") into a WebDAV share for the agent.
+ALLOWED_BACKENDS = frozenset(
+    {"box", "onedrive", "drive", "dropbox", "webdav", "s3", "b2", "pcloud", "sftp"}
+)
+# Env the npm-installed MCP child may inherit — never RCLONE_REMOTE_CONFIG.
+MCP_ENV_ALLOW = frozenset({"PATH", "HOME", "LANG", "LC_ALL"})
+
+
+def fail(msg: str) -> NoReturn:
+    print(f"rclone-shim: {msg}", file=sys.stderr, flush=True)
+    raise SystemExit(1)
+
+
+def parse_config(raw: str) -> dict[str, str]:
+    """Parse an rclone config section: ``key = value`` lines, [header] ignored.
+
+    The last duplicate key wins (rclone's own behavior). Values arrive
+    newline-free (rclone base64-encodes multiline values with a leading
+    ``base64;`` marker in config dumps); a pasted value carrying that marker is
+    decoded back. Control characters otherwise are rejected as a corrupted paste.
+    """
+    out: dict[str, str] = {}
+    sections = 0
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            sections += 1
+            continue
+        if "=" not in line:
+            fail("cannot parse config line (malformed `key = value` entry)")
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not key:
+            fail("empty config key")
+        # Control-char check on the raw line (newline-free by construction): the
+        # base64-decoded value below legitimately contains newlines.
+        if any(ord(ch) < 32 for ch in value):
+            fail(f"config value for {key!r} contains control characters (corrupted paste?)")
+        if value.startswith("base64;"):
+            try:
+                value = base64.b64decode(value[len("base64;"):], validate=True).decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as e:
+                fail(f"cannot decode base64 config value for {key!r}: {e}")
+        out[key] = value
+    if "type" not in out:
+        fail("config section has no 'type' (is this an rclone remote?)")
+    if sections > 1:
+        # A multi-remote paste (config show without a name) would merge options
+        # from unrelated remotes and connect to the wrong drive with no error.
+        fail("paste contains multiple remote sections; run `rclone config show <name>` for one")
+    return out
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def main() -> None:
+    raw = os.environ.get("RCLONE_REMOTE_CONFIG", "")
+    if not raw.strip():
+        fail("RCLONE_REMOTE_CONFIG is empty")
+    cfg = parse_config(raw)
+    backend = cfg["type"]
+    if backend.lower() not in ALLOWED_BACKENDS:
+        fail(
+            f"backend {backend!r} is not allowed (allowed: {', '.join(sorted(ALLOWED_BACKENDS))}); "
+            "filesystem-style remotes would expose the runner over WebDAV"
+        )
+    remote = backend.lower()
+
+    here = Path(os.environ.get("RCLONE_SHIM_DIR") or Path(__file__).resolve().parent)
+    rclone = here / "rclone"
+    if not rclone.is_file():
+        fail(f"rclone binary missing at {rclone}")
+
+    port = free_port()
+    user = "p" + secrets.token_urlsafe(12)
+    password = secrets.token_urlsafe(24)
+    cache_dir = Path(tempfile.mkdtemp(prefix="portunus-rclone-"))
+    os.chmod(cache_dir, 0o700)
+
+    # Remote config via a persistent 0600 config file: rclone persists refreshed
+    # OAuth tokens into it, so rotating single-use refresh tokens (Box) survive
+    # child restarts. Only the file path rides on argv (world-readable via
+    # /proc/<pid>/cmdline) — the secrets stay in the 0700 state dir. The file is
+    # keyed by a digest of the pasted section so distinct remotes never share.
+    # Minimal env for rclone itself: no inherited RCLONE_* (a host-level
+    # rclone.conf must not contribute options for this remote).
+    # NOTE: files here hold OAuth refresh tokens in plaintext (rclone's own
+    # config format), readable by same-UID processes — the same residual the
+    # design accepts for skill-state. 0700 dir + 0600 files; stale configs age
+    # out after 30 days.
+    state_dir = Path(here).parent.parent / "skill-state" / "rclone"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(state_dir, 0o700)
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    conf_file = state_dir / f"rclone-{digest}.conf"
+    if conf_file.exists():
+        os.utime(conf_file)  # live connector: keep the 30-day prune away
+    if not conf_file.exists():
+        # rclone's config format is line-based: re-encode values containing
+        # newlines with the base64; marker (same form config dumps use).
+        def _fmt(v: str) -> str:
+            if "\n" in v:
+                return "base64;" + base64.b64encode(v.encode()).decode()
+            return v
+
+        body = f"[{remote}]\n" + "\n".join(
+            f"{k} = {_fmt(v)}" for k, v in cfg.items()
+        ) + "\n"
+        # Atomic + owner-only from creation (no umask window, no symlink follow).
+        fd = os.open(conf_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+    # Prune confs whose digest no longer matches any live paste we have seen is
+    # not knowable here; instead cap the directory growth by aging out files
+    # untouched for 30 days.
+    now = time.time()
+    for old_conf in state_dir.glob("rclone-*.conf"):
+        try:
+            if now - old_conf.stat().st_mtime > 30 * 86400:
+                old_conf.unlink()
+        except OSError:
+            pass
+    env = {k: v for k, v in os.environ.items() if k in MCP_ENV_ALLOW}
+    env["RCLONE_CONFIG"] = str(conf_file)
+
+    rclone_argv = [
+        str(rclone),
+        "serve",
+        "webdav",
+        f"{remote}:",
+        "--addr",
+        f"127.0.0.1:{port}",
+        # Serve credentials on argv: the only form live-verified against rclone
+        # 1.76.0 (anon GET 401, authed PROPFIND 207). Random per run, loopback-
+        # scoped, and far less sensitive than the pasted token (also on no argv).
+        "--user",
+        user,
+        "--pass",
+        password,
+        "--vfs-cache-mode",
+        "writes",
+        "--cache-dir",
+        str(cache_dir),
+        "--vfs-cache-max-size",
+        VFS_CACHE_MAX_SIZE,
+        "--dir-cache-time",
+        "30s",
+    ]
+
+    stopping = False
+    mcp_holder: list = []
+
+    def _stop(*_a: object) -> None:
+        # Records the stop request; the readiness loop checks the flag so a
+        # SIGTERM during startup tears rclone down via the finally block. Once
+        # the MCP child exists we stop it with a grace period, then hard-kill
+        # if it ignores SIGTERM.
+        nonlocal stopping
+        stopping = True
+        if mcp_holder:
+            mcp_holder[0].terminate()
+            t = threading.Timer(STOP_GRACE_S, mcp_holder[0].kill)
+            t.daemon = True
+            t.start()
+
+    # Installed before any child exists: the readiness window is otherwise
+    # unstoppable (default SIGTERM disposition was replaced only after start).
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+
+    rclone_proc: subprocess.Popen | None = None
+    try:
+        rclone_proc = subprocess.Popen(
+            rclone_argv, stdin=subprocess.DEVNULL, stdout=sys.stderr, stderr=sys.stderr, env=env
+        )
+
+        deadline = time.monotonic() + READY_TIMEOUT_S
+        url = f"http://127.0.0.1:{port}/"
+        # Loopback probe: never route through http_proxy inherited from the env.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        ready = False
+        while time.monotonic() < deadline and not stopping:
+            if rclone_proc.poll() is not None:
+                fail(f"rclone serve exited early (rc={rclone_proc.returncode})")
+            try:
+                opener.open(url, timeout=2).read(1)
+                # 2xx without credentials = auth is NOT enforced; the drive would
+                # be readable by any local process on a host-network runner.
+                fail("rclone serve is not enforcing WebDAV authentication")
+            except urllib.request.HTTPError as e:
+                if e.code in (401, 403):
+                    ready = True  # auth challenge = listener up and enforcing
+                    break
+                fail(f"rclone serve answered HTTP {e.code} (expected 401/403)")
+            except OSError:
+                time.sleep(0.25)
+        if stopping:
+            fail("stop requested during startup")
+        if not ready:
+            fail(f"rclone serve not ready after {READY_TIMEOUT_S}s")
+
+        # Minimal environment for the third-party MCP child: only the WebDAV
+        # bridge values it needs — never the raw rclone config (RCLONE_*).
+        mcp_env = {k: v for k, v in os.environ.items() if k in MCP_ENV_ALLOW}
+        # The runner builds stdio children with PATH-only env: no HOME survives.
+        # Give npx a writable HOME per run, with a PERSISTENT npm cache next to
+        # the rclone state so the package is not re-downloaded on every spawn.
+        npm_cache = state_dir / "npm-cache"
+        npm_cache.mkdir(exist_ok=True)
+        os.chmod(npm_cache, 0o700)
+        mcp_env["HOME"] = str(cache_dir)
+        mcp_env["npm_config_cache"] = str(npm_cache)
+        mcp_env.update(
+            {
+                "WEBDAV_ROOT_URL": url,
+                "WEBDAV_ROOT_PATH": "/",
+                "WEBDAV_AUTH_ENABLED": "true",
+                "WEBDAV_USERNAME": user,
+                "WEBDAV_PASSWORD": password,
+            }
+        )
+
+        npx = shutil.which("npx", path=mcp_env.get("PATH", ""))
+        if not npx:
+            fail("npx not found on the child PATH (policy trusted_path must include the npm bin dir)")
+        mcp = subprocess.Popen(
+            [npx, "-y", "--ignore-scripts", MCP_PACKAGE],
+            stdin=None,  # inherit the runner's stdio pipes: this IS the MCP child
+            stdout=None,
+            stderr=sys.stderr,
+            env=mcp_env,
+        )
+        mcp_holder.append(mcp)
+        if stopping:  # signal landed between Popen and the append
+            _stop()
+
+        def _watch_rclone() -> None:
+            # The WebDAV backend dying mid-session (OOM, rotated token, backend
+            # crash) must tear the connector down instead of leaving the agent
+            # with silent connection-refused tool errors.
+            rclone_proc.wait()
+            _stop()
+
+        threading.Thread(target=_watch_rclone, daemon=True).start()
+        rc = mcp.wait()
+        _stop()
+        raise SystemExit(rc)
+    finally:
+        # From the rclone Popen onwards: nothing may escape without stopping the
+        # credentialed listener (Popen/npx failures, readiness timeout, signals).
+        if rclone_proc is not None and rclone_proc.poll() is None:
+            rclone_proc.terminate()
+            try:
+                rclone_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                rclone_proc.kill()
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    main()
