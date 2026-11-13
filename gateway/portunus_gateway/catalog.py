@@ -225,6 +225,66 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         },
     },
     {
+        "slug": "box",
+        "label": "Box",
+        "name": "Box",
+        "description": (
+            "Box files via the official remote MCP (OAuth 2.0; bring your own Box app's "
+            "client id + secret from the Box developer console)."
+        ),
+        "connection": "oauth",
+        "popular": True,
+        "categories": ["Storage"],
+        "tags": ["box", "files", "storage", "oauth"],
+        "sort_order": 26,
+        "spec": {
+            "url": "https://mcp.box.com/mcp",
+            "authorize_url": "https://account.box.com/api/oauth2/authorize",
+            "token_url": "https://api.box.com/oauth2/token",
+            # Box's AS advertises exactly this issuer; enables exact RFC 9207 iss checks.
+            "issuer": "https://api.box.com",
+            "resource": "https://mcp.box.com/",
+            "token_endpoint_auth_method": "client_secret_basic",
+        },
+    },
+    {
+        "slug": "onedrive",
+        "label": "OneDrive",
+        "name": "OneDrive",
+        "description": (
+            "OneDrive and Microsoft 365 files via ms-365-mcp-server (device-code login "
+            "with its built-in Microsoft app)."
+        ),
+        "connection": "stdio",
+        "popular": True,
+        "categories": ["Storage"],
+        "tags": ["onedrive", "microsoft", "files", "stdio"],
+        "sort_order": 36,
+        "spec": {
+            "command": "npx",
+            "args": ["-y", "--ignore-scripts", "@softeria/ms-365-mcp-server@0.184.1"],
+            "env": [
+                {
+                    # Visible Connect field so work/school accounts can override the
+                    # default: consumers (personal) keeps refresh tokens alive; use
+                    # organizations for Microsoft 365 business accounts.
+                    "name": "MS365_MCP_TENANT_ID",
+                    "label": "Tenant (consumers for personal, organizations for work)",
+                    "secret": False,
+                },
+            ],
+            "env_defaults": {
+                "MS365_MCP_TENANT_ID": "consumers",
+                # Sandboxed runner: no OS credential store; keep auth state on the
+                # persistent skill-state mount (pre-created by deploy) so login
+                # survives child restarts.
+                "MS365_MCP_USE_KEYTAR": "0",
+                "MS365_MCP_TOKEN_CACHE_PATH": "/var/lib/portunus/skill-state/onedrive/token-cache.json",
+                "MS365_MCP_SELECTED_ACCOUNT_PATH": "/var/lib/portunus/skill-state/onedrive/account.json",
+            },
+        },
+    },
+    {
         "slug": "pikpak",
         "label": "PikPak",
         "name": "PikPak",
