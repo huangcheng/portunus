@@ -119,10 +119,11 @@ def schema_hash(schema: dict) -> str:
 
 def effective_schema(tool: Tool) -> dict[str, Any]:
     """Schema Omni validates and publishes: override wins over the last probe."""
-    override = tool.schema_override
+    override = getattr(tool, "schema_override", None)
     if isinstance(override, dict):
         return override
-    return tool.schema if isinstance(tool.schema, dict) else {"type": "object"}
+    schema = getattr(tool, "schema", None)
+    return schema if isinstance(schema, dict) else {"type": "object"}
 
 
 def validate_schema_override(schema: Any) -> dict[str, Any]:

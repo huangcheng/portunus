@@ -2135,8 +2135,9 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
   const [tools, setTools] = useState<Tool[] | null>(null);
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [busyIds, setBusyIds] = useState<Record<string, boolean>>({});
   const [overrideDraft, setOverrideDraft] = useState<Record<string, string>>({});
+  const [rowError, setRowError] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -2153,8 +2154,35 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
     setTools(null);
     setExpanded({});
     setOverrideDraft({});
+    setBusyIds({});
+    setRowError({});
     void load();
   }, [load]);
+
+  function setBusy(id: string, on: boolean) {
+    setBusyIds((m) => {
+      if (on) return { ...m, [id]: true };
+      const next = { ...m };
+      delete next[id];
+      return next;
+    });
+  }
+
+  function clearDraft(id: string) {
+    setOverrideDraft((m) => {
+      const next = { ...m };
+      delete next[id];
+      return next;
+    });
+  }
+
+  function clearRowError(id: string) {
+    setRowError((m) => {
+      const next = { ...m };
+      delete next[id];
+      return next;
+    });
+  }
 
   function patchTool(updated: Tool) {
     setTools((prev) =>
@@ -2175,23 +2203,27 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
   }
 
   async function toggleTool(tool: Tool) {
-    setBusyId(tool.id);
+    setBusy(tool.id, true);
     setError("");
+    clearRowError(tool.id);
     try {
       const updated = await api.setToolEnabled(tool.id, !tool.enabled);
       patchTool(updated);
       window.dispatchEvent(new Event("portunus-refresh"));
     } catch (e) {
-      setError((e as Error).message);
+      setRowError((m) => ({ ...m, [tool.id]: (e as Error).message }));
     } finally {
-      setBusyId((cur) => (cur === tool.id ? null : cur));
+      setBusy(tool.id, false);
     }
   }
 
   async function saveOverride(tool: Tool) {
     const raw = overrideDraft[tool.id];
     if (raw === undefined) {
-      setError(`${tool.name}: edit the schema before saving an override`);
+      setRowError((m) => ({
+        ...m,
+        [tool.id]: "Edit the schema before saving an override",
+      }));
       return;
     }
     let parsed: Record<string, unknown>;
@@ -2202,41 +2234,35 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
       }
     } catch (e) {
       const msg = (e as Error).message || "invalid JSON";
-      setError(`${tool.name}: invalid JSON schema — ${msg}`);
+      setRowError((m) => ({ ...m, [tool.id]: `Invalid JSON schema — ${msg}` }));
       return;
     }
-    setBusyId(tool.id);
+    setBusy(tool.id, true);
     setError("");
+    clearRowError(tool.id);
     try {
       const updated = await api.setToolSchemaOverride(tool.id, parsed);
       patchTool(updated);
-      setOverrideDraft((m) => {
-        const next = { ...m };
-        delete next[tool.id];
-        return next;
-      });
+      clearDraft(tool.id);
     } catch (e) {
-      setError((e as Error).message);
+      setRowError((m) => ({ ...m, [tool.id]: (e as Error).message }));
     } finally {
-      setBusyId((cur) => (cur === tool.id ? null : cur));
+      setBusy(tool.id, false);
     }
   }
 
   async function clearOverride(tool: Tool) {
-    setBusyId(tool.id);
+    setBusy(tool.id, true);
     setError("");
+    clearRowError(tool.id);
     try {
       const updated = await api.clearToolSchemaOverride(tool.id);
       patchTool(updated);
-      setOverrideDraft((m) => {
-        const next = { ...m };
-        delete next[tool.id];
-        return next;
-      });
+      clearDraft(tool.id);
     } catch (e) {
-      setError((e as Error).message);
+      setRowError((m) => ({ ...m, [tool.id]: (e as Error).message }));
     } finally {
-      setBusyId((cur) => (cur === tool.id ? null : cur));
+      setBusy(tool.id, false);
     }
   }
 
@@ -2263,11 +2289,15 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
         <ul className="tools-list drawer-tools-list">
           {tools.map((t) => {
             const open = !!expanded[t.id];
-            const draft = open
-              ? (overrideDraft[t.id] ??
-                JSON.stringify(t.schema_override ?? t.schema ?? {}, null, 2))
+            const baseline = open
+              ? JSON.stringify(t.schema_override ?? t.schema ?? {}, null, 2)
               : "";
-            const dirty = overrideDraft[t.id] !== undefined;
+            const draft = open ? (overrideDraft[t.id] ?? baseline) : "";
+            const dirty =
+              open &&
+              overrideDraft[t.id] !== undefined &&
+              overrideDraft[t.id] !== baseline;
+            const busy = !!busyIds[t.id];
             return (
               <li key={t.id} className={!t.enabled ? "disabled" : undefined}>
                 <button
@@ -2295,7 +2325,7 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
                       <button
                         type="button"
                         className="outline sm"
-                        disabled={busyId === t.id}
+                        disabled={busy}
                         onClick={() => void toggleTool(t)}
                       >
                         {t.enabled ? "Disable for agents" : "Enable for agents"}
@@ -2314,17 +2344,22 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
                       className="json-editor-input tools-schema-edit"
                       rows={10}
                       spellCheck={false}
+                      aria-label={`${t.name} schema override`}
+                      aria-invalid={rowError[t.id] ? true : undefined}
                       value={draft}
-                      disabled={busyId === t.id}
+                      disabled={busy}
                       onChange={(e) =>
                         setOverrideDraft((m) => ({ ...m, [t.id]: e.target.value }))
                       }
                     />
+                    {rowError[t.id] ? (
+                      <p className="json-editor-error">{rowError[t.id]}</p>
+                    ) : null}
                     <div className="tools-row-actions">
                       <button
                         type="button"
                         className="outline sm"
-                        disabled={busyId === t.id || !dirty}
+                        disabled={busy || !dirty}
                         onClick={() => void saveOverride(t)}
                       >
                         Save schema override
@@ -2333,7 +2368,7 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
                         <button
                           type="button"
                           className="ghost sm"
-                          disabled={busyId === t.id}
+                          disabled={busy}
                           onClick={() => void clearOverride(t)}
                         >
                           Clear override

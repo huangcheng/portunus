@@ -118,3 +118,25 @@ def test_finish_result_quark_nested_result_object():
     assert quark.is_error
     assert quark.structured_content["error"]["upstream"].get("code") == -104
     assert "remove from automation" in quark.structured_content["error"]["message"]
+
+
+def test_finish_result_nested_login_pending_with_exit_zero():
+    """Guangyapan-style: exit_code 0 envelope + LOGIN_PENDING inside result."""
+    pending = finish_result(
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": '{"exit_code":0,"result":{"code":"LOGIN_PENDING","logged_in":false}}',
+                }
+            ],
+            "structuredContent": {
+                "exit_code": 0,
+                "result": {"code": "LOGIN_PENDING", "logged_in": False},
+            },
+        },
+        server="guangyapan",
+        tool="account_rights",
+    )
+    assert pending.is_error
+    assert pending.structured_content["error"]["code"] == "auth_required"

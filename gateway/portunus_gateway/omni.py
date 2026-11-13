@@ -342,31 +342,41 @@ def _first_text(content: list[Any]) -> str:
 def _unwrap_cli_payload(structured: Any) -> dict[str, Any] | None:
     """Best-effort unwrap of skill-bridge / CLI envelopes (``result`` string or object).
 
-    When the outer object already looks like a CLI envelope (``exit_code`` / ``ok`` /
-    ``LOGIN_PENDING``), keep it so nested ``result`` business payloads (e.g. Quark
-    ``{code:-104, msg:…}``) stay accessible via ``result`` rather than replacing the
-    envelope and dropping ``exit_code``.
+    json_cli envelopes are ``{exit_code, result, stderr}``. Keep ``exit_code`` visible for
+    Quark-style failures, but surface a *failure-shaped* nested ``result`` (LOGIN_PENDING,
+    ok=false, logged_in=false) so ``_cli_business_failure`` still classifies them.
     """
     if not isinstance(structured, dict):
         return None
+
+    inner = structured.get("result")
+    parsed_inner: Any = inner
+    if isinstance(inner, str) and inner.strip()[:1] in "{[":
+        try:
+            parsed_inner = json.loads(inner)
+        except (json.JSONDecodeError, TypeError):
+            parsed_inner = None
+    if isinstance(parsed_inner, dict) and (
+        parsed_inner.get("code") == "LOGIN_PENDING"
+        or parsed_inner.get("ok") is False
+        or parsed_inner.get("logged_in") is False
+    ):
+        # Prefer nested business fields; keep envelope stderr/message/exit_code.
+        merged = {**structured, **parsed_inner}
+        if "exit_code" in structured:
+            merged["exit_code"] = structured["exit_code"]
+        return merged
+
     if (
         "exit_code" in structured
         or "ok" in structured
         or structured.get("code") == "LOGIN_PENDING"
     ):
         return structured
-    payload: Any = structured
-    inner = structured.get("result")
-    if isinstance(inner, str) and inner.strip()[:1] in "{[":
-        try:
-            parsed = json.loads(inner)
-        except (json.JSONDecodeError, TypeError):
-            parsed = None
-        if isinstance(parsed, dict):
-            payload = parsed
-    elif isinstance(inner, dict):
-        payload = inner
-    return payload if isinstance(payload, dict) else None
+
+    if isinstance(parsed_inner, dict):
+        return parsed_inner
+    return structured
 
 
 def _cli_business_failure(
