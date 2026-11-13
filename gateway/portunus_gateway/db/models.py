@@ -106,6 +106,9 @@ class Tool(Base):
     description: Mapped[str | None] = mapped_column(Text)
     schema: Mapped[dict[str, Any]] = mapped_column(JSON)
     schema_hash: Mapped[str] = mapped_column(String(128))
+    # Operator-approved JSON Schema; when set, Omni validates/discovers against this
+    # instead of the last probed ``schema``. Probe never clears it.
+    schema_override: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     # MCP ToolAnnotations (readOnlyHint / destructiveHint / …); null when upstream omitted.
     annotations: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     enabled: Mapped[bool] = mapped_column(default=True, server_default=true())

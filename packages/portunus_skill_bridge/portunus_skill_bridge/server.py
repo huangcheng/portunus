@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -12,6 +13,8 @@ from pydantic import BaseModel, Field, create_model
 
 from portunus_skill_bridge.backends import build_backend
 from portunus_skill_bridge.manifest import Manifest, ToolSpec
+
+log = logging.getLogger("portunus.skill_bridge")
 
 _TYPE_MAP = {
     "string": str,
@@ -44,8 +47,20 @@ def _make_handler(
     """Flat kwargs handler so MCP schema is tool fields, not a nested ``params`` object."""
 
     async def _handler(**kwargs: Any) -> str:
-        data = params_model.model_validate(kwargs).model_dump(exclude_none=True)
-        result = await call(tool, data)
+        try:
+            data = params_model.model_validate(kwargs).model_dump(exclude_none=True)
+            result = await call(tool, data)
+        except Exception as e:
+            # Prefer a CLI-shaped envelope over the MCP SDK's generic
+            # "Error executing tool …" so the gateway can surface stderr/message.
+            log.exception("skill-bridge tool %s failed", tool.name)
+            envelope = {
+                "exit_code": 1,
+                "message": str(e)[:500] or type(e).__name__,
+                "stderr": str(e)[:2000] or None,
+                "error": type(e).__name__,
+            }
+            return json.dumps(envelope, ensure_ascii=False, default=str)
         if isinstance(result, str):
             return result
         return json.dumps(result, ensure_ascii=False, default=str)

@@ -133,6 +133,9 @@ export type Tool = {
   description: string | null;
   schema?: Record<string, unknown> | null;
   schema_hash?: string;
+  schema_overridden?: boolean;
+  schema_override?: Record<string, unknown> | null;
+  probed_schema?: Record<string, unknown> | null;
   enabled: boolean;
 };
 export type Key = {
@@ -251,6 +254,10 @@ export const api = {
     call<Server>("POST", `/servers/${id}/enable`, { enabled }),
   setToolEnabled: (id: string, enabled: boolean) =>
     call<Tool>("POST", `/tools/${id}/enable`, { enabled }),
+  setToolSchemaOverride: (id: string, schema: Record<string, unknown>) =>
+    call<Tool>("PUT", `/tools/${id}/schema-override`, { schema }),
+  clearToolSchemaOverride: (id: string) =>
+    call<Tool>("DELETE", `/tools/${id}/schema-override`),
   setBearerToken: (id: string, token: string) =>
     call<Server>("POST", `/servers/${id}/auth/token`, { token }),
   oauthStart: (id: string, redirect_uri: string) =>

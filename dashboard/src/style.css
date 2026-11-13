@@ -689,6 +689,8 @@ th.text-right { text-align: right; }
 .tools-row-detail { padding: 14px; display: flex; flex-direction: column; gap: 11px; background: var(--muted); }
 .tools-row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .tools-schema { margin: 0; max-height: 240px; overflow: auto; padding: 12px 13px; border-radius: 9px; border: 1px solid var(--sidebar-border); background: var(--sidebar); color: var(--sidebar-foreground); font-family: var(--font-mono); font-size: 10.5px; line-height: 1.55; white-space: pre; }
+.tools-row-trailing { display: inline-flex; align-items: center; gap: 8px; justify-self: end; }
+.tools-schema-edit { max-height: 280px; }
 .mono-chip { font-family: var(--font-mono); font-size: 10px; }
 
 .create-card { width: 100%; max-width: none; padding: 28px; gap: 17px; }

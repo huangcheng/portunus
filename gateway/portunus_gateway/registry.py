@@ -117,6 +117,40 @@ def schema_hash(schema: dict) -> str:
     return hashlib.sha256(canon.encode()).hexdigest()
 
 
+def effective_schema(tool: Tool) -> dict[str, Any]:
+    """Schema Omni validates and publishes: override wins over the last probe."""
+    override = tool.schema_override
+    if isinstance(override, dict):
+        return override
+    return tool.schema if isinstance(tool.schema, dict) else {"type": "object"}
+
+
+def validate_schema_override(schema: Any) -> dict[str, Any]:
+    """Operator-supplied JSON Schema object (same shape family as probe ``inputSchema``)."""
+    from jsonschema import SchemaError
+    from jsonschema.validators import validator_for
+
+    if not isinstance(schema, dict):
+        raise RegistryError(422, "invalid_request", "schema must be a JSON object")
+    # Bound size so a pasted dump cannot blow the DB / response.
+    raw = json.dumps(schema, separators=(",", ":"), ensure_ascii=False)
+    if len(raw.encode()) > 256 * 1024:
+        raise RegistryError(422, "invalid_request", "schema override exceeds 256 KiB")
+    # Arguments are always a JSON object; reject non-object roots early.
+    root_type = schema.get("type")
+    if root_type is not None and root_type != "object":
+        raise RegistryError(
+            422, "invalid_schema", "schema override root type must be object"
+        )
+    try:
+        validator_for(schema).check_schema(schema)
+    except SchemaError as e:
+        raise RegistryError(
+            422, "invalid_schema", f"invalid JSON Schema: {e.message}"
+        ) from None
+    return schema
+
+
 def validate_env(env: dict[str, str]) -> dict[str, str]:
     if not isinstance(env, dict) or len(env) > MAX_ENV_ENTRIES:
         raise RegistryError(422, "invalid_env", "env must be an object of string literals")
@@ -217,15 +251,20 @@ def server_view(
 
 
 def tool_view(tool: Tool) -> dict[str, Any]:
-    out = {
+    overridden = isinstance(tool.schema_override, dict)
+    out: dict[str, Any] = {
         "id": str(tool.id),
         "server_id": str(tool.server_id),
         "name": tool.upstream_name,
         "description": tool.description,
-        "schema": tool.schema,
+        "schema": effective_schema(tool),
         "schema_hash": tool.schema_hash,
+        "schema_overridden": overridden,
         "enabled": tool.enabled,
     }
+    if overridden:
+        out["probed_schema"] = tool.schema
+        out["schema_override"] = tool.schema_override
     if tool.annotations:
         out["annotations"] = tool.annotations
     return out
@@ -905,6 +944,55 @@ class Registry:
             await s.commit()
             return tool_view(tool)
 
+    async def set_tool_schema_override(
+        self, tool_id: uuid.UUID, schema: dict[str, Any], actor: str
+    ) -> dict[str, Any]:
+        override = validate_schema_override(schema)
+        async with self._sf() as s:
+            tool = await s.get(Tool, tool_id)
+            if tool is None:
+                raise RegistryError(404, "not_found", "tool not found")
+            tool.schema_override = override
+            tool.schema_hash = schema_hash(override)
+            s.add(
+                self._audit(
+                    actor,
+                    "tool.schema_override.set",
+                    tool_id,
+                    {
+                        "server_id": str(tool.server_id),
+                        "name": tool.upstream_name,
+                        "schema_hash": tool.schema_hash,
+                    },
+                )
+            )
+            await s.commit()
+            return tool_view(tool)
+
+    async def clear_tool_schema_override(self, tool_id: uuid.UUID, actor: str) -> dict[str, Any]:
+        async with self._sf() as s:
+            tool = await s.get(Tool, tool_id)
+            if tool is None:
+                raise RegistryError(404, "not_found", "tool not found")
+            tool.schema_override = None
+            tool.schema_hash = schema_hash(
+                tool.schema if isinstance(tool.schema, dict) else {"type": "object"}
+            )
+            s.add(
+                self._audit(
+                    actor,
+                    "tool.schema_override.clear",
+                    tool_id,
+                    {
+                        "server_id": str(tool.server_id),
+                        "name": tool.upstream_name,
+                        "schema_hash": tool.schema_hash,
+                    },
+                )
+            )
+            await s.commit()
+            return tool_view(tool)
+
     # ---- invoke ------------------------------------------------------------------
 
     async def start_payload(self, server_id: uuid.UUID) -> dict[str, Any]:
@@ -1375,8 +1463,8 @@ class Registry:
             added = 0
             changed: list[str] = []
             for item in incoming:
-                digest = schema_hash(item["schema"])
                 annotations = item.get("annotations")
+                probed = item["schema"]
                 tool = existing.get(item["name"])
                 if tool is None:
                     s.add(
@@ -1384,26 +1472,28 @@ class Registry:
                             server_id=server_id,
                             upstream_name=item["name"],
                             description=item["description"],
-                            schema=item["schema"],
-                            schema_hash=digest,
+                            schema=probed,
+                            schema_hash=schema_hash(probed),
+                            schema_override=None,
                             annotations=annotations,
                             enabled=True,
                         )
                     )
                     added += 1
-                elif (
-                    tool.schema_hash != digest
+                    continue
+                probed_changed = (
+                    tool.schema != probed
                     or tool.description != item["description"]
                     or tool.annotations != annotations
-                ):
-                    tool.description = item["description"]
-                    tool.schema = item["schema"]
-                    tool.schema_hash = digest
-                    tool.annotations = annotations
-                    tool.enabled = True
-                    changed.append(tool.upstream_name)
-                elif not tool.enabled:
-                    tool.enabled = True
+                )
+                was_disabled = not tool.enabled
+                tool.description = item["description"]
+                tool.schema = probed
+                tool.annotations = annotations
+                # Override survives probe; hash always tracks the effective schema.
+                tool.schema_hash = schema_hash(effective_schema(tool))
+                tool.enabled = True
+                if probed_changed or was_disabled:
                     changed.append(tool.upstream_name)
             seen = {i["name"] for i in incoming}
             missing = sorted(n for n in existing if n not in seen)

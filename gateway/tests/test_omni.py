@@ -24,6 +24,7 @@ from portunus_gateway.db.session import async_session
 from portunus_gateway.omni import MAX_RESULT_BYTES, Omni, ServerStateCache, finish_result
 from portunus_gateway.registry import Registry
 from portunus_gateway.slots import SlotManager
+from sqlalchemy import select
 from test_registry_probe import _body, _vault, policy_dir, runner_with_fixture  # noqa: F401
 
 pytestmark = pytest.mark.anyio
@@ -679,6 +680,8 @@ def test_finish_result_cli_envelope_failures_become_iserror():
     assert quark.is_error
     assert quark.structured_content["error"]["code"] == "upstream_error"
     assert "无法识别" in quark.structured_content["error"]["message"]
+    assert "remove from automation" in quark.structured_content["error"]["message"]
+    assert quark.structured_content["error"]["upstream"].get("code") == -104
 
     pending = finish_result(
         {
@@ -712,6 +715,67 @@ def test_finish_result_cli_envelope_failures_become_iserror():
 
 async def test_invoke_timeout_default_is_60s(stack):
     assert stack.omni.invoke_timeout_s == 60
+
+
+async def test_invoke_retries_once_on_upstream_timeout(stack, monkeypatch):
+    from portunus_shared import PortunusError
+
+    monkeypatch.setattr("portunus_gateway.omni._INVOKE_TIMEOUT_RETRY_DELAY_S", 0)
+    sid = await stack.add_server("retryme")
+    token, _ = await stack.add_key(sid)
+    async with async_session() as s:
+        tool = (
+            await s.execute(
+                select(Tool).where(Tool.server_id == sid, Tool.upstream_name == "alpha")
+            )
+        ).scalar_one()
+        tool.annotations = {"readOnlyHint": True}
+        await s.commit()
+    calls = {"n": 0}
+    original = stack.omni._run_invoke
+
+    async def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise PortunusError("upstream_timeout", "slow once")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(stack.omni, "_run_invoke", flaky)
+    async with stack.client(token) as c:
+        ok = await c.call_tool(
+            "portunus_invoke_tool",
+            {"server": "retryme", "tool": "alpha", "arguments": {"q": "z"}},
+        )
+        assert not ok.is_error, payload(ok)
+    assert calls["n"] == 2
+
+
+async def test_schema_override_used_for_omni_validation(stack):
+    sid = await stack.add_server("ovsrv")
+    token, _ = await stack.add_key(sid)
+    async with async_session() as s:
+        tool = (
+            await s.execute(
+                select(Tool).where(Tool.server_id == sid, Tool.upstream_name == "alpha")
+            )
+        ).scalar_one()
+        tool_id = tool.id
+    override = {
+        "type": "object",
+        "properties": {"q": {"type": "string"}, "must": {"type": "string"}},
+        "required": ["q", "must"],
+    }
+    await stack.registry.set_tool_schema_override(tool_id, override, "test")
+    async with stack.client(token) as c:
+        schema = payload(
+            await c.call_tool("portunus_get_tool_schema", {"server": "ovsrv", "tool": "alpha"})
+        )
+        assert schema["input_schema"]["required"] == ["q", "must"]
+        bad = await c.call_tool(
+            "portunus_invoke_tool",
+            {"server": "ovsrv", "tool": "alpha", "arguments": {"q": "x"}},
+        )
+        assert error_code(bad) == "invalid_tool_arguments"
 
 
 async def test_invoke_timeout_kills_wedged_child(fast_timeout_stack):

@@ -73,9 +73,29 @@ from .config import load_pepper
 from .keys import AuthError, verify_agent_token
 from .origin import origin_allowed
 from .protected_resource import bearer_challenge_headers
-from .registry import RegistryError
+from .registry import RegistryError, effective_schema
 from .runner_client import RunnerRequestError
 from .runner_pool import RunnerPool
+
+# One automatic retry after a transient upstream timeout (read-only / idempotent only).
+_INVOKE_TIMEOUT_RETRY_DELAY_S = 0.3
+_SAFE_WEBDAV_RETRY_TOOLS = frozenset(
+    {
+        "webdav_list_remote_directory",
+        "webdav_stat",
+        "webdav_read_resource",
+        "webdav_get_file",
+    }
+)
+
+
+def _timeout_retryable(tool: ToolRow) -> bool:
+    """Only retry when a duplicate call cannot create a second side effect."""
+    ann = tool.annotations if isinstance(tool.annotations, dict) else {}
+    if ann.get("readOnlyHint") is True or ann.get("idempotentHint") is True:
+        return True
+    name = (tool.upstream_name or "").casefold()
+    return name in _SAFE_WEBDAV_RETRY_TOOLS
 
 # Prefixed _meta key (MCP naming MUST). Legacy ``portunus`` is dual-written for one release.
 META_PORTUNUS = "io.portunus.gateway"
@@ -320,9 +340,21 @@ def _first_text(content: list[Any]) -> str:
 
 
 def _unwrap_cli_payload(structured: Any) -> dict[str, Any] | None:
-    """Best-effort unwrap of skill-bridge / CLI envelopes (``result`` string or object)."""
+    """Best-effort unwrap of skill-bridge / CLI envelopes (``result`` string or object).
+
+    When the outer object already looks like a CLI envelope (``exit_code`` / ``ok`` /
+    ``LOGIN_PENDING``), keep it so nested ``result`` business payloads (e.g. Quark
+    ``{code:-104, msg:…}``) stay accessible via ``result`` rather than replacing the
+    envelope and dropping ``exit_code``.
+    """
     if not isinstance(structured, dict):
         return None
+    if (
+        "exit_code" in structured
+        or "ok" in structured
+        or structured.get("code") == "LOGIN_PENDING"
+    ):
+        return structured
     payload: Any = structured
     inner = structured.get("result")
     if isinstance(inner, str) and inner.strip()[:1] in "{[":
@@ -468,6 +500,12 @@ def finish_result(
         failure = _cli_business_failure(structured)
         if failure is not None:
             code, message, detail = failure
+            # Quark agent-environment gate (-104): re-auth will not help.
+            if server == "quark" and detail.get("code") == -104:
+                message = (
+                    "Quark rejects this runtime (无法识别当前 Agent 环境); "
+                    "remove from automation — re-auth will not help"
+                )
             body = {
                 "error": {
                     "code": code,
@@ -965,7 +1003,7 @@ class Omni:
                 "description": t.description,
                 "schema_hash": t.schema_hash,
                 # Review #31: inline schema so agents need fewer round trips.
-                "input_schema": t.schema,
+                "input_schema": effective_schema(t),
             }
             if t.annotations:
                 row["annotations"] = t.annotations
@@ -981,7 +1019,7 @@ class Omni:
             "server": server.slug,
             "name": tool.upstream_name,
             "description": tool.description,
-            "input_schema": tool.schema,
+            "input_schema": effective_schema(tool),
             "schema_hash": tool.schema_hash,
             # Review #30: real pin value is the hash; including it on invoke is optional.
             "schema_pin": tool.schema_hash,
@@ -1000,7 +1038,7 @@ class Omni:
         if pin is not None and pin != tool.schema_hash:
             raise PortunusError("schema_drift", "tool schema changed since schema_hash")
         arguments = args.get("arguments", {})
-        _validate(tool.schema, arguments, what="tool arguments")
+        _validate(effective_schema(tool), arguments, what="tool arguments")
         timeout_s = self.invoke_timeout_s
         caller_shortened_timeout = False
         if "timeout_s" in args:
@@ -1025,19 +1063,69 @@ class Omni:
                     truncate=truncate,
                 )
             except (PortunusError, RegistryError) as e:
-                await self.registry.record_outcome(
-                    server.id,
-                    e.code,
-                    message=e.message,
-                    caller_shortened_timeout=caller_shortened_timeout,
-                    # Cold-start failures raise before the dispatch bag knows the site;
-                    # SlotManager attaches it to the error (slot.site_id).
-                    site_id=self._invoke_site() or getattr(e, "site_id", None),
+                # One retry for transient timeouts on read-only/idempotent tools only.
+                can_retry = (
+                    e.code == "upstream_timeout"
+                    and not caller_shortened_timeout
+                    and _timeout_retryable(tool)
                 )
-                # Failover needs no extra push here: upstream_timeout already retires the
-                # pair in _run_invoke and link loss reconciles via reconnect; the learned
-                # streak recorded above is what moves the *next* placement.
-                raise
+                if can_retry:
+                    # Record the first timeout so site health / last_error stay honest.
+                    await self.registry.record_outcome(
+                        server.id,
+                        e.code,
+                        message=e.message,
+                        caller_shortened_timeout=caller_shortened_timeout,
+                        site_id=self._invoke_site() or getattr(e, "site_id", None),
+                    )
+                    # Drop first-attempt timing/site so a failed retry is not attributed
+                    # to a site that never ran the second call.
+                    bag = _invoke_attrs.get()
+                    if isinstance(bag, dict):
+                        for key in (
+                            "site_id",
+                            "start_ms",
+                            "cold_start",
+                            "preferred_miss",
+                            "queue_ms",
+                            "init_ms",
+                            "upstream_ms",
+                        ):
+                            bag.pop(key, None)
+                    await asyncio.sleep(_INVOKE_TIMEOUT_RETRY_DELAY_S)
+                    try:
+                        result = await self._run_invoke(
+                            key_id,
+                            server,
+                            tool,
+                            arguments,
+                            timeout_s,
+                            max_bytes=max_bytes,
+                            truncate=truncate,
+                        )
+                    except (PortunusError, RegistryError) as e2:
+                        await self.registry.record_outcome(
+                            server.id,
+                            e2.code,
+                            message=e2.message,
+                            caller_shortened_timeout=caller_shortened_timeout,
+                            site_id=self._invoke_site() or getattr(e2, "site_id", None),
+                        )
+                        raise
+                else:
+                    await self.registry.record_outcome(
+                        server.id,
+                        e.code,
+                        message=e.message,
+                        caller_shortened_timeout=caller_shortened_timeout,
+                        # Cold-start failures raise before the dispatch bag knows the site;
+                        # SlotManager attaches it to the error (slot.site_id).
+                        site_id=self._invoke_site() or getattr(e, "site_id", None),
+                    )
+                    # Failover needs no extra push here: upstream_timeout already retires the
+                    # pair in _run_invoke and link loss reconciles via reconnect; the learned
+                    # streak recorded above is what moves the *next* placement.
+                    raise
             code = _error_code_from_result(result)
             await self.registry.record_outcome(
                 server.id,
@@ -1228,8 +1316,8 @@ class Omni:
                     tool.upstream_name,
                     arguments,
                     timeout_s=timeout_s,
-                    # Stored (operator-approved) schema drives Mcp-Param-* mirroring.
-                    input_schema=tool.schema,
+                    # Effective (operator override or probed) schema drives Mcp-Param-* mirroring.
+                    input_schema=effective_schema(tool),
                 )
             except PortunusError as e:
                 self._note_invoke(upstream_ms=_ms_since(t_up))

@@ -53,6 +53,10 @@ GUANGYAPAN_STATE_DIR = "/var/lib/portunus/skill-state/guangyapan"
 QUARK_MANIFEST: dict[str, Any] = _load_packaged_manifest("quark.example.yaml")
 QUARK_SKILL_ROOT = "/var/lib/portunus/skills/quarkclouddrive"
 QUARK_STATE_DIR = "/var/lib/portunus/skill-state/quark"
+# Prior DEFAULT_APPS description — used only to one-shot refresh honesty text.
+_LEGACY_QUARK_DESC = (
+    "Quark Drive via skill-bridge (oauth_link + browser_capture; agents get drive tools only)."
+)
 
 # Seeded once when the table is empty. Operators can edit/delete afterward.
 # ``categories`` drive browse filters (Composio-style); ``tags`` are freeform chips.
@@ -217,9 +221,13 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "slug": "quark",
         "label": "夸克网盘",
         "name": "夸克网盘",
-        "description": "Quark Drive via skill-bridge (oauth_link + browser_capture; agents get drive tools only).",
+        "description": (
+            "Quark Drive via skill-bridge (oauth_link). Unusable through Portunus: "
+            "upstream rejects non-Quark agent environments (-104); re-auth will not help. "
+            "Do not put Quark in automation plans that route through this gateway."
+        ),
         "connection": "skill_bridge",
-        "popular": True,
+        "popular": False,
         "categories": ["Storage"],
         "tags": ["quark", "drive", "json_cli"],
         "sort_order": 76,
@@ -678,7 +686,20 @@ class CatalogStore:
                 seed_defaults = spec.get("env_defaults") or {}
                 live_defaults = (row.spec or {}).get("env_defaults") or {}
                 defaults_changed = seed_defaults != live_defaults
-                if (seed_names and seed_names != live_names) or auth_changed or defaults_changed:
+                # One-shot Quark honesty refresh: only when the row still has the
+                # previously shipped seed text (never clobber operator edits).
+                quark_honesty = (
+                    raw["slug"] == "quark" and row.description == _LEGACY_QUARK_DESC
+                )
+                if quark_honesty:
+                    row.description = raw["description"]
+                    row.popular = bool(raw.get("popular"))
+                spec_changed = (
+                    (seed_names and seed_names != live_names)
+                    or auth_changed
+                    or defaults_changed
+                )
+                if spec_changed:
                     row.spec = spec
                     linked = (
                         await s.execute(
@@ -687,6 +708,7 @@ class CatalogStore:
                     ).scalars().all()
                     for srv in linked:
                         srv.vault_version = int(srv.vault_version or 0) + 1
+                if spec_changed or quark_honesty:
                     refreshed += 1
             if added or refreshed:
                 await s.commit()

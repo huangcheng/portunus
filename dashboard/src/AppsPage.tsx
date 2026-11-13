@@ -2136,6 +2136,7 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [overrideDraft, setOverrideDraft] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     try {
@@ -2151,20 +2152,91 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
   useEffect(() => {
     setTools(null);
     setExpanded({});
+    setOverrideDraft({});
     void load();
   }, [load]);
+
+  function patchTool(updated: Tool) {
+    setTools((prev) =>
+      prev
+        ? prev.map((t) =>
+            t.id === updated.id
+              ? {
+                  ...t,
+                  ...updated,
+                  // tool_view omits these when no override — clear stale client state.
+                  schema_override: updated.schema_override ?? null,
+                  probed_schema: updated.probed_schema ?? null,
+                }
+              : t,
+          )
+        : prev,
+    );
+  }
 
   async function toggleTool(tool: Tool) {
     setBusyId(tool.id);
     setError("");
     try {
       const updated = await api.setToolEnabled(tool.id, !tool.enabled);
-      setTools((prev) => (prev ? prev.map((t) => (t.id === tool.id ? { ...t, ...updated } : t)) : prev));
+      patchTool(updated);
       window.dispatchEvent(new Event("portunus-refresh"));
     } catch (e) {
       setError((e as Error).message);
     } finally {
-      setBusyId(null);
+      setBusyId((cur) => (cur === tool.id ? null : cur));
+    }
+  }
+
+  async function saveOverride(tool: Tool) {
+    const raw = overrideDraft[tool.id];
+    if (raw === undefined) {
+      setError(`${tool.name}: edit the schema before saving an override`);
+      return;
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("schema must be a JSON object");
+      }
+    } catch (e) {
+      const msg = (e as Error).message || "invalid JSON";
+      setError(`${tool.name}: invalid JSON schema — ${msg}`);
+      return;
+    }
+    setBusyId(tool.id);
+    setError("");
+    try {
+      const updated = await api.setToolSchemaOverride(tool.id, parsed);
+      patchTool(updated);
+      setOverrideDraft((m) => {
+        const next = { ...m };
+        delete next[tool.id];
+        return next;
+      });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusyId((cur) => (cur === tool.id ? null : cur));
+    }
+  }
+
+  async function clearOverride(tool: Tool) {
+    setBusyId(tool.id);
+    setError("");
+    try {
+      const updated = await api.clearToolSchemaOverride(tool.id);
+      patchTool(updated);
+      setOverrideDraft((m) => {
+        const next = { ...m };
+        delete next[tool.id];
+        return next;
+      });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusyId((cur) => (cur === tool.id ? null : cur));
     }
   }
 
@@ -2191,6 +2263,11 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
         <ul className="tools-list drawer-tools-list">
           {tools.map((t) => {
             const open = !!expanded[t.id];
+            const draft = open
+              ? (overrideDraft[t.id] ??
+                JSON.stringify(t.schema_override ?? t.schema ?? {}, null, 2))
+              : "";
+            const dirty = overrideDraft[t.id] !== undefined;
             return (
               <li key={t.id} className={!t.enabled ? "disabled" : undefined}>
                 <button
@@ -2203,7 +2280,14 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
                   <span className="tools-list-desc">
                     {t.description?.trim() || "No description"}
                   </span>
-                  <Icon name="chevron-down" size={13} className="tools-toggle-chev" />
+                  <span className="tools-row-trailing">
+                    {t.schema_overridden ? (
+                      <span className="muted mono-chip" title="Operator schema override">
+                        Overridden
+                      </span>
+                    ) : null}
+                    <Icon name="chevron-down" size={13} className="tools-toggle-chev" />
+                  </span>
                 </button>
                 {open && (
                   <div className="tools-row-detail">
@@ -2222,9 +2306,48 @@ function ServerToolsPanel({ serverId }: { serverId: string }) {
                         </span>
                       ) : null}
                     </div>
-                    <pre className="tools-schema">
-                      {JSON.stringify(t.schema ?? {}, null, 2)}
-                    </pre>
+                    <p className="provider-hint">
+                      Effective schema (agents validate against this). Paste a JSON Schema
+                      object to override a drifted upstream contract; probe will not clear it.
+                    </p>
+                    <textarea
+                      className="json-editor-input tools-schema-edit"
+                      rows={10}
+                      spellCheck={false}
+                      value={draft}
+                      disabled={busyId === t.id}
+                      onChange={(e) =>
+                        setOverrideDraft((m) => ({ ...m, [t.id]: e.target.value }))
+                      }
+                    />
+                    <div className="tools-row-actions">
+                      <button
+                        type="button"
+                        className="outline sm"
+                        disabled={busyId === t.id || !dirty}
+                        onClick={() => void saveOverride(t)}
+                      >
+                        Save schema override
+                      </button>
+                      {t.schema_overridden ? (
+                        <button
+                          type="button"
+                          className="ghost sm"
+                          disabled={busyId === t.id}
+                          onClick={() => void clearOverride(t)}
+                        >
+                          Clear override
+                        </button>
+                      ) : null}
+                    </div>
+                    {t.schema_overridden && t.probed_schema ? (
+                      <>
+                        <p className="provider-hint">Last probed upstream schema</p>
+                        <pre className="tools-schema">
+                          {JSON.stringify(t.probed_schema, null, 2)}
+                        </pre>
+                      </>
+                    ) : null}
                   </div>
                 )}
               </li>

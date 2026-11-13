@@ -495,6 +495,32 @@ async def enable_tool(
     return await registry.set_tool_enabled(tool_id, (body or EnableBody()).enabled, actor)
 
 
+class SchemaOverrideBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    # ``schema`` is the JSON key; attribute cannot be named ``schema`` (shadows BaseModel).
+    schema_body: dict[str, Any] = Field(alias="schema")
+
+
+@router.put("/tools/{tool_id}/schema-override")
+async def set_tool_schema_override(
+    tool_id: uuid.UUID,
+    body: SchemaOverrideBody,
+    actor: str = Depends(require_operator),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    return await registry.set_tool_schema_override(tool_id, body.schema_body, actor)
+
+
+@router.delete("/tools/{tool_id}/schema-override")
+async def clear_tool_schema_override(
+    tool_id: uuid.UUID,
+    actor: str = Depends(require_operator),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    return await registry.clear_tool_schema_override(tool_id, actor)
+
+
 # ---- auth routes ------------------------------------------------------------------------
 
 

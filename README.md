@@ -87,6 +87,26 @@ PORTUNUS_URL=http://localhost:8080 PORTUNUS_OPERATOR_PASSWORD=... E2E_COMMAND=/a
    tools: `portunus_discover_servers`, `portunus_discover_tools`, `portunus_get_tool_schema`,
    `portunus_invoke_tool`.
 
+### Agent / client notes
+
+- Meta-tool payloads use **`input_schema`** (snake_case), not the MCP wire field `inputSchema`.
+- Requests without a **`User-Agent`** may get `403` from Cloudflare (or similar) in front of a public deploy.
+- Treat agent keys as secrets: prefer an env var or credential file over an inline Bearer header in
+  synced configs; rotate the key if a config file was backed up to an untrusted place.
+- When an upstream schema drifts (optional vs required), open the server’s tool drawer and set a
+  **schema override**; probes keep the probed copy but agents validate against the override.
+- Invoke retries once on `upstream_timeout` only for read-only / idempotent tools
+  (`readOnlyHint` / `idempotentHint`, or known WebDAV list/stat/read tools).
+
+### Ops checklist (probe findings)
+
+| Issue | Action |
+|---|---|
+| Dropbox / PikPak `auth_required` | Reconnect OAuth in Apps → Probe → confirm status `ok` |
+| Guangyapan `upstream_error` / SSL | On the runner: `SKILL_ROOT` / `STATE_DIR`, Node deps, device login, reachability of `api.guangyapan.com` |
+| Quark `-104` | Expected: Quark rejects this runtime; leave out of automation (catalog marks it non-popular) |
+| dida365 `query_calendar_events` | Set an operator schema override that marks `query` required |
+
 ## Environment variables
 
 | Variable | Used by | Required | Meaning |

@@ -544,6 +544,70 @@ async def test_missing_input_schema_defaults_to_empty_object_schema(scripted):
     assert t["schema"] == {"type": "object"}
 
 
+async def test_schema_override_survives_probe_and_updates_hash(scripted):
+    client, _registry, runner = scripted
+    sid = await _mk(client)
+    runner.tools = [
+        _tool(
+            "cal",
+            {
+                "type": "object",
+                "properties": {"query": {"type": "object"}},
+            },
+        )
+    ]
+    assert (await client.post(f"/api/servers/{sid}/probe")).status_code == 200
+    (tool,) = (await client.get(f"/api/servers/{sid}/tools")).json()
+    assert tool["schema_overridden"] is False
+    probed_hash = tool["schema_hash"]
+
+    override = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "object",
+                "properties": {
+                    "accountId": {"type": "string"},
+                    "calendarIds": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["accountId", "calendarIds"],
+            }
+        },
+        "required": ["query"],
+    }
+    put = await client.put(f"/api/tools/{tool['id']}/schema-override", json={"schema": override})
+    assert put.status_code == 200, put.text
+    view = put.json()
+    assert view["schema_overridden"] is True
+    assert view["schema"] == override
+    assert view["probed_schema"]["properties"]["query"]["type"] == "object"
+    assert "required" not in view["probed_schema"]
+    assert view["schema_hash"] != probed_hash
+
+    # Probe updates probed schema but keeps the override as the effective contract.
+    runner.tools = [
+        _tool(
+            "cal",
+            {
+                "type": "object",
+                "properties": {"query": {"type": "object"}, "extra": {"type": "string"}},
+            },
+        )
+    ]
+    assert (await client.post(f"/api/servers/{sid}/probe")).status_code == 200
+    after = (await client.get(f"/api/servers/{sid}/tools")).json()[0]
+    assert after["schema_overridden"] is True
+    assert after["schema"] == override
+    assert after["schema_hash"] == view["schema_hash"]
+    assert "extra" in after["probed_schema"]["properties"]
+
+    cleared = await client.delete(f"/api/tools/{tool['id']}/schema-override")
+    assert cleared.status_code == 200
+    assert cleared.json()["schema_overridden"] is False
+    assert "extra" in cleared.json()["schema"]["properties"]
+    assert "probed_schema" not in cleared.json()
+
+
 async def test_probe_concurrency_capped_at_two(scripted):
     client, _registry, runner = scripted
     runner.gate = asyncio.Event()
