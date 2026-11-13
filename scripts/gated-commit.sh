@@ -5,6 +5,8 @@
 #
 #   scripts/gated-commit.sh -m "subject" [-m "body ..."]        # zero findings required
 #   scripts/gated-commit.sh -m "subject" --allow "why finding N is a false positive"
+#   scripts/gated-commit.sh -m "docs: ..." --allow "unsupported_ext: design docs"
+#     (markdown-only staged set; ocr cannot review .md — reason must start with unsupported_ext)
 #
 # Only -m/--allow are accepted here; staging flags (-a), --amend and friends are
 # rejected on purpose: the gate must review exactly what is in the index.
@@ -106,10 +108,45 @@ if [[ -z "$COUNT" ]] && grep -q "Review skipped: no items were selected" "$OUT";
     exit 1
   }
   if [[ "$TEXT_CHANGED" -gt 0 ]]; then
-    echo "gated-commit: REFUSING — ocr skipped the review but the staged changes are not binary-only (incomplete review)." >&2
-    exit 1
+    # ocr cannot review Markdown (unsupported_ext). Allow only when --allow *starts with*
+    # unsupported_ext AND every text-changed path is .md/.markdown (no mixed code bypass;
+    # binaries/empty are ignored). --no-renames so a rename to .md cannot hide a .py source.
+    if ! NON_MD_RAW="$(git -c core.quotePath=false diff --cached --numstat --no-renames)"; then
+      echo "gated-commit: REFUSING — cannot classify the staged diff (incomplete review)." >&2
+      exit 1
+    fi
+    NON_MD="$(
+      printf '%s\n' "$NON_MD_RAW" \
+        | awk -F'\t' 'NF >= 3 && $1 != "-" && $2 != "-" && ($1 + 0 > 0 || $2 + 0 > 0) { print $3 }' \
+        | grep -viE '\.(md|markdown)$' || true
+    )"
+    ALLOW_OK=0
+    if [[ -n "${ALLOW_SET:-}" ]] && [[ -z "$NON_MD" ]] \
+      && grep -qiE '^[[:space:]]*unsupported_ext([:[:space:]]|$)' <<<"$ALLOW"; then
+      ALLOW_OK=1
+    fi
+    if [[ "$ALLOW_OK" -eq 1 ]]; then
+      if [[ -n "$OCR_ERRS" ]]; then
+        echo "gated-commit: REFUSING — ocr also reported internal errors; fix those before a markdown skip allow." >&2
+        printf "%s\n" "$OCR_ERRS" >&2
+        exit 1
+      fi
+      echo "gated-commit: accepting ocr skip via --allow (markdown unsupported_ext)." >&2
+      COUNT=0
+      OCR_SKIP_MARKDOWN=1
+    else
+      echo "gated-commit: REFUSING — ocr skipped the review but the staged changes are not binary-only (incomplete review)." >&2
+      if [[ -n "$NON_MD" ]]; then
+        echo "gated-commit: non-markdown text paths (cannot use unsupported_ext allow):" >&2
+        printf '%s\n' "$NON_MD" | sed 's/^/  /' >&2
+      else
+        echo 'For Markdown-only: --allow "unsupported_ext: design docs"' >&2
+      fi
+      exit 1
+    fi
+  else
+    COUNT=0
   fi
-  COUNT=0
 fi
 if [[ -z "$COUNT" ]]; then
   echo "gated-commit: could not parse a finding count (output format changed?) — not committing." >&2
@@ -155,7 +192,10 @@ $OCR_ERRS"
   fi
   git commit "${ARGS[@]}" -m "$TRAILER"
 else
-  if [[ -n "$OCR_ERRS" ]]; then
+  if [[ -n "${OCR_SKIP_MARKDOWN:-}" ]]; then
+    git commit "${ARGS[@]}" \
+      -m "ocr-gate: review skipped (unsupported_ext), accepted — $ALLOW"
+  elif [[ -n "$OCR_ERRS" ]]; then
     git commit "${ARGS[@]}" \
       -m "ocr-gate: accepted ocr malfunction ($COUNT findings) — $ALLOW" \
       -m "ocr internal error lines (accepted):
