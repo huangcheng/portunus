@@ -10,9 +10,11 @@ export function GenericMcpGlyph({ size = 22 }: { size?: number }) {
 }
 
 export type AppIconId =
+  | "box"
   | "dropbox"
   | "nutstore"
   | "koofr"
+  | "onedrive"
   | "flomo"
   | "dida365"
   | "ardot"
@@ -25,9 +27,11 @@ export type AppIconId =
 
 export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (!slug) return "generic";
+  if (slug === "box") return "box";
   if (slug === "dropbox") return "dropbox";
   if (slug === "nutstore") return "nutstore";
   if (slug === "koofr") return "koofr";
+  if (slug === "onedrive") return "onedrive";
   if (slug === "flomo") return "flomo";
   if (slug === "dida365" || slug === "ticktick") return "dida365";
   if (slug === "ardot") return "ardot";
@@ -41,9 +45,11 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
 
 const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   ardot: "ardot.png",
+  box: "box.svg",
   dropbox: "dropbox.svg",
   nutstore: "nutstore.png",
   koofr: "koofr.png",
+  onedrive: "onedrive.svg",
   flomo: "flomo.png",
   dida365: "dida365.png",
   weread: "weread.png",
@@ -61,9 +67,11 @@ export function AppBrandMark({
   className?: string;
 }) {
   const kind: AppIconId =
+    id === "box" ||
     id === "dropbox" ||
     id === "nutstore" ||
     id === "koofr" ||
+    id === "onedrive" ||
     id === "flomo" ||
     id === "dida365" ||
     id === "ardot" ||

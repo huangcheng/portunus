@@ -577,6 +577,8 @@ th.text-right { text-align: right; }
 .app-brand-image.ardot, .app-brand-image.flomo, .app-brand-image.dida365, .app-brand-image.weread, .app-brand-image.guangyapan, .app-brand-image.quark, .app-brand-image.weiyun, .app-brand-image.pikpak { width: 48px; height: 48px; border-radius: inherit; }
 .app-brand-image.koofr { width: 32px; height: 32px; border-radius: 8px; }
 .app-brand-image.dropbox { width: 32px; height: 27px; }
+.app-brand-image.box { width: 28px; height: 28px; }
+.app-brand-image.onedrive { width: 30px; height: 30px; }
 .app-card-body { grid-column: 1 / -1; grid-row: 2; min-width: 0; display: flex; flex-direction: column; padding-top: 20px; }
 .app-card-title-row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 22px; }
 .app-card-title { font-weight: 650; font-size: 16.5px; letter-spacing: -0.025em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
