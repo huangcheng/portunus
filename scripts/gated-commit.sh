@@ -83,6 +83,34 @@ fi
 
 # ocr may print intermediate "Review (partially) complete" lines; the FINAL summary is last.
 COUNT="$(sed -nE 's/.*Review complete: ([0-9]+) finding\(s\).*/\1/p' "$OUT" | tail -1 || true)"
+if [[ -z "$COUNT" ]] && grep -q "Review skipped: no items were selected" "$OUT"; then
+  # Legitimate skip (asset/binary-only diffs): no summary line exists. Trust it only
+  # after independently proving the staged set is binary-only; a text diff that ocr
+  # merely declined to select must still refuse, never pass as COUNT=0.
+  # "Nothing reviewable" means every entry is binary (-/-) or content-empty (0/0:
+  # mode-only or empty-file adds — no hunks for ocr either way). The classifier's
+  # own status is checked: an awk failure fails closed, never open. Limitation,
+  # documented rather than byte-probed: git marks a pair binary if EITHER side is,
+  # so a binary->text replacement can slip through this narrow path; ocr skipping
+  # selection remains the backstop.
+  NUMSTAT="$(git diff --cached --numstat -M)" || {
+    echo "gated-commit: REFUSING — cannot inspect the staged diff (incomplete review)." >&2
+    exit 1
+  }
+  if ! TEXT_CHANGED="$(printf '%s\n' "$NUMSTAT" | awk -F'\t' 'NF >= 2 && $1 != "-" && $2 != "-" && ($1 + 0 > 0 || $2 + 0 > 0) {c++} END {print c + 0}')"; then
+    echo "gated-commit: REFUSING — cannot classify the staged diff (incomplete review)." >&2
+    exit 1
+  fi
+  [[ "$TEXT_CHANGED" =~ ^[0-9]+$ ]] || {
+    echo "gated-commit: REFUSING — classifier returned an unparsable count (incomplete review)." >&2
+    exit 1
+  }
+  if [[ "$TEXT_CHANGED" -gt 0 ]]; then
+    echo "gated-commit: REFUSING — ocr skipped the review but the staged changes are not binary-only (incomplete review)." >&2
+    exit 1
+  fi
+  COUNT=0
+fi
 if [[ -z "$COUNT" ]]; then
   echo "gated-commit: could not parse a finding count (output format changed?) — not committing." >&2
   tail -20 "$OUT" >&2
