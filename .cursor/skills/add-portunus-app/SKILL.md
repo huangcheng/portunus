@@ -72,7 +72,7 @@ In `gateway/portunus_gateway/catalog.py`:
 ### 4. Dashboard icon
 
 1. Asset: `dashboard/public/icons/apps/<slug>.{png|svg}` — prefer a **full-bleed** square (logo fills the tile).
-2. Wire `AppIconId`, `appIconIdForSlug`, `OFFICIAL_ICON_FILES`, and `AppBrandMark` kind list in `dashboard/src/icons/apps.tsx`.
+2. Wire `AppIconId`, `appIconIdForSlug`, and `OFFICIAL_ICON_FILES` in `dashboard/src/icons/apps.tsx` (`AppBrandMark` derives its kind via `appIconIdForSlug`, so there is no separate kind list).
 3. Add `.app-brand-image.<slug>` to the **48×48** rule in `dashboard/src/style.css` (default is 30×30 and looks tiny).
 
 Platform auth UIs (`device_qr` / `oauth_link`) are already generic in `AppsPage.tsx` — no new panel unless you invent a new auth type.

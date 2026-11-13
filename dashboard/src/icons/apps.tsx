@@ -66,25 +66,9 @@ export function AppBrandMark({
   id: AppIconId | string;
   className?: string;
 }) {
-  const kind: AppIconId =
-    id === "box" ||
-    id === "dropbox" ||
-    id === "nutstore" ||
-    id === "koofr" ||
-    id === "onedrive" ||
-    id === "flomo" ||
-    id === "dida365" ||
-    id === "ardot" ||
-    id === "weread" ||
-    id === "guangyapan" ||
-    id === "quark" ||
-    id === "weiyun" ||
-    id === "pikpak" ||
-    id === "ticktick"
-      ? id === "ticktick"
-        ? "dida365"
-        : id
-      : appIconIdForSlug(id);
+  // appIconIdForSlug already maps every known slug (incl. the ticktick alias)
+  // to its icon id and returns "generic" otherwise — identical to the old chain.
+  const kind: AppIconId = appIconIdForSlug(id);
   const file = OFFICIAL_ICON_FILES[kind];
   return (
     <div className={`app-card-mark ${kind}${file ? " is-official" : ""}${className ? ` ${className}` : ""}`} aria-hidden>
