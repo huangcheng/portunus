@@ -464,28 +464,6 @@ def finish_result(
     if not isinstance(result, dict):
         return error_result("upstream_crash", "malformed tool result")
     cap = max(1024, min(int(max_bytes), MAX_RESULT_BYTES))
-    raw = json.dumps(result, separators=(",", ":"), ensure_ascii=False).encode()
-    size = len(raw)
-    if size > cap:
-        if not truncate:
-            return error_result(
-                "payload_too_large",
-                f"tool result exceeds the {cap} byte limit ({size} bytes)",
-                data={"bytes": size, "limit": cap},
-            )
-        # Truncation is explicit: never look like a full success.
-        preview = raw[: min(cap, 64 * 1024)].decode("utf-8", errors="replace")
-        body = {
-            "truncated": True,
-            "bytes": size,
-            "limit": cap,
-            "preview": preview,
-        }
-        return types.CallToolResult(
-            content=[types.TextContent(text=json.dumps(body, ensure_ascii=False))],
-            structured_content=body,
-            is_error=False,
-        )
     try:
         parsed = types.CallToolResult.model_validate(result)
     except Exception:
@@ -497,6 +475,10 @@ def finish_result(
     if tool:
         upstream["tool"] = tool
 
+    # Classify failures before size gates so QR-heavy LOGIN_PENDING (etc.) cannot
+    # be misreported as a truncated success when truncate=True. Oversized errors
+    # still hit the byte ceiling below (is_error preserved).
+    classified: types.CallToolResult | None = None
     if parsed.is_error and not _already_gateway_error(structured):
         text = _first_text(list(parsed.content))
         message = (text.strip().split("\n", 1)[0] if text.strip() else "")[:240] or (
@@ -509,11 +491,10 @@ def finish_result(
                 **({"upstream": upstream} if upstream else {}),
             }
         }
-        return types.CallToolResult(
+        classified = types.CallToolResult(
             content=parsed.content, structured_content=body, is_error=True
         )
-
-    if not parsed.is_error and not _already_gateway_error(structured):
+    elif not parsed.is_error and not _already_gateway_error(structured):
         failure = _cli_business_failure(structured)
         if failure is not None:
             code, message, detail = failure
@@ -524,11 +505,46 @@ def finish_result(
                     **({"upstream": {**upstream, **detail}} if upstream or detail else {}),
                 }
             }
-            # Keep the original content so operators can still inspect the CLI payload.
-            return types.CallToolResult(
+            # Keep the original content so operators can still inspect the CLI payload
+            # when it fits; oversized paths replace content with the compact envelope.
+            classified = types.CallToolResult(
                 content=parsed.content, structured_content=body, is_error=True
             )
 
+    raw = json.dumps(result, separators=(",", ":"), ensure_ascii=False).encode()
+    size = len(raw)
+    if size > cap:
+        if not truncate:
+            return error_result(
+                "payload_too_large",
+                f"tool result exceeds the {cap} byte limit ({size} bytes)",
+                data={"bytes": size, "limit": cap},
+            )
+        if classified is not None:
+            # Classified error wins over a truncated "success" preview.
+            err_body = classified.structured_content
+            compact = json.dumps(err_body, ensure_ascii=False, separators=(",", ":"))
+            return types.CallToolResult(
+                content=[types.TextContent(text=compact)],
+                structured_content=err_body,
+                is_error=True,
+            )
+        preview = raw[: min(cap, 64 * 1024)].decode("utf-8", errors="replace")
+        body = {
+            "truncated": True,
+            "bytes": size,
+            "limit": cap,
+            "preview": preview,
+        }
+        return types.CallToolResult(
+            content=[types.TextContent(text=json.dumps(body, ensure_ascii=False))],
+            structured_content=body,
+            # Preserve already-gateway / transport isError (never flip to success).
+            is_error=bool(parsed.is_error),
+        )
+
+    if classified is not None:
+        return classified
     return types.CallToolResult(
         content=parsed.content, structured_content=structured, is_error=parsed.is_error
     )
@@ -1138,12 +1154,15 @@ class Omni:
                     # streak recorded above is what moves the *next* placement.
                     raise
             code = _error_code_from_result(result)
+            bag = _invoke_attrs.get() or {}
+            up = bag.get("upstream_ms")
             await self.registry.record_outcome(
                 server.id,
                 code,
                 message="",
                 caller_shortened_timeout=caller_shortened_timeout,
                 site_id=self._invoke_site(),
+                upstream_ms=up if isinstance(up, int) else None,
             )
             return result
         finally:

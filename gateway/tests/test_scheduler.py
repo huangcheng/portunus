@@ -4,11 +4,54 @@ from __future__ import annotations
 
 import itertools
 
-from portunus_gateway.scheduler import RunnerInfo, ScheduleDecision, pick_runner
+from portunus_gateway.scheduler import (
+    LATENCY_UNKNOWN_MS,
+    RunnerInfo,
+    ScheduleDecision,
+    pick_runner,
+)
 
 
 def r(site_id: str, regions: list[str], load: int = 0) -> RunnerInfo:
     return RunnerInfo(site_id=site_id, regions=tuple(regions), load=load)
+
+
+def test_sticky_hard_pins_live_site():
+    cands = [r("slow", ["local"], 0), r("pin", ["local"], 9)]
+    d = pick_runner(cands, preferred_regions=[], sticky_site_id="pin", latency_ms={"slow": 1})
+    assert d == ScheduleDecision(site_id="pin", preferred_miss=False)
+
+
+def test_sticky_absent_returns_none():
+    assert pick_runner([r("a", ["local"])], preferred_regions=[], sticky_site_id="gone") is None
+
+
+def test_latency_beats_load_without_preference():
+    cands = [r("fast", ["local"], 5), r("slow", ["local"], 0)]
+    d = pick_runner(
+        cands, preferred_regions=[], latency_ms={"fast": 20.0, "slow": 200.0}
+    )
+    assert d is not None and d.site_id == "fast"
+
+
+def test_preferred_tier_before_latency():
+    cands = [r("eu", ["eu"], 0), r("cn", ["cn"], 0)]
+    d = pick_runner(
+        cands,
+        preferred_regions=["cn"],
+        latency_ms={"eu": 5.0, "cn": 500.0},
+    )
+    assert d == ScheduleDecision(site_id="cn", preferred_miss=False)
+
+
+def test_unknown_latency_uses_mid_default():
+    cands = [r("known", ["local"]), r("new", ["local"])]
+    d = pick_runner(
+        cands,
+        preferred_regions=[],
+        latency_ms={"known": LATENCY_UNKNOWN_MS + 1},
+    )
+    assert d is not None and d.site_id == "new"
 
 
 def test_empty_candidates_returns_none():

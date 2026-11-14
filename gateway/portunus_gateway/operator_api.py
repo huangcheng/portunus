@@ -613,12 +613,16 @@ async def operator_fleet(
     async with async_session() as s:
         for sid, slug in (await s.execute(select(Server.id, Server.slug))).all():
             slug_map[sid] = slug
+    site_health: list[dict[str, Any]] = []
+    if registry is not None and hasattr(registry, "list_site_health"):
+        site_health = await registry.list_site_health()
     return build_fleet(
         pool=pool,
         slots=slots,
         started_at=started,
         database_url=database_url(),
         server_slug=slug_map,
+        site_health=site_health,
     )
 
 

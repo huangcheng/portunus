@@ -269,6 +269,7 @@ def create_gateway_app() -> FastAPI:
         server_enabled=cache.enabled,
         vault_version=cache.vault_version,
         unhealthy_sites=lambda sid: registry.unhealthy_sites(sid),
+        site_latencies=lambda sid: registry.site_latencies(sid),
     )
     slots.attach(pool)
     remote = RemoteProxy(async_session, vault)

@@ -50,3 +50,39 @@ def sys_executable() -> str:
     import sys
 
     return sys.executable
+
+
+@pytest.mark.anyio
+async def test_json_cli_sets_home_from_state_dir(monkeypatch, tmp_path):
+    """MCP child must pin HOME=STATE_DIR like runner skill_exec (guangyapan login)."""
+    import os
+
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    recorder = tmp_path / "recorder.py"
+    recorder.write_text(
+        "\n".join(
+            [
+                "import json, os, sys",
+                "print(json.dumps({\"home\": os.environ.get(\"HOME\"), \"argv\": sys.argv[1:]}))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = tmp_path / "state"
+    state.mkdir()
+    m = load_manifest(GUANG)
+    m.cli.command = [sys_executable(), str(recorder)]  # type: ignore[union-attr]
+    m.cli.cwd = str(skill)  # type: ignore[union-attr]
+    m.cli.identity.agent_profile_dir = str(state)  # type: ignore[union-attr]
+
+    monkeypatch.setenv("STATE_DIR", str(state))
+    # Poison the process HOME so a missing pin would be visible.
+    monkeypatch.setenv("HOME", str(tmp_path / "wrong-home"))
+
+    backend = JsonCliBackend(m)
+    tool = next(t for t in m.tools if t.name == "account_rights")
+    out = await backend.call(tool, {})
+    assert out["exit_code"] == 0
+    assert out["result"]["home"] == str(state)
+    assert os.environ["HOME"] == str(tmp_path / "wrong-home")

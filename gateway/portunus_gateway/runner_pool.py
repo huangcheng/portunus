@@ -156,12 +156,16 @@ class RunnerPool:
         *,
         loads: Mapping[str, int] | None = None,
         exclude_sites: frozenset[str] = frozenset(),
+        sticky_site_id: str | None = None,
+        latency_ms: Mapping[str, float] | None = None,
     ) -> ScheduleDecision | None:
         """Soft-affinity pick over live runners; ``None`` means no runner (-> runner_unavailable)."""
         return pick_runner(
             self.connected(loads),
             preferred_regions=preferred_regions,
             exclude_sites=exclude_sites,
+            sticky_site_id=sticky_site_id,
+            latency_ms=latency_ms,
         )
 
     # ---- routing -----------------------------------------------------------------

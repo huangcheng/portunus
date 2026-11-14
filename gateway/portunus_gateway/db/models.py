@@ -10,6 +10,7 @@ from sqlalchemy import (
     JSON,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -267,6 +268,9 @@ class SiteHealth(Base):
     failures at or above ``SiteHealthPolicy.threshold`` within the TTL make the scheduler
     avoid the site for that server (new children land elsewhere); any success clears it.
     ``preferred_regions`` remains an operator *hint* honored only among healthy sites.
+
+    Successful invokes also update ``ewma_upstream_ms`` so cold-start placement can prefer
+    the fastest healthy site (skill-bridge sticky sites still hard-pin via preferred_site_id).
     """
 
     __tablename__ = "site_health"
@@ -279,3 +283,6 @@ class SiteHealth(Base):
     last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    ewma_upstream_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_sample_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

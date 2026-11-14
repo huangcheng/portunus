@@ -563,6 +563,39 @@ def test_finish_result_truncate_flag_returns_preview(pepper_file):
     assert "preview" in sc
 
 
+def test_finish_result_classifies_login_pending_before_truncate(pepper_file):
+    """QR-heavy LOGIN_PENDING must become auth_required even when truncate=True.
+
+    Live guangyapan list embeds a large QR PNG; size check used to short-circuit
+    truncation as a false success before CLI auth classification.
+    """
+    blob = {
+        "exit_code": 0,
+        "result": {
+            "version": 1,
+            "command": "run",
+            "code": "LOGIN_PENDING",
+            "retryable": True,
+            "data": {
+                "logged_in": False,
+                "message": "请用光鸭 App 的扫一扫扫描二维码",
+                "qr_png_base64": "A" * 80_000,
+            },
+        },
+    }
+    text = json.dumps(blob, ensure_ascii=False)
+    out = finish_result(
+        {"content": [{"type": "text", "text": text}], "structuredContent": blob},
+        server="guangyapan",
+        tool="list",
+        max_bytes=4096,
+        truncate=True,
+    )
+    assert out.is_error
+    assert out.structured_content["error"]["code"] == "auth_required"
+    assert "扫一扫" in out.structured_content["error"]["message"]
+
+
 def test_cursor_bound_to_scope_and_query(pepper_file):
     from portunus_gateway.omni import decode_cursor, encode_cursor
     from portunus_shared import PortunusError

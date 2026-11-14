@@ -146,7 +146,15 @@ async def test_marked_site_is_not_picked_and_pair_is_retired(authz, db, pepper_f
             super().__init__()
             self.picks: list[frozenset[str]] = []
 
-        def pick(self, preferred_regions=(), *, loads=None, exclude_sites=frozenset()):
+        def pick(
+            self,
+            preferred_regions=(),
+            *,
+            loads=None,
+            exclude_sites=frozenset(),
+            sticky_site_id=None,
+            latency_ms=None,
+        ):
             self.picks.append(frozenset(exclude_sites))
             return None
 
@@ -230,7 +238,15 @@ async def test_cold_start_failure_carries_site(authz, db, pepper_file):
     reg = Reg(sf, V({1: os.urandom(32)}), RunnerPool([]), trusted_path=["/usr/bin"], binary_allowlist=[])
 
     class _PickPool(RunnerPool):
-        def pick(self, preferred_regions=(), *, loads=None, exclude_sites=frozenset()):
+        def pick(
+            self,
+            preferred_regions=(),
+            *,
+            loads=None,
+            exclude_sites=frozenset(),
+            sticky_site_id=None,
+            latency_ms=None,
+        ):
             return ScheduleDecision(site_id="eu", preferred_miss=False)
 
         async def request(self, site_id, op, **kw):

@@ -74,12 +74,33 @@ class JsonCliBackend:
 
         raise RuntimeError(f"unsupported run_wrapper {self.cli.run_wrapper!r}")
 
+    def _child_env(self) -> dict[str, str]:
+        """Env for the vendor CLI — match runner ``skill_exec`` HOME pinning.
+
+        Guangyapan (and similar device_qr skills) resolve credentials under
+        ``$HOME/.…`` *and* ``--agent-profile-dir``. skill_exec always sets
+        ``HOME=STATE_DIR``; without that the MCP child invents a fresh agent
+        under the process home and returns LOGIN_PENDING despite a good login.
+        """
+        env = dict(os.environ)
+        state = env.get("STATE_DIR", "").strip()
+        if state:
+            env["HOME"] = state
+            return env
+        ident = self.cli.identity
+        if ident.agent_profile_dir:
+            profile = _expand(ident.agent_profile_dir).strip()
+            if profile:
+                env["HOME"] = profile
+        return env
+
     async def _run(
         self, argv: list[str], *, cwd: str | None, stdin: str | None
     ) -> Any:
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=cwd,
+            env=self._child_env(),
             stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

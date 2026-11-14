@@ -81,6 +81,7 @@ async def test_fleet_disconnected_runners_show_no_healthy(db):
     assert len(body["runners"]) == 2
     assert all(not row["connected"] for row in body["runners"])
     assert body["children"] == []
+    assert body["site_health"] == []
 
 
 async def test_fleet_reports_fingerprint_drift(db, monkeypatch):

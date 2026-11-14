@@ -66,6 +66,7 @@ def build_fleet(
     started_at: datetime,
     database_url: str,
     server_slug: dict[Any, str] | None = None,
+    site_health: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now_mono = time.monotonic()
     now_wall = datetime.now(timezone.utc)
@@ -150,4 +151,6 @@ def build_fleet(
         },
         "runners": runners,
         "children": children,
+        # Per-(server, site) EWMA + sticky flags for ops visibility (why a site was chosen).
+        "site_health": list(site_health or []),
     }

@@ -69,6 +69,7 @@ class SiteHealthPolicy:
 
     threshold: int = 2  # consecutive network-class failures before the scheduler avoids it
     ttl_s: float = 15 * 60  # mark expires even without a success (networks heal)
+    ewma_alpha: float = 0.2  # weight of the newest successful upstream_ms sample
 
 
 MAX_ENV_ENTRIES = 256  # mirrors the runner's bound
@@ -242,6 +243,7 @@ def server_view(
         # device_qr marker written after platform login succeeds.
         "has_skill_session": any(n == "SKILL_SESSION" for n in env_names),
         "preferred_regions": list(server.preferred_regions or []),
+        "preferred_site_id": server.preferred_site_id,
         "vault_version": server.vault_version,
         "env_names": public_names,  # names only, never values
         "created_at": server.created_at.isoformat() if server.created_at else None,
@@ -447,12 +449,15 @@ class Registry:
         message: str = "",
         caller_shortened_timeout: bool = False,
         site_id: str | None = None,
+        upstream_ms: int | None = None,
     ) -> None:
         """Persist a call/probe observation. ``code is None`` means success.
 
         ``site_id`` (the runner site that hosted the child) also feeds the learned
-        per-site health used for auto placement/failover. Best-effort: DB failures
-        are logged and swallowed so bookkeeping never masks the invoke/probe outcome.
+        per-site health used for auto placement/failover. Successful invokes with
+        ``upstream_ms`` update the site EWMA used for latency-aware cold starts.
+        Best-effort: DB failures are logged and swallowed so bookkeeping never masks
+        the invoke/probe outcome.
         """
         try:
             if code is None or should_record_failure(
@@ -462,7 +467,9 @@ class Registry:
                 # timeout must not mark a healthy site), in its own try so a site-health
                 # failure can never drop the server-level update below.
                 try:
-                    await self._record_site_outcome(server_id, code, site_id)
+                    await self._record_site_outcome(
+                        server_id, code, site_id, upstream_ms=upstream_ms
+                    )
                 except (SQLAlchemyError, OSError):  # storage/IO only — bugs must surface
                     log.exception("site health update failed for %s", server_id)
             await self._record_outcome(
@@ -533,7 +540,12 @@ class Registry:
             await s.commit()
 
     async def _record_site_outcome(
-        self, server_id: uuid.UUID, code: str | None, site_id: str | None
+        self,
+        server_id: uuid.UUID,
+        code: str | None,
+        site_id: str | None,
+        *,
+        upstream_ms: int | None = None,
     ) -> None:
         """Update the learned (server, site) health row.
 
@@ -542,7 +554,8 @@ class Registry:
         increment is one atomic UPDATE whose CASE rebases the streak to 1 when the
         previous error is older than the TTL — concurrent invokes cannot lose counts,
         and an expired mark needs a fresh ``threshold`` run, not one lucky timeout.
-        Success writes are throttled like the server-level ``last_ok_at``.
+        Success writes are throttled like the server-level ``last_ok_at``. Successful
+        samples with ``upstream_ms`` always refresh the EWMA (not throttled).
         """
         if not site_id:
             return
@@ -550,12 +563,26 @@ class Registry:
             return
         now = datetime.now(timezone.utc)
         cutoff = now - timedelta(seconds=SiteHealthPolicy.ttl_s)
+        sample = (
+            float(upstream_ms)
+            if code is None and isinstance(upstream_ms, int) and upstream_ms >= 0
+            else None
+        )
         async with self._sf() as s:
             if code is None:
                 row = await s.get(SiteHealth, (server_id, site_id))
                 if row is None:
                     try:
-                        s.add(SiteHealth(server_id=server_id, site_id=site_id, last_ok_at=now))
+                        s.add(
+                            SiteHealth(
+                                server_id=server_id,
+                                site_id=site_id,
+                                last_ok_at=now,
+                                ewma_upstream_ms=sample,
+                                sample_count=1 if sample is not None else 0,
+                                last_sample_at=now if sample is not None else None,
+                            )
+                        )
                         await s.commit()
                         return
                     except IntegrityError:
@@ -573,6 +600,17 @@ class Registry:
                 if not healthy_recent:
                     row.last_ok_at = now
                     row.consecutive_failures = 0
+                if sample is not None:
+                    alpha = SiteHealthPolicy.ewma_alpha
+                    if row.ewma_upstream_ms is None or int(row.sample_count or 0) <= 0:
+                        row.ewma_upstream_ms = sample
+                    else:
+                        row.ewma_upstream_ms = (
+                            alpha * sample + (1.0 - alpha) * float(row.ewma_upstream_ms)
+                        )
+                    row.sample_count = int(row.sample_count or 0) + 1
+                    row.last_sample_at = now
+                if not healthy_recent or sample is not None:
                     await s.commit()
                 return
             # Network-class failure: increment in the database, rebase on a stale mark.
@@ -662,6 +700,55 @@ class Registry:
                 err_at = err_at.replace(tzinfo=timezone.utc)
             if err_at is not None and (now - err_at).total_seconds() <= SiteHealthPolicy.ttl_s:
                 out.add(row.site_id)
+        return out
+
+    async def site_latencies(self, server_id: uuid.UUID) -> dict[str, float]:
+        """EWMA upstream_ms per site for latency-aware cold-start placement."""
+        async with self._sf() as s:
+            rows = (
+                (
+                    await s.execute(
+                        select(SiteHealth).where(SiteHealth.server_id == server_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        out: dict[str, float] = {}
+        for row in rows:
+            if row.ewma_upstream_ms is not None and int(row.sample_count or 0) > 0:
+                out[row.site_id] = float(row.ewma_upstream_ms)
+        return out
+
+    async def list_site_health(self) -> list[dict[str, Any]]:
+        """Operator fleet view: learned health + EWMA + sticky site per server."""
+        async with self._sf() as s:
+            rows = (
+                await s.execute(
+                    select(SiteHealth, Server.slug, Server.preferred_site_id).join(
+                        Server, Server.id == SiteHealth.server_id
+                    )
+                )
+            ).all()
+        out: list[dict[str, Any]] = []
+        for row, slug, preferred_site_id in rows:
+            out.append(
+                {
+                    "server_id": str(row.server_id),
+                    "server_slug": slug,
+                    "site_id": row.site_id,
+                    "ewma_upstream_ms": row.ewma_upstream_ms,
+                    "sample_count": int(row.sample_count or 0),
+                    "last_sample_at": (
+                        row.last_sample_at.isoformat() if row.last_sample_at else None
+                    ),
+                    "consecutive_failures": int(row.consecutive_failures or 0),
+                    "last_error_code": row.last_error_code,
+                    "sticky": bool(
+                        preferred_site_id and preferred_site_id == row.site_id
+                    ),
+                }
+            )
         return out
 
     async def health_by_server_ids(
@@ -1012,6 +1099,7 @@ class Registry:
             env = await self._inject_skill_bridge_manifest(s, server.slug, env)
             vault_version = server.vault_version
             preferred_regions = list(server.preferred_regions or [])
+            preferred_site_id = server.preferred_site_id
         assert command is not None
         return {
             "argv": [command, *args],
@@ -1019,6 +1107,8 @@ class Registry:
             "env": env,
             "vault_version": vault_version,
             "preferred_regions": preferred_regions,  # scheduling hint; not sent to the runner
+            # Hard pin when skill_auth wrote preferred_site_id (login site local state).
+            "sticky_site_id": preferred_site_id,
         }
 
     async def _inject_skill_bridge_manifest(
@@ -1147,6 +1237,7 @@ class Registry:
                 if len(cmd) >= 2 and isinstance(cmd[-1], str) and not str(cmd[-1]).startswith("/"):
                     entrypoint = str(cmd[-1])
             preferred_regions = list(server.preferred_regions or [])
+            sticky_site_id = server.preferred_site_id
 
         if not skill_root or not state_dir:
             raise RegistryError(
@@ -1186,7 +1277,15 @@ class Registry:
                 )
             site_id = pinned_site
         else:
-            decision = self.pool.pick(preferred_regions)
+            # logout must reach the vault-clear path even when the pin site is down;
+            # otherwise preferred_site_id can never be released via skill_auth.
+            pick_sticky = None if logical == "logout" else sticky_site_id
+            latency = await self.site_latencies(server_id)
+            decision = self.pool.pick(
+                preferred_regions,
+                sticky_site_id=pick_sticky,
+                latency_ms=latency,
+            )
             if decision is None:
                 raise RegistryError(503, "runner_unavailable", "runner not connected")
             site_id = decision.site_id
@@ -1269,6 +1368,8 @@ class Registry:
             server = await self._get_server(s, server_id)
             if logical in {"login", "status", "refresh", "relogin"} and logged_in:
                 await self._upsert_vault(s, server, "SKILL_SESSION", "1")
+                # Hard-pin cold starts to the runner that holds local login state.
+                server.preferred_site_id = site_id
                 session_written = True
             if logical == "logout":
                 row = (
@@ -1281,6 +1382,7 @@ class Registry:
                 if row is not None:
                     await s.delete(row)
                     server.vault_version = int(server.vault_version or 0) + 1
+                server.preferred_site_id = None
             # Skip noisy pending status polls (Connect polls every ~2s). Keep login start,
             # terminal success/failure, logout, and non-status actions.
             write_audit = not (logical == "status" and pending and not logged_in)
@@ -1326,6 +1428,7 @@ class Registry:
             kind = server.kind
             command, args = server.command, list(server.args or [])
             preferred_regions = list(server.preferred_regions or [])
+            sticky_site_id = server.preferred_site_id
             if kind == "stdio":
                 self._validate_argv(command, args)  # policy may have changed since create
                 env = await self._decrypt_env(s, server_id)
@@ -1342,7 +1445,12 @@ class Registry:
             assert command is not None
             timeout_s = self.probe_timeout_s
             try:
-                decision = self.pool.pick(preferred_regions)
+                latency = await self.site_latencies(server_id)
+                decision = self.pool.pick(
+                    preferred_regions,
+                    sticky_site_id=sticky_site_id,
+                    latency_ms=latency,
+                )
                 if decision is None:
                     raise RunnerRequestError("runner_unavailable", "runner not connected", sent=False)
                 reply = await self.pool.request(

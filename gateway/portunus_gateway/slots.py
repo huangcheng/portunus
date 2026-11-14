@@ -29,7 +29,7 @@ import enum
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Protocol
 
@@ -114,6 +114,7 @@ class SlotManager:
         server_enabled: Callable[[uuid.UUID], bool] | None = None,
         vault_version: Callable[[uuid.UUID], int | None] | None = None,
         unhealthy_sites: Callable[[uuid.UUID], Awaitable[Iterable[str]]] | None = None,
+        site_latencies: Callable[[uuid.UUID], Awaitable[Mapping[str, float]]] | None = None,
     ) -> None:
         self.client = client  # a RunnerClient or a RunnerPool; routing always goes via the pool
         self.pool = RunnerPool.ensure(client)
@@ -127,6 +128,10 @@ class SlotManager:
         self.unhealthy_sites = unhealthy_sites
         self._exclusion_cache: dict[uuid.UUID, tuple[float, frozenset[str], bool]] = {}
         self._exclusion_cache_s = 5.0
+        # EWMA upstream_ms per site for latency-aware cold starts (same short TTL).
+        self.site_latencies = site_latencies
+        self._latency_cache: dict[uuid.UUID, tuple[float, dict[str, float]]] = {}
+        self._latency_cache_s = 5.0
         self.server_enabled = server_enabled
         self.vault_version = vault_version
         self._slots: dict[str, Slot] = {}
@@ -192,6 +197,22 @@ class SlotManager:
         all_marked = bool(live) and live <= set(excluded)
         self._exclusion_cache[server_id] = (now, excluded, all_marked)
         return excluded, all_marked
+
+    async def _site_latency_map(self, server_id: uuid.UUID) -> dict[str, float]:
+        """Cached EWMA map for cold-start ranking; empty when lookup is unavailable."""
+        now = time.monotonic()
+        hit = self._latency_cache.get(server_id)
+        if hit is not None and now - hit[0] < self._latency_cache_s:
+            return dict(hit[1])
+        out: dict[str, float] = {}
+        if self.site_latencies is not None:
+            try:
+                raw = await self.site_latencies(server_id)
+                out = {str(k): float(v) for k, v in dict(raw).items()}
+            except Exception:  # noqa: BLE001 — placement must never fail on latency lookups
+                log.exception("site_latencies lookup failed; placing without EWMA")
+        self._latency_cache[server_id] = (now, out)
+        return dict(out)
 
     def _loads(self) -> dict[str, int]:
         loads: dict[str, int] = {}
@@ -300,6 +321,10 @@ class SlotManager:
         ``upstream_crash`` (exited before the ack) or ``cancelled`` (stopped mid-start).
         """
         argv, trailing, env, vault_version = self._validate_payload(start_payload)
+        sticky_raw = start_payload.get("sticky_site_id")
+        sticky_site_id = sticky_raw.strip() if isinstance(sticky_raw, str) else None
+        if sticky_site_id == "":
+            sticky_site_id = None
         self._admit(key_id, server_id)
         pair = (server_id, key_id)
         lock = self._pair_locks.setdefault(pair, asyncio.Lock())
@@ -328,10 +353,13 @@ class SlotManager:
                 raise PortunusError(
                     "runner_unavailable", "previous child for this server/key still resolving"
                 )
+            latency = await self._site_latency_map(server_id)
             decision = self.pool.pick(
                 preferred_regions,
                 loads=self._loads(),
                 exclude_sites=frozenset() if all_marked else excluded,
+                sticky_site_id=sticky_site_id,
+                latency_ms=latency,
             )
             if decision is None:
                 raise PortunusError("runner_unavailable", "runner not connected")
