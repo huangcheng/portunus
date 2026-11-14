@@ -30,6 +30,13 @@ SSH_OPTS=(-o ConnectTimeout=15 -o BatchMode=yes)
 STATE_UID="${PORTUNUS_STATE_UID:-10001}"
 ALSO_RCLONE=0
 FROM=""
+if ! [[ "$STATE_UID" =~ ^[0-9]+$ ]]; then
+  echo "PORTUNUS_STATE_UID must be numeric (got '$STATE_UID')" >&2
+  exit 2
+fi
+if [[ "$STATE_UID" == "0" ]]; then
+  echo "warning: PORTUNUS_STATE_UID=0 — skill-state will be root-owned (ok only when children do not drop privileges)" >&2
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -127,7 +134,9 @@ for host in "${HOSTS[@]}"; do
     # Never --delete the provisioner-managed rclone binary (not in git / --from trees).
     rsync_opts=(-az -e "ssh ${SSH_OPTS[*]}")
     if [[ "$name" == "rclone-shim" ]]; then
-      rsync_opts+=(--exclude rclone)
+      # Keep host-provisioned rclone binary; force shim executable for any child uid
+      # (provision-rclone uses chmod 755 — owner-only +x is not enough under drop-privs).
+      rsync_opts+=(--exclude rclone --chmod=F755,D755)
     else
       rsync_opts+=(--delete)
     fi

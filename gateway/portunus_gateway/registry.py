@@ -1428,7 +1428,6 @@ class Registry:
             kind = server.kind
             command, args = server.command, list(server.args or [])
             preferred_regions = list(server.preferred_regions or [])
-            sticky_site_id = server.preferred_site_id
             if kind == "stdio":
                 self._validate_argv(command, args)  # policy may have changed since create
                 env = await self._decrypt_env(s, server_id)
@@ -1445,10 +1444,11 @@ class Registry:
             assert command is not None
             timeout_s = self.probe_timeout_s
             try:
+                # Probes are ephemeral inventory refreshes — do not hard-pin to
+                # preferred_site_id (that site being down must not block discovery).
                 latency = await self.site_latencies(server_id)
                 decision = self.pool.pick(
                     preferred_regions,
-                    sticky_site_id=sticky_site_id,
                     latency_ms=latency,
                 )
                 if decision is None:
