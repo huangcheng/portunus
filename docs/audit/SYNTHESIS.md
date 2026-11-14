@@ -2,7 +2,7 @@
 
 Date: 2026-11-13 (round 6 — audit-passed)
 Models (via `pi`): janus/deepseek-v4.1-flash, janus/glm-5.3-flash, janus/mimo-v2.6-flash, janus/MiniMax-M3.1-Flash, janus/qwen3.8-flash, janus/step-3.7-flash
-Raw replies: docs/audit/*.txt (archive: r1–r5)
+Raw replies: docs/audit/*-flash.md (archive: r1–r5; stored as `.md` so OCR gated-commit `unsupported_ext` allow works)
 
 ## Verdicts
 
