@@ -680,7 +680,6 @@ def test_finish_result_cli_envelope_failures_become_iserror():
     assert quark.is_error
     assert quark.structured_content["error"]["code"] == "upstream_error"
     assert "无法识别" in quark.structured_content["error"]["message"]
-    assert "remove from automation" in quark.structured_content["error"]["message"]
     assert quark.structured_content["error"]["upstream"].get("code") == -104
 
     pending = finish_result(

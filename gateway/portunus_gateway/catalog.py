@@ -715,13 +715,47 @@ class CatalogStore:
         return inserted + added + refreshed
 
     async def list_apps(self) -> list[dict[str, Any]]:
+        from .toml_catalog import catalog_mode, get_loaded, recipe_public_view
+
+        loaded = get_loaded()
+        mode = catalog_mode()
         async with self._sf() as s:
             rows = (
                 await s.execute(
                     select(CatalogApp).order_by(CatalogApp.sort_order, CatalogApp.slug)
                 )
             ).scalars().all()
-            return [catalog_view(r) for r in rows]
+            by_slug = {r.slug: r for r in rows}
+            if loaded is None:
+                return [{**catalog_view(r), "catalog_mode": mode} for r in rows]
+            out: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for recipe in sorted(
+                (r for r in loaded.recipes if r.enabled),
+                key=lambda r: (r.sort_order, r.slug),
+            ):
+                db = by_slug.get(recipe.slug)
+                app_id: str | None
+                if mode == "B":
+                    app_id = recipe.slug
+                else:
+                    app_id = str(db.id) if db is not None else None
+                view = recipe_public_view(recipe, catalog_mode=mode, id=app_id)
+                # SPA Connect still needs skill_bridge manifest body when present in DB seed shape
+                if db is not None and recipe.connection == "skill_bridge":
+                    merged_spec = dict(view["spec"])
+                    if "manifest" in (db.spec or {}) and "manifest" not in merged_spec:
+                        merged_spec["manifest"] = db.spec["manifest"]
+                    view["spec"] = merged_spec
+                out.append(view)
+                seen.add(recipe.slug)
+            # DB-only apps not yet migrated to TOML remain visible in mode A
+            if mode == "A":
+                for r in rows:
+                    if r.slug not in seen:
+                        out.append({**catalog_view(r), "catalog_mode": mode})
+                out.sort(key=lambda v: (v.get("sort_order", 0), v["slug"]))
+            return out
 
     async def get(self, app_id: uuid.UUID) -> dict[str, Any]:
         async with self._sf() as s:

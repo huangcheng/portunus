@@ -43,3 +43,7 @@ deploy/rclone-shim/rclone
 deploy/rclone.zip
 deploy/rclone-v*/
 deploy/rclone.SHA256SUMS
+
+# Pi-audit / OCR review scratch (local only)
+docs/audit/
+

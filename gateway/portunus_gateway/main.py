@@ -310,6 +310,27 @@ def create_gateway_app() -> FastAPI:
         seeded = await a.state.catalog.ensure_defaults()
         if seeded:
             log.info("seeded %d catalog apps", seeded)
+        from .toml_catalog import load_apps_dir, resolve_apps_dir, set_loaded
+
+        apps_dir = resolve_apps_dir()
+        if apps_dir is not None:
+            try:
+                loaded = load_apps_dir(apps_dir)
+                set_loaded(loaded)
+                enabled = sum(1 for r in loaded.recipes if r.enabled)
+                log.info(
+                    "toml catalog %s digest=%s recipes=%d enabled=%d",
+                    apps_dir,
+                    loaded.digest[:12],
+                    len(loaded.recipes),
+                    enabled,
+                )
+                a.state.toml_catalog = loaded
+            except Exception:
+                log.exception("toml catalog load failed from %s", apps_dir)
+                set_loaded(None)
+        else:
+            set_loaded(None)
         pool.start()
         stop = asyncio.Event()
         retention_task = asyncio.create_task(retention_loop(stop), name="portunus-retention")

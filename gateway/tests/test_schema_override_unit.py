@@ -85,7 +85,6 @@ def test_finish_result_quark_minus_104_message():
     assert quark.is_error
     err = quark.structured_content["error"]
     assert err["code"] == "upstream_error"
-    assert "remove from automation" in err["message"]
     assert "无法识别" in err["message"]
     assert err["upstream"].get("code") == -104
 
@@ -117,7 +116,7 @@ def test_finish_result_quark_nested_result_object():
     )
     assert quark.is_error
     assert quark.structured_content["error"]["upstream"].get("code") == -104
-    assert "remove from automation" in quark.structured_content["error"]["message"]
+    assert "无法识别" in quark.structured_content["error"]["message"]
 
 
 def test_finish_result_nested_login_pending_with_exit_zero():
@@ -140,3 +139,33 @@ def test_finish_result_nested_login_pending_with_exit_zero():
     )
     assert pending.is_error
     assert pending.structured_content["error"]["code"] == "auth_required"
+
+
+def test_finish_result_login_required_with_nonzero_exit():
+    """Guangyapan list/search: exit_code 1 + LOGIN_REQUIRED must be auth_required."""
+    required = finish_result(
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        '{"exit_code":1,"result":{"code":"LOGIN_REQUIRED",'
+                        '"logged_in":false,"data":{"message":"请先登录"}}}'
+                    ),
+                }
+            ],
+            "structuredContent": {
+                "exit_code": 1,
+                "result": {
+                    "code": "LOGIN_REQUIRED",
+                    "logged_in": False,
+                    "data": {"message": "请先登录"},
+                },
+            },
+        },
+        server="guangyapan",
+        tool="list",
+    )
+    assert required.is_error
+    assert required.structured_content["error"]["code"] == "auth_required"
+    assert "请先登录" in required.structured_content["error"]["message"]

@@ -146,6 +146,14 @@ async def list_catalog_apps(
     return await catalog.list_apps()
 
 
+def _toml_catalog_mutations_gone() -> None:
+    from .toml_catalog import get_loaded
+    from .registry import RegistryError
+
+    if get_loaded() is not None:
+        raise RegistryError(410, "gone", "catalog mutations are file-backed; edit catalog/apps/*.toml")
+
+
 @router.post("/apps", status_code=201)
 async def create_catalog_app(
     body: CreateCatalogApp,
@@ -153,6 +161,7 @@ async def create_catalog_app(
     catalog: CatalogStore = Depends(get_catalog),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
+    _toml_catalog_mutations_gone()
     view = await catalog.create(
         slug=body.slug,
         label=body.label,
@@ -178,6 +187,7 @@ async def update_catalog_app(
     catalog: CatalogStore = Depends(get_catalog),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
+    _toml_catalog_mutations_gone()
     view = await catalog.update(
         app_id,
         actor=actor,
@@ -201,6 +211,7 @@ async def delete_catalog_app(
     catalog: CatalogStore = Depends(get_catalog),
     registry: Registry = Depends(get_registry),
 ) -> None:
+    _toml_catalog_mutations_gone()
     view = await catalog.get(app_id)
     await catalog.delete(app_id, actor=actor)
     await _audit(registry, actor, "catalog.delete", view["slug"], {})

@@ -357,7 +357,7 @@ def _unwrap_cli_payload(structured: Any) -> dict[str, Any] | None:
         except (json.JSONDecodeError, TypeError):
             parsed_inner = None
     if isinstance(parsed_inner, dict) and (
-        parsed_inner.get("code") == "LOGIN_PENDING"
+        parsed_inner.get("code") in ("LOGIN_PENDING", "LOGIN_REQUIRED")
         or parsed_inner.get("ok") is False
         or parsed_inner.get("logged_in") is False
     ):
@@ -370,7 +370,7 @@ def _unwrap_cli_payload(structured: Any) -> dict[str, Any] | None:
     if (
         "exit_code" in structured
         or "ok" in structured
-        or structured.get("code") == "LOGIN_PENDING"
+        or structured.get("code") in ("LOGIN_PENDING", "LOGIN_REQUIRED")
     ):
         return structured
 
@@ -403,6 +403,20 @@ def _cli_business_failure(
         return fallback[:240]
 
     nested = payload.get("result") if isinstance(payload.get("result"), dict) else None
+    # Auth signals win over a non-zero CLI exit_code (Guangyapan LOGIN_REQUIRED
+    # often arrives as exit_code=1 + nested code — do not mislabel as upstream_error).
+    code = payload.get("code")
+    if code in ("LOGIN_PENDING", "LOGIN_REQUIRED") or (
+        payload.get("logged_in") is False and code is not None
+    ):
+        msg = _msg(
+            payload.get("message"),
+            nested,
+            payload.get("data") if isinstance(payload.get("data"), dict) else None,
+            fallback="upstream login required",
+        )
+        return "auth_required", msg, detail
+
     exit_code = payload.get("exit_code")
     if isinstance(exit_code, int) and exit_code != 0:
         if isinstance(nested, dict) and "code" in nested and "code" not in detail:
@@ -425,13 +439,6 @@ def _cli_business_failure(
             fallback=f"upstream reported ok=false (errcode={payload.get('errcode')})",
         )
         return "upstream_error", msg, detail
-
-    code = payload.get("code")
-    if code == "LOGIN_PENDING" or (
-        payload.get("logged_in") is False and code is not None
-    ):
-        msg = _msg(payload.get("message"), nested, fallback="upstream login required")
-        return "auth_required", msg, detail
     return None
 
 
@@ -510,12 +517,6 @@ def finish_result(
         failure = _cli_business_failure(structured)
         if failure is not None:
             code, message, detail = failure
-            # Quark agent-environment gate (-104): re-auth will not help.
-            if server == "quark" and detail.get("code") == -104:
-                message = (
-                    "Quark rejects this runtime (无法识别当前 Agent 环境); "
-                    "remove from automation — re-auth will not help"
-                )
             body = {
                 "error": {
                     "code": code,

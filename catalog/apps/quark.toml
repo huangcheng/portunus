@@ -1,0 +1,22 @@
+slug = "quark"
+label = "夸克网盘"
+description = "Quark Drive via skill-bridge (oauth_link). Unusable through Portunus: upstream rejects non-Quark agent environments (-104); re-auth will not help. Do not put Quark in automation plans that route through this gateway."
+connection = "skill_bridge"
+popular = false
+categories = ["Storage"]
+tags = ["quark", "drive", "json_cli"]
+sort_order = 76
+
+[spec]
+manifest = "quark.example.yaml"
+secrets = []
+
+[spec.env_defaults]
+SKILL_ROOT = "/var/lib/portunus/skills/quarkclouddrive"
+STATE_DIR = "/var/lib/portunus/skill-state/quark"
+
+[[artifacts]]
+id = "quark-tree"
+kind = "tree"
+path = "third_party/quarkclouddrive"
+install_as = "/var/lib/portunus/skills/quarkclouddrive"

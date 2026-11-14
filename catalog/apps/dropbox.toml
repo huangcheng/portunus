@@ -1,0 +1,23 @@
+slug = "dropbox"
+label = "Dropbox"
+description = "Files, sharing, and file requests via Dropbox MCP."
+connection = "oauth"
+popular = true
+categories = ["Storage"]
+tags = ["oauth", "files", "storage"]
+sort_order = 20
+
+[spec]
+url = "https://mcp.dropbox.com/mcp"
+authorize_url = "https://www.dropbox.com/oauth2/authorize"
+token_url = "https://api.dropboxapi.com/oauth2/token"
+scopes = [
+  "account_info.read",
+  "files.metadata.read",
+  "files.content.read",
+  "files.content.write",
+  "sharing.read",
+  "sharing.write",
+  "file_requests.read",
+  "file_requests.write",
+]

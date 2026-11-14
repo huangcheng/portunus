@@ -80,6 +80,17 @@ class Server(Base):
     preferred_regions: Mapped[list[str]] = mapped_column(
         JSON, default=list, server_default="[]"
     )
+    # TOML catalog Connect (nullable = custom / pre-catalog server).
+    recipe_slug: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    artifact_snapshot: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    env_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, server_default="{}")
+    manifest_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    manifest_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    preferred_site_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    artifact_site_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # ensure/Connect health: healthy | degraded | pending_ensure
+    health: Mapped[str] = mapped_column(String(32), default="healthy", server_default="healthy")
+    health_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Bumped on every vault change; children record it, reconcile compares it.
     vault_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Last successful tools/list probe (null until first success).
