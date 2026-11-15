@@ -1585,6 +1585,10 @@ class Registry:
                 )
             ).scalar_one_or_none()
             if row is None:
+                log.info(
+                    "oauth refresh skipped server=%s reason=no_refresh_token",
+                    server_id,
+                )
                 return False, None
             try:
                 refresh = self.vault.open(

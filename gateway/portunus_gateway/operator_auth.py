@@ -1,15 +1,17 @@
 """Operator authentication: argon2id password, opaque sessions, CSRF, step-up, login lockout.
 
-* One operator; the password comes from ``PORTUNUS_OPERATOR_PASSWORD`` and only its argon2id
-  hash is kept in memory.
+* Legacy boot password: ``PORTUNUS_OPERATOR_PASSWORD`` (optional). Only its argon2id hash is
+  kept in memory. Once an ``operator_account`` row exists, that env password is not a login
+  path — username/password, TOTP, and passkeys on the account are.
 * Sessions are opaque 256-bit random tokens in a ``Secure; HttpOnly; SameSite=Strict`` cookie.
-  The database stores only ``SHA-256(token)`` plus the per-session CSRF token.
+  The database stores only ``SHA-256(token)`` plus the per-session CSRF token. No JWT.
 * Every non-safe method needs ``X-CSRF-Token`` equal to the session's CSRF token.
 * Step-up: ``POST /api/auth/step-up`` re-verifies the password and returns a single-use token
   (5-minute max age), bound to the session, that sensitive routes require in
   ``X-Step-Up-Token``. Tokens live in process memory (single worker) and die with the session.
-* Lockout: 5 failed password checks (login or step-up) from one client IP lock that IP out of
-  password checks for 15 minutes. ``X-Forwarded-For`` is honoured only when the TCP peer is in
+* TOTP challenges are the same shape: opaque in-memory tokens, 5-minute TTL, not JWTs.
+* Env-password lockout is in-process (5 failures, 15 minutes). Account login lockout is
+  counted in ``auth_events``. ``X-Forwarded-For`` is honoured only when the TCP peer is in
   ``trusted_proxies``.
 """
 
@@ -45,6 +47,7 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 MAX_FAILURES = 5
 LOCKOUT_SECONDS = 15 * 60
 STEP_UP_TTL_SECONDS = 5 * 60
+CHALLENGE_TTL_SECONDS = 5 * 60
 OPERATOR = "operator"
 _MAX_TRACKED_IPS = 10_000
 
@@ -100,7 +103,7 @@ class LoginThrottle:
 class OperatorAuth:
     def __init__(
         self,
-        password_hash: str,
+        password_hash: str | None,
         *,
         session_factory: Callable[[], AsyncSession],
         hasher: PasswordHasher | None = None,
@@ -108,8 +111,9 @@ class OperatorAuth:
         secure_cookie: bool = True,
         trusted_proxies: list[str] | None = None,
     ) -> None:
-        self.password_hash = password_hash
+        self.password_hash = password_hash or None
         self._hasher = hasher or PasswordHasher()  # argon2id by default
+        self.session_factory = session_factory
         self._sf = session_factory
         self._clock = clock
         self.secure_cookie = secure_cookie
@@ -117,6 +121,8 @@ class OperatorAuth:
         self._proxies = [ipaddress.ip_network(p, strict=False) for p in (trusted_proxies or [])]
         # sha256(step-up token) -> (session id, expiry on ``clock``)
         self._step_ups: dict[bytes, tuple[uuid.UUID, float]] = {}
+        # sha256(challenge token) -> (username, expiry on ``clock``)
+        self._challenges: dict[bytes, tuple[str, float]] = {}
 
     @classmethod
     def from_password(
@@ -131,15 +137,17 @@ class OperatorAuth:
     def from_env(
         cls, *, session_factory: Callable[[], AsyncSession] | None = None, **kw
     ) -> OperatorAuth:
+        """Build auth from the environment. A missing password is allowed: login then
+        requires an ``operator_account`` row (or setup)."""
         password = os.environ.get(PASSWORD_ENV)
-        if not password:
-            raise RuntimeError(f"{PASSWORD_ENV} is not set")
         if session_factory is None:
             from .db.session import async_session as session_factory
         proxies = [p.strip() for p in os.environ.get(TRUSTED_PROXIES_ENV, "").split(",") if p.strip()]
         kw.setdefault("trusted_proxies", proxies)
         kw.setdefault("secure_cookie", os.environ.get(INSECURE_COOKIE_ENV) != "1")
-        return cls.from_password(password, session_factory=session_factory, **kw)
+        if password:
+            return cls.from_password(password, session_factory=session_factory, **kw)
+        return cls(None, session_factory=session_factory, **kw)
 
     # ---- client address --------------------------------------------------------------
 
@@ -164,14 +172,23 @@ class OperatorAuth:
 
     # ---- password --------------------------------------------------------------------
 
-    async def _password_ok(self, password: str) -> bool:
+    async def hash_password(self, password: str) -> str:
+        return await asyncio.to_thread(self._hasher.hash, password)
+
+    async def verify_password_hash(self, password_hash: str | None, password: str) -> bool:
+        if not password_hash:
+            return False
+
         def check() -> bool:
             try:
-                return self._hasher.verify(self.password_hash, password)
+                return self._hasher.verify(password_hash, password)
             except (VerificationError, InvalidHashError):
                 return False
 
         return await asyncio.to_thread(check)
+
+    async def _password_ok(self, password: str) -> bool:
+        return await self.verify_password_hash(self.password_hash, password)
 
     async def check_password(self, ip: str, password: str) -> tuple[bool, int]:
         """Throttled password check. Returns ``(ok, retry_after)``; ``retry_after > 0`` means
@@ -268,6 +285,32 @@ class OperatorAuth:
         if sid != session_id:
             return False
         return True
+
+    # ---- TOTP challenge (opaque, in-memory, not a session) ---------------------------
+
+    def issue_login_challenge(self, username: str) -> str:
+        now = self._clock()
+        self._challenges = {h: v for h, v in self._challenges.items() if v[1] > now}
+        token = secrets.token_urlsafe(32)
+        self._challenges[_sha256(token)] = (username, now + CHALLENGE_TTL_SECONDS)
+        return token
+
+    def login_challenge_username(self, token: str | None) -> str | None:
+        """Return the username if the challenge is live. Does not consume it (retries)."""
+        if not token:
+            return None
+        digest = _sha256(token)
+        entry = self._challenges.get(digest)
+        if entry is None:
+            return None
+        username, expires = entry
+        if expires <= self._clock():
+            self._challenges.pop(digest, None)
+            return None
+        return username
+
+    def consume_login_challenge(self, token: str) -> None:
+        self._challenges.pop(_sha256(token), None)
 
     # ---- audit -----------------------------------------------------------------------
 

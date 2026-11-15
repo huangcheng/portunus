@@ -5,7 +5,8 @@ SlotManager -> Registry -> Omni -> FastAPI app) and serves it with uvicorn (sing
 authz snapshot, slots and step-up tokens are in-process state).
 
 Environment (see README): ``PORTUNUS_SECRETS_KEY``, ``PORTUNUS_PEPPER_FILE``,
-``PORTUNUS_OPERATOR_PASSWORD``, ``PORTUNUS_SOCKET``, ``PORTUNUS_TOKEN_FILE`` (or
+``PORTUNUS_OPERATOR_PASSWORD`` (optional once an operator account exists), ``PORTUNUS_SOCKET``,
+``PORTUNUS_TOKEN_FILE`` (or
 ``PORTUNUS_TOKEN`` with ``PORTUNUS_DEV=1``), ``PORTUNUS_POLICY``, ``PORTUNUS_DATABASE_URL``,
 ``PORTUNUS_BIND``, ``PORTUNUS_DASHBOARD_DIR``, ``PORTUNUS_RUNNER_UID``, ``PORTUNUS_DEV``.
 
@@ -244,8 +245,8 @@ def create_gateway_app() -> FastAPI:
     dev = is_dev()
     vault = Vault.from_keyring(load_keyring())
     load_pepper()  # fail fast: agent keys cannot be verified without it
-    if os.environ.get("PORTUNUS_OPERATOR_PASSWORD") is None:
-        raise ConfigError("PORTUNUS_OPERATOR_PASSWORD is not set")
+    # Env password is optional: login accepts it only until /api/auth/setup creates
+    # the operator account. After that the account password (and TOTP/passkey) is the path.
     # Plain-http dev setups cannot hold a Secure cookie.
     auth = OperatorAuth.from_env(
         secure_cookie=not (dev or os.environ.get(INSECURE_COOKIE_ENV) == "1")

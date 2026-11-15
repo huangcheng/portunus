@@ -339,8 +339,13 @@ export function TemporalPage() {
                     ) : (
                       selected.events.map((ev) => (
                         <li key={String(ev.event_id)}>
-                          <span className="mono temporal-event-id">{ev.event_id}</span>
-                          <span className="temporal-event-type">{ev.event_type}</span>
+                          <span className="mono temporal-event-id" title={`Event #${ev.event_id}`}>
+                            {ev.event_id}
+                          </span>
+                          <span className="temporal-event-type">
+                            {ev.event_type || "Unknown"}
+                            {ev.summary ? <span className="muted temporal-event-summary"> · {ev.summary}</span> : null}
+                          </span>
                           <span className="muted mono">{fmtTimestamp(ev.event_time)}</span>
                         </li>
                       ))

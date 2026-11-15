@@ -84,8 +84,10 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "sort_order": 20,
         "spec": {
             "url": "https://mcp.dropbox.com/mcp",
-            "authorize_url": "https://www.dropbox.com/oauth2/authorize",
+            # Dropbox only returns refresh_token when token_access_type=offline.
+            "authorize_url": "https://www.dropbox.com/oauth2/authorize?token_access_type=offline",
             "token_url": "https://api.dropboxapi.com/oauth2/token",
+            "token_endpoint_auth_method": "client_secret_basic",
             "scopes": [
                 "account_info.read",
                 "files.metadata.read",

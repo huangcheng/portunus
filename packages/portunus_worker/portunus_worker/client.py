@@ -11,6 +11,55 @@ from .settings import temporal_enabled, temporal_host, temporal_namespace, tempo
 log = logging.getLogger("portunus.worker.client")
 
 
+def _event_type_label(et: Any) -> str:
+    """Human label for a Temporal history event_type (protobuf int or enum)."""
+    raw: str | None = None
+    if et is None:
+        return "Unknown"
+    name = getattr(et, "name", None)
+    if isinstance(name, str) and name:
+        raw = name
+    else:
+        try:
+            from temporalio.api.enums.v1 import EventType
+
+            raw = EventType.Name(int(et))
+        except Exception:  # noqa: BLE001 — fall back to string form
+            raw = str(et)
+    if raw.startswith("EVENT_TYPE_"):
+        raw = raw[len("EVENT_TYPE_") :]
+    # WORKFLOW_EXECUTION_STARTED → WorkflowExecutionStarted
+    if "_" in raw and raw.upper() == raw:
+        return "".join(part.title() for part in raw.split("_"))
+    return raw
+
+
+def _event_summary(event: Any, label: str) -> str | None:
+    """Short secondary line: signal name, activity type, timer id, etc."""
+    lower = label.lower()
+    try:
+        if "signaled" in lower:
+            attrs = getattr(event, "workflow_execution_signaled_event_attributes", None)
+            name = getattr(attrs, "signal_name", None) if attrs else None
+            return f"signal {name}" if name else None
+        if "activitytaskscheduled" in lower.replace("_", ""):
+            attrs = getattr(event, "activity_task_scheduled_event_attributes", None)
+            at = getattr(attrs, "activity_type", None) if attrs else None
+            name = getattr(at, "name", None) if at else None
+            return name
+        if "timerstarted" in lower.replace("_", ""):
+            attrs = getattr(event, "timer_started_event_attributes", None)
+            tid = getattr(attrs, "timer_id", None) if attrs else None
+            return f"timer {tid}" if tid else None
+        if "markerrecorded" in lower.replace("_", ""):
+            attrs = getattr(event, "marker_recorded_event_attributes", None)
+            name = getattr(attrs, "marker_name", None) if attrs else None
+            return name
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 async def _client():
     if not temporal_enabled():
         return None
@@ -255,10 +304,12 @@ async def describe_workflow(
         count = 0
         async for event in handle.fetch_history_events():
             et = getattr(event, "event_type", None)
+            label = _event_type_label(et)
             events.append(
                 {
                     "event_id": getattr(event, "event_id", None),
-                    "event_type": getattr(et, "name", None) or str(et),
+                    "event_type": label,
+                    "summary": _event_summary(event, label),
                     "event_time": _dt(getattr(event, "event_time", None)),
                 }
             )

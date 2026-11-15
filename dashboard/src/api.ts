@@ -5,8 +5,10 @@ export class ApiError extends Error {
     public status: number,
     public code: string,
     message: string,
+    public data: Record<string, unknown> = {},
   ) {
     super(message);
+    this.name = "ApiError";
   }
 }
 
@@ -34,11 +36,20 @@ async function call<T>(method: string, path: string, body?: unknown, headers: Re
       : "";
     // Session gone / never logged in: bounce the shell to <Login/>. Skip /auth/login
     // so a wrong password stays on the form instead of remounting it.
-    if (res.status === 401 && path !== "/auth/login") {
+    // Login, TOTP, passkey, and setup stay on the form. A 401 there is a
+    // credential failure, not a dead session.
+    const publicAuth =
+      path === "/auth/setup" || path === "/auth/status" || path.startsWith("/auth/login");
+    if (res.status === 401 && !publicAuth) {
       csrf = "";
       window.dispatchEvent(new Event("portunus-unauthorized"));
     }
-    throw new ApiError(res.status, data.code ?? "error", data.message ?? (detail ? `invalid: ${detail}` : res.statusText));
+    throw new ApiError(
+      res.status,
+      data.code ?? "error",
+      data.message ?? (detail ? `invalid: ${detail}` : res.statusText),
+      data,
+    );
   }
   return data as T;
 }
@@ -246,6 +257,7 @@ export type TemporalWorkflowSummary = {
 export type TemporalWorkflowEvent = {
   event_id: number | null;
   event_type: string | null;
+  summary?: string | null;
   event_time: string | null;
 };
 
@@ -266,19 +278,107 @@ export type TemporalWorkflowList = {
   error?: string;
 };
 
+export type AuthStatus = {
+  configured: boolean;
+  username?: string;
+  has_password: boolean;
+  has_totp: boolean;
+  has_passkey: boolean;
+  turnstile_sitekey?: string;
+  bootstrap_required?: boolean;
+};
+
+export type RecoveryStatus = { total: number; remaining: number };
+
+export type PasskeyInfo = {
+  credential_id: string;
+  name: string;
+  transports: string[];
+  created_at: string | null;
+  last_used_at: string | null;
+  sign_count: number;
+};
+
+export type PasskeyCreationOptions = {
+  challenge: string;
+  rp: { name: string; id: string };
+  user: { id: string; name: string; displayName: string };
+  pubKeyCredParams: { type: string; alg: number }[];
+  timeout: number;
+  attestation?: string;
+  authenticatorSelection?: AuthenticatorSelectionCriteria;
+};
+
+export type PasskeyAssertionOptions = {
+  challenge: string;
+  rpId: string;
+  allowCredentials: { id: string; type?: string }[];
+  timeout: number;
+  userVerification?: string;
+};
+
 export const api = {
   apps: () => call<CatalogAppRow[]>("GET", "/apps"),
   createApp: (b: Omit<CatalogAppRow, "id">) => call<CatalogAppRow>("POST", "/apps", b),
   updateApp: (id: string, b: Partial<CatalogAppRow>) => call<CatalogAppRow>("PATCH", `/apps/${id}`, b),
   deleteApp: (id: string) => call<void>("DELETE", `/apps/${id}`),
-  login: async (password: string) => {
-    const r = await call<{ csrf_token: string }>("POST", "/auth/login", { password });
+  authStatus: () => call<AuthStatus>("GET", "/auth/status"),
+  setup: async (body: { username: string; password: string; bootstrap_password?: string }) => {
+    const r = await call<{ csrf_token: string; username: string }>("POST", "/auth/setup", body);
     setCsrf(r.csrf_token);
+    return r;
+  },
+  login: async (body: { username?: string; password: string; turnstile_token?: string }) => {
+    const r = await call<{ csrf_token: string; username?: string }>("POST", "/auth/login", body);
+    setCsrf(r.csrf_token);
+    return r;
+  },
+  loginTotp: async (challenge_token: string, code: string) => {
+    const r = await call<{ csrf_token: string; username?: string; recovery_remaining?: number }>(
+      "POST",
+      "/auth/login/totp",
+      { challenge_token, code },
+    );
+    setCsrf(r.csrf_token);
+    return r;
+  },
+  passkeyAssertionOptions: () =>
+    call<PasskeyAssertionOptions>("POST", "/auth/login/passkey/assertion/options", {}),
+  passkeyLogin: async (body: {
+    id: string;
+    challenge: string;
+    response: { clientDataJSON: string; authenticatorData: string; signature: string };
+  }) => {
+    const r = await call<{ csrf_token: string; username?: string }>("POST", "/auth/login/passkey/verify", body);
+    setCsrf(r.csrf_token);
+    return r;
   },
   session: async () => {
-    const r = await call<{ csrf_token: string }>("GET", "/auth/session");
+    const r = await call<{ csrf_token: string; username?: string }>("GET", "/auth/session");
     setCsrf(r.csrf_token);
+    return r;
   },
+  changePassword: (current: string, next: string) =>
+    call<{ ok: boolean }>("POST", "/auth/password", { current, next }),
+  totpEnable: () => call<{ secret: string; provisioning_uri: string }>("POST", "/auth/totp/enable", {}),
+  totpConfirm: (secret: string, code: string) =>
+    call<{ ok: boolean; codes: string[] }>("POST", "/auth/totp/confirm", { secret, code }),
+  totpQr: (password: string) =>
+    call<{ secret: string; provisioning_uri: string }>("POST", "/auth/totp/qr", { password }),
+  totpDisable: (password: string) => call<{ ok: boolean }>("POST", "/auth/totp/disable", { password }),
+  recovery: () => call<RecoveryStatus>("GET", "/auth/recovery"),
+  regenerateRecovery: (password: string) =>
+    call<{ ok: boolean; codes: string[] }>("POST", "/auth/recovery/regenerate", { password }),
+  passkeyRegisterOptions: () => call<PasskeyCreationOptions>("POST", "/auth/passkey/register/options", {}),
+  passkeyRegister: (body: {
+    name: string;
+    challenge: string;
+    response: { clientDataJSON: string; attestationObject: string };
+    transports?: string[];
+  }) => call<{ ok: boolean; credential_id: string }>("POST", "/auth/passkey/register/verify", body),
+  passkeys: () => call<{ passkeys: PasskeyInfo[] }>("GET", "/auth/passkeys"),
+  deletePasskey: (id: string) =>
+    call<{ ok: boolean; deleted: number }>("DELETE", `/auth/passkeys/${encodeURIComponent(id)}`),
   status: () =>
     call<{
       ok: boolean;

@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     CheckConstraint,
     DateTime,
     Float,
@@ -286,3 +287,61 @@ class SiteHealth(Base):
     ewma_upstream_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     sample_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_sample_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OperatorAccount(Base):
+    """The single dashboard operator. ``id`` is constrained to 1."""
+
+    __tablename__ = "operator_account"
+    __table_args__ = (CheckConstraint("id = 1", name="singleton"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True)
+    password_hash: Mapped[str | None] = mapped_column(Text)
+    # Fernet token (PORTUNUS_SECRETS_KEY). Plaintext TOTP secrets are never stored.
+    totp_secret: Mapped[str | None] = mapped_column(Text)
+    totp_enabled: Mapped[bool] = mapped_column(default=False, server_default=false())
+    totp_last_step: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class PasskeyCredential(Base):
+    """WebAuthn credential for the operator. ``public_key`` is canonical COSE hex."""
+
+    __tablename__ = "passkey_credentials"
+
+    credential_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    public_key: Mapped[str] = mapped_column(Text)
+    sign_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    transports: Mapped[str | None] = mapped_column(Text)
+    name: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = _created_at()
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RecoveryCode(Base):
+    """One-time TOTP fallback. Only the keyed hash is stored."""
+
+    __tablename__ = "recovery_codes"
+
+    code_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created_at()
+
+
+class AuthEvent(Base):
+    """Login audit used for IP lockout. Failures in the window share one bucket."""
+
+    __tablename__ = "auth_events"
+    __table_args__ = (
+        Index("ix_auth_events_ts", "ts"),
+        Index("ix_auth_events_ip_ts", "ip", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(64))
+    success: Mapped[bool] = mapped_column()
+    ip: Mapped[str | None] = mapped_column(String(64))
+    detail: Mapped[str | None] = mapped_column(String(500))
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

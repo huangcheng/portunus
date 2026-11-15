@@ -47,3 +47,7 @@ deploy/rclone.SHA256SUMS
 # Pi-audit / OCR review scratch (local only)
 docs/audit/
 
+
+# local Turnstile secrets
+turnstile.env
+.env.turnstile*

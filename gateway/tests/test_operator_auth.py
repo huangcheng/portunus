@@ -179,10 +179,11 @@ def test_password_from_env_is_hashed_argon2id(monkeypatch):
     assert PASSWORD not in repr(vars(auth))
 
 
-def test_missing_password_env_fails_closed(monkeypatch):
+def test_missing_password_env_is_optional(monkeypatch):
+    """Boot no longer requires the env password; login then needs an account or that env var."""
     monkeypatch.delenv("PORTUNUS_OPERATOR_PASSWORD", raising=False)
-    with pytest.raises(RuntimeError):
-        OperatorAuth.from_env()
+    auth = OperatorAuth.from_env(session_factory=async_session, secure_cookie=False)
+    assert auth.password_hash is None
 
 
 async def test_unauthenticated_requests_denied(db):

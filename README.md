@@ -113,7 +113,10 @@ PORTUNUS_URL=http://localhost:8080 PORTUNUS_OPERATOR_PASSWORD=... E2E_COMMAND=/a
 |---|---|---|---|
 | `PORTUNUS_SECRETS_KEY` | gateway | yes | Vault keyring `k1:<base64 32 bytes>[,k2:...]`; newest version seals, older still open |
 | `PORTUNUS_PEPPER_FILE` | gateway | yes | File holding base64 of >= 32 bytes; HMAC pepper for agent keys |
-| `PORTUNUS_OPERATOR_PASSWORD` | gateway | yes | Operator password (only an argon2id hash is kept in memory) |
+| `PORTUNUS_OPERATOR_PASSWORD` | gateway | until an account exists | Legacy operator password (argon2id hash in memory). Optional at boot. `POST /api/auth/setup` requires it as `bootstrap_password` when set; after the account exists, login uses the account password, not this value |
+| `PORTUNUS_TURNSTILE_SITEKEY` | gateway | no | Public Turnstile sitekey, returned by `GET /api/auth/status` |
+| `PORTUNUS_TURNSTILE_SECRET` | gateway | no | Turnstile secret. When set, password login requires a passing `action=login` siteverify |
+| `PORTUNUS_TURNSTILE_HOSTNAMES` | gateway | with the secret | Comma-separated hostnames Siteverify must return. Empty allowlist fails closed |
 | `PORTUNUS_TOKEN_FILE` | both | yes | Shared secret sent on every gateway->runner frame. `PORTUNUS_TOKEN` accepted in dev only |
 | `PORTUNUS_SOCKET` | both | no | Runner Unix socket (default `/run/portunus/runner.sock`) |
 | `PORTUNUS_SITE_ID`, `PORTUNUS_REGIONS` | runner | no | Fleet metadata advertised on hello: a site name (default `local`) and comma-separated region labels (default `local`) |

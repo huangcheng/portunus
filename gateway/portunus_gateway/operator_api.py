@@ -8,7 +8,10 @@ replace it through ``app.dependency_overrides``. Yields the operator identity fo
 from __future__ import annotations
 
 import html
+import hmac
 import logging
+import os
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -20,13 +23,44 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select
 
 from . import authz, keys
+from . import passkey as pk
 from .db.models import AgentKey, AuditEvent, Grant, Server
+from .operator_account import (
+    consume_recovery_code,
+    confirm_totp,
+    RECOVERY_COUNT,
+    count_passkeys,
+    create_account,
+    delete_passkey,
+    disable_totp,
+    fresh_totp_secret,
+    generate_recovery_codes,
+    get_account,
+    get_passkey,
+    list_passkeys,
+    lockout_retry_after,
+    normalize_recovery_input,
+    open_totp_secret,
+    passkey_allows,
+    record_auth_event,
+    recovery_counts,
+    replace_recovery_codes,
+    save_passkey,
+    set_password_hash,
+    set_totp_step,
+    totp_provisioning_uri,
+    totp_verify_at,
+    touch_passkey,
+)
 from .operator_auth import (
     OPERATOR,
+    PASSWORD_ENV,
     SESSION_COOKIE,
     CsrfError,
     OperatorAuth,
 )
+from .operator_crypto import OperatorCryptoError
+from .turnstile import token_looks_plausible, turnstile_secret, turnstile_sitekey, verify_login_token
 from .catalog import CatalogStore
 from .oauth import OAuthError, OAuthStore, exchange_code, iss_matches, register_oauth_client
 from .registry import Registry, RegistryError
@@ -548,6 +582,60 @@ class PasswordBody(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class LoginBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(min_length=1, max_length=1024)
+    username: str | None = Field(default=None, max_length=64)
+    turnstile_token: str | None = Field(default=None, max_length=2048)
+
+
+class SetupBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=1024)
+    bootstrap_password: str | None = Field(default=None, max_length=1024)
+
+
+class TotpLoginBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    challenge_token: str = Field(min_length=1, max_length=256)
+    code: str = Field(min_length=1, max_length=80)
+
+
+class PasswordChangeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current: str = Field(min_length=1, max_length=1024)
+    next: str = Field(min_length=8, max_length=1024)
+
+
+class TotpConfirmBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    secret: str = Field(min_length=16, max_length=128)
+    code: str = Field(min_length=6, max_length=8)
+
+
+class PasskeyLoginBody(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(min_length=1, max_length=512)
+    challenge: str = Field(min_length=1, max_length=256)
+    response: dict[str, Any]
+
+
+class PasskeyRegisterBody(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str = Field(min_length=1, max_length=64)
+    challenge: str = Field(min_length=1, max_length=256)
+    response: dict[str, Any]
+    transports: list[str] | None = None
+
+
 def _locked(retry_after: int) -> JSONResponse:
     return JSONResponse(
         status_code=429,
@@ -556,18 +644,32 @@ def _locked(retry_after: int) -> JSONResponse:
     )
 
 
-@router.post("/auth/login")
-async def login(body: PasswordBody, request: Request, response: Response):
-    auth = _auth(request)
-    ip = auth.client_ip(request)
-    ok, retry_after = await auth.check_password(ip, body.password)
-    if retry_after:
-        return _locked(retry_after)
-    if not ok:
-        raise RegistryError(401, "unauthorized", "invalid password")
-    token, csrf, _sid = await auth.create_session()
-    await auth.audit(OPERATOR, "operator.login", {"ip": ip})
-    out = JSONResponse({"csrf_token": csrf})
+def _sf(request: Request):
+    auth = getattr(request.app.state, "auth", None)
+    if auth is not None:
+        return auth.session_factory
+    registry = getattr(request.app.state, "registry", None)
+    return getattr(registry, "session_factory", None)
+
+
+def _str_eq(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode(), b.encode())
+
+
+def _rp_id(request: Request) -> str:
+    return urllib.parse.urlparse(str(request.url)).hostname or "localhost"
+
+
+def _allowed_origins(request: Request) -> set[str]:
+    parsed = urllib.parse.urlparse(str(request.url))
+    scheme = parsed.scheme or "https"
+    host_header = request.headers.get("host", "localhost")
+    host = parsed.hostname or "localhost"
+    return {f"{scheme}://{host_header}", f"https://{host}", f"http://{host}"}
+
+
+def _session_response(auth: OperatorAuth, token: str, body: dict[str, Any]) -> JSONResponse:
+    out = JSONResponse(body)
     out.set_cookie(
         SESSION_COOKIE,
         token,
@@ -580,10 +682,468 @@ async def login(body: PasswordBody, request: Request, response: Response):
     return out
 
 
+async def _begin_session(
+    auth: OperatorAuth,
+    request: Request,
+    *,
+    username: str | None,
+    detail: dict[str, Any],
+    extra: dict[str, Any] | None = None,
+) -> JSONResponse:
+    token, csrf, _sid = await auth.create_session()
+    actor = username or OPERATOR
+    await auth.audit(actor, "operator.login", {"ip": auth.client_ip(request), **detail})
+    body: dict[str, Any] = {"csrf_token": csrf, "username": actor}
+    if extra:
+        body.update(extra)
+    return _session_response(auth, token, body)
+
+
+async def _require_turnstile(request: Request, token: str | None) -> None:
+    if not turnstile_secret():
+        return
+    ip = _auth(request).client_ip(request)
+    if not token_looks_plausible(token) or not await verify_login_token(token or "", remoteip=ip):
+        raise RegistryError(403, "turnstile_failed", "human verification failed; refresh and try again")
+
+
+def _passkey_view(row) -> dict[str, Any]:
+    transports = row.transports.split(",") if row.transports else []
+    return {
+        "credential_id": row.credential_id,
+        "name": row.name,
+        "transports": transports,
+        "created_at": _iso(row.created_at),
+        "last_used_at": _iso(row.last_used_at),
+        "sign_count": row.sign_count,
+    }
+
+
+@router.get("/auth/status")
+async def auth_status(request: Request) -> dict[str, Any]:
+    sf = _sf(request)
+    acct = await get_account(sf) if sf is not None else None
+    n_keys = await count_passkeys(sf) if sf is not None and acct is not None else 0
+    payload: dict[str, Any] = {
+        "configured": acct is not None,
+        "has_password": bool(acct and acct.password_hash),
+        "has_totp": bool(acct and acct.totp_enabled),
+        "has_passkey": n_keys > 0,
+        "bootstrap_required": acct is None and bool(os.environ.get(PASSWORD_ENV)),
+    }
+    if acct is not None:
+        payload["username"] = acct.username
+    sitekey = turnstile_sitekey()
+    if sitekey:
+        payload["turnstile_sitekey"] = sitekey
+    return payload
+
+
+@router.post("/auth/setup")
+async def auth_setup(body: SetupBody, request: Request):
+    auth = _auth(request)
+    sf = auth.session_factory
+    if await get_account(sf) is not None:
+        raise RegistryError(409, "already_configured", "the operator account already exists")
+    username = body.username.strip()
+    if not (3 <= len(username) <= 64):
+        raise RegistryError(422, "invalid_request", "username must be 3 to 64 characters")
+    if len(body.password) < 8:
+        raise RegistryError(422, "invalid_request", "password must be at least 8 characters")
+    env_pw = os.environ.get(PASSWORD_ENV) or ""
+    if env_pw:
+        supplied = body.bootstrap_password or ""
+        if not _str_eq(supplied, env_pw):
+            raise RegistryError(401, "unauthorized", "bootstrap password does not match")
+    if not await create_account(sf, username, await auth.hash_password(body.password)):
+        raise RegistryError(409, "already_configured", "the operator account already exists")
+    await record_auth_event(sf, "setup", True, auth.client_ip(request), username)
+    await auth.audit(username, "operator.setup", {})
+    return await _begin_session(auth, request, username=username, detail={"method": "setup"})
+
+
+@router.post("/auth/login")
+async def login(body: LoginBody, request: Request):
+    auth = _auth(request)
+    sf = auth.session_factory
+    acct = await get_account(sf)
+    if acct is not None:
+        return await _login_account(auth, request, body, acct)
+    await _require_turnstile(request, body.turnstile_token)
+    if not auth.password_hash:
+        raise RegistryError(409, "setup_required", "no operator account — open setup first")
+    ip = auth.client_ip(request)
+    ok, retry_after = await auth.check_password(ip, body.password)
+    if retry_after:
+        return _locked(retry_after)
+    if not ok:
+        raise RegistryError(401, "unauthorized", "invalid password")
+    return await _begin_session(auth, request, username=None, detail={})
+
+
+async def _login_account(auth: OperatorAuth, request: Request, body: LoginBody, acct) -> JSONResponse:
+    """Account password step. Env password alone is not accepted once configured."""
+    await _require_turnstile(request, body.turnstile_token)
+    sf = auth.session_factory
+    ip = auth.client_ip(request)
+    wait = await lockout_retry_after(sf, ip)
+    if wait:
+        await record_auth_event(sf, "lockout", False, ip, "login blocked")
+        return _locked(wait)
+    username = (body.username or "").strip()
+    user_ok = bool(username) and _str_eq(acct.username, username)
+    pw_ok = await auth.verify_password_hash(acct.password_hash, body.password)
+    if not user_ok or not pw_ok:
+        await record_auth_event(sf, "login_password", False, ip, (body.username or "")[:32])
+        await auth.audit("anonymous", "operator.login_failed", {"ip": ip})
+        raise RegistryError(401, "invalid_credentials", "wrong username or password")
+    if acct.totp_enabled and acct.totp_secret:
+        challenge = auth.issue_login_challenge(acct.username)
+        await record_auth_event(sf, "login_password", True, ip, "totp step issued")
+        return JSONResponse(
+            status_code=401,
+            content={
+                "code": "totp_required",
+                "challenge_token": challenge,
+                "message": "enter your authenticator code",
+            },
+        )
+    await record_auth_event(sf, "login_password", True, ip, acct.username)
+    return await _begin_session(auth, request, username=acct.username, detail={"method": "password"})
+
+
+@router.post("/auth/login/totp")
+async def login_totp(body: TotpLoginBody, request: Request):
+    auth = _auth(request)
+    sf = auth.session_factory
+    ip = auth.client_ip(request)
+    wait = await lockout_retry_after(sf, ip)
+    if wait:
+        await record_auth_event(sf, "lockout", False, ip, "totp blocked")
+        return _locked(wait)
+    username = auth.login_challenge_username(body.challenge_token)
+    if username is None:
+        raise RegistryError(401, "invalid_challenge", "the challenge token is invalid or expired")
+    acct = await get_account(sf)
+    if acct is None or not acct.totp_enabled or not acct.totp_secret or not _str_eq(acct.username, username):
+        raise RegistryError(409, "totp_not_enabled", "TOTP is not enabled on this account")
+    raw = body.code.strip().replace(" ", "")
+    if len(raw) == 6 and raw.isdigit():
+        try:
+            secret = open_totp_secret(acct.totp_secret)
+        except OperatorCryptoError:
+            await record_auth_event(sf, "login_totp", False, ip, "decrypt failed")
+            raise RegistryError(401, "invalid_code", "wrong or replayed authenticator code") from None
+        step = totp_verify_at(secret, raw, acct.totp_last_step)
+        if step is None:
+            await record_auth_event(sf, "login_totp", False, ip, "bad code")
+            await auth.audit(username, "operator.login_failed", {"ip": ip, "step": "totp"})
+            raise RegistryError(401, "invalid_code", "wrong or replayed authenticator code")
+        await set_totp_step(sf, step)
+        auth.consume_login_challenge(body.challenge_token)
+        await record_auth_event(sf, "login_totp", True, ip, username)
+        return await _begin_session(auth, request, username=username, detail={"method": "totp"})
+    remaining = await consume_recovery_code(sf, normalize_recovery_input(raw))
+    if remaining is None:
+        await record_auth_event(sf, "login_totp", False, ip, "bad recovery key")
+        await auth.audit(username, "operator.login_failed", {"ip": ip, "step": "recovery"})
+        raise RegistryError(401, "invalid_code", "wrong or already-used recovery key")
+    auth.consume_login_challenge(body.challenge_token)
+    await record_auth_event(sf, "login_recovery", True, ip, f"{username} ({remaining} left)")
+    return await _begin_session(
+        auth,
+        request,
+        username=username,
+        detail={"method": "recovery"},
+        extra={"recovery_remaining": remaining},
+    )
+
+
+@router.post("/auth/login/passkey/assertion/options")
+async def passkey_assertion_options(request: Request) -> dict[str, Any]:
+    auth = _auth(request)
+    sf = auth.session_factory
+    if await get_account(sf) is None:
+        raise RegistryError(409, "setup_required", "no operator account")
+    creds = await passkey_allows(sf)
+    if not creds:
+        raise RegistryError(409, "no_passkey", "no passkey is registered")
+    pk.set_allowed_origins(_allowed_origins(request))
+    return {
+        "challenge": pk.new_challenge("assert"),
+        "rpId": _rp_id(request),
+        "allowCredentials": [{"type": "public-key", "id": cid} for cid, _transports in creds],
+        "userVerification": "preferred",
+        "timeout": pk.CHALLENGE_TTL_SEC * 1000,
+    }
+
+
+@router.post("/auth/login/passkey/verify")
+async def passkey_login_verify(body: PasskeyLoginBody, request: Request):
+    auth = _auth(request)
+    sf = auth.session_factory
+    ip = auth.client_ip(request)
+    wait = await lockout_retry_after(sf, ip)
+    if wait:
+        await record_auth_event(sf, "lockout", False, ip, "passkey blocked")
+        return _locked(wait)
+    pk.set_allowed_origins(_allowed_origins(request))
+    resp = body.response or {}
+    try:
+        expected = pk.consume_challenge("assert", body.challenge)
+    except pk.PasskeyError as exc:
+        raise RegistryError(401, exc.code, exc.message) from None
+    row = await get_passkey(sf, body.id)
+    if row is None:
+        await record_auth_event(sf, "login_passkey", False, ip, "unknown credential")
+        raise RegistryError(401, "unknown_credential", "this passkey is not registered")
+    try:
+        new_count = pk.verify_assertion(
+            credential_id_b64=body.id,
+            client_data_b64=str(resp.get("clientDataJSON") or ""),
+            authdata_b64=str(resp.get("authenticatorData") or ""),
+            signature_b64=str(resp.get("signature") or ""),
+            expected_challenge=expected,
+            expected_rp_id=_rp_id(request),
+            stored_public_key_hex=row.public_key,
+            stored_sign_count=row.sign_count,
+        )
+    except pk.PasskeyError as exc:
+        await record_auth_event(sf, "login_passkey", False, ip, exc.code)
+        await auth.audit(row.name, "operator.login_failed", {"ip": ip, "step": "passkey"})
+        raise RegistryError(401, exc.code, exc.message) from None
+    await touch_passkey(sf, row.credential_id, new_count)
+    acct = await get_account(sf)
+    username = acct.username if acct else OPERATOR
+    await record_auth_event(sf, "login_passkey", True, ip, username)
+    return await _begin_session(auth, request, username=username, detail={"method": "passkey"})
+
+
 @router.get("/auth/session")
 async def session_info(request: Request, actor: str = Depends(require_operator)) -> dict[str, Any]:
-    row = await _auth(request).lookup_session(request.cookies.get(SESSION_COOKIE))
-    return {"authenticated": True, "csrf_token": row.csrf_token if row else None}
+    auth = _auth(request)
+    row = await auth.lookup_session(request.cookies.get(SESSION_COOKIE))
+    acct = await get_account(auth.session_factory)
+    return {
+        "authenticated": True,
+        "csrf_token": row.csrf_token if row else None,
+        "username": acct.username if acct else actor,
+    }
+
+
+@router.post("/auth/step-up")
+async def step_up(body: PasswordBody, request: Request, actor: str = Depends(require_operator)):
+    auth = _auth(request)
+    sf = auth.session_factory
+    ip = auth.client_ip(request)
+    acct = await get_account(sf)
+    if acct is not None:
+        wait = await lockout_retry_after(sf, ip)
+        if wait:
+            return _locked(wait)
+        if not await auth.verify_password_hash(acct.password_hash, body.password):
+            await record_auth_event(sf, "step_up", False, ip, actor)
+            raise RegistryError(401, "unauthorized", "invalid password")
+    else:
+        ok, retry_after = await auth.check_password(ip, body.password)
+        if retry_after:
+            return _locked(retry_after)
+        if not ok:
+            raise RegistryError(401, "unauthorized", "invalid password")
+    token = auth.issue_step_up(request.state.operator_session_id)
+    await auth.audit(actor, "operator.step_up", {"ip": ip})
+    return {"step_up_token": token}
+
+
+@router.post("/auth/password")
+async def change_password(
+    body: PasswordChangeBody, request: Request, actor: str = Depends(require_operator)
+) -> dict[str, Any]:
+    auth = _auth(request)
+    sf = auth.session_factory
+    acct = await get_account(sf)
+    if acct is None or not acct.password_hash:
+        raise RegistryError(409, "setup_required", "no operator password is set")
+    if not await auth.verify_password_hash(acct.password_hash, body.current):
+        raise RegistryError(401, "invalid_credentials", "current password is wrong")
+    if not await set_password_hash(sf, await auth.hash_password(body.next)):
+        raise RegistryError(409, "setup_required", "no operator password is set")
+    await auth.audit(actor, "operator.password_changed", {})
+    return {"ok": True}
+
+
+@router.post("/auth/totp/enable")
+async def totp_enable(request: Request, actor: str = Depends(require_operator)) -> dict[str, Any]:
+    acct = await get_account(_auth(request).session_factory)
+    if acct is None:
+        raise RegistryError(409, "setup_required", "no operator account")
+    if acct.totp_enabled:
+        raise RegistryError(409, "totp_enabled", "TOTP is already enabled")
+    secret = fresh_totp_secret()
+    return {"secret": secret, "provisioning_uri": totp_provisioning_uri(secret, acct.username)}
+
+
+@router.post("/auth/totp/confirm")
+async def totp_confirm(
+    body: TotpConfirmBody, request: Request, actor: str = Depends(require_operator)
+) -> dict[str, Any]:
+    auth = _auth(request)
+    sf = auth.session_factory
+    acct = await get_account(sf)
+    if acct is None:
+        raise RegistryError(409, "setup_required", "no operator account")
+    if acct.totp_enabled:
+        raise RegistryError(409, "totp_enabled", "TOTP is already enabled")
+    code = body.code.strip().replace(" ", "")
+    if totp_verify_at(body.secret, code, None) is None:
+        raise RegistryError(401, "invalid_code", "wrong authenticator code")
+    try:
+        codes = generate_recovery_codes()
+        await confirm_totp(sf, body.secret, codes)
+    except LookupError:
+        raise RegistryError(409, "setup_required", "no operator account") from None
+    except OperatorCryptoError:
+        raise RegistryError(500, "misconfigured", "PORTUNUS_SECRETS_KEY cannot seal the authenticator secret") from None
+    await auth.audit(actor, "operator.totp_enabled", {})
+    return {"ok": True, "codes": [c["code"] for c in codes]}
+
+
+@router.post("/auth/totp/qr")
+async def totp_qr(
+    body: PasswordBody, request: Request, actor: str = Depends(require_operator)
+) -> dict[str, Any]:
+    auth = _auth(request)
+    sf = auth.session_factory
+    acct = await get_account(sf)
+    if acct is None or not acct.totp_enabled or not acct.totp_secret:
+        raise RegistryError(409, "totp_not_enabled", "TOTP is not enabled")
+    if not await auth.verify_password_hash(acct.password_hash, body.password):
+        await record_auth_event(sf, "totp_qr", False, auth.client_ip(request), actor)
+        raise RegistryError(401, "invalid_credentials", "wrong password")
+    try:
+        secret = open_totp_secret(acct.totp_secret)
+    except OperatorCryptoError:
+        raise RegistryError(500, "misconfigured", "authenticator secret could not be decrypted") from None
+    return {"secret": secret, "provisioning_uri": totp_provisioning_uri(secret, acct.username)}
+
+
+@router.post("/auth/totp/disable")
+async def totp_disable(
+    body: PasswordBody, request: Request, actor: str = Depends(require_operator)
+) -> dict[str, Any]:
+    auth = _auth(request)
+    sf = auth.session_factory
+    acct = await get_account(sf)
+    if acct is None or not acct.totp_enabled:
+        raise RegistryError(409, "totp_not_enabled", "TOTP is not enabled")
+    if not await auth.verify_password_hash(acct.password_hash, body.password):
+        await record_auth_event(sf, "totp_disable", False, auth.client_ip(request), actor)
+        raise RegistryError(401, "invalid_credentials", "wrong password")
+    await disable_totp(sf)
+    await auth.audit(actor, "operator.totp_disabled", {})
+    return {"ok": True}
+
+
+@router.get("/auth/recovery")
+async def recovery_status(request: Request, actor: str = Depends(require_operator)) -> dict[str, Any]:
+    total, remaining = await recovery_counts(_auth(request).session_factory)
+    return {"total": total or RECOVERY_COUNT, "remaining": remaining}
+
+
+@router.post("/auth/recovery/regenerate")
+async def recovery_regenerate(
+    body: PasswordBody, request: Request, actor: str = Depends(require_operator)
+) -> dict[str, Any]:
+    auth = _auth(request)
+    sf = auth.session_factory
+    acct = await get_account(sf)
+    if acct is None or not acct.totp_enabled:
+        raise RegistryError(409, "totp_not_enabled", "enable two-factor first")
+    if not await auth.verify_password_hash(acct.password_hash, body.password):
+        await record_auth_event(sf, "recovery_regenerate", False, auth.client_ip(request), actor)
+        raise RegistryError(401, "invalid_credentials", "wrong password")
+    try:
+        codes = generate_recovery_codes()
+        await replace_recovery_codes(sf, codes)
+    except OperatorCryptoError:
+        raise RegistryError(500, "misconfigured", "PORTUNUS_SECRETS_KEY cannot hash recovery codes") from None
+    await auth.audit(actor, "operator.recovery_regenerated", {})
+    return {"ok": True, "codes": [c["code"] for c in codes]}
+
+
+@router.post("/auth/passkey/register/options")
+async def passkey_register_options(request: Request, actor: str = Depends(require_operator)) -> dict[str, Any]:
+    auth = _auth(request)
+    acct = await get_account(auth.session_factory)
+    if acct is None:
+        raise RegistryError(409, "setup_required", "no operator account")
+    pk.set_allowed_origins(_allowed_origins(request))
+    return {
+        "challenge": pk.new_challenge("create"),
+        "rp": {"name": "Portunus", "id": _rp_id(request)},
+        "user": {
+            "id": pk.b64url_encode(b"portunus-operator"),
+            "name": acct.username,
+            "displayName": acct.username,
+        },
+        "pubKeyCredParams": [
+            {"type": "public-key", "alg": -7},
+            {"type": "public-key", "alg": -257},
+        ],
+        "authenticatorSelection": {"residentKey": "preferred", "userVerification": "preferred"},
+        "timeout": pk.CHALLENGE_TTL_SEC * 1000,
+        "attestation": "none",
+    }
+
+
+@router.post("/auth/passkey/register/verify")
+async def passkey_register_verify(
+    body: PasskeyRegisterBody, request: Request, actor: str = Depends(require_operator)
+) -> dict[str, Any]:
+    auth = _auth(request)
+    name = body.name.strip()
+    if not (1 <= len(name) <= 64):
+        raise RegistryError(422, "invalid_request", "name must be 1 to 64 characters")
+    pk.set_allowed_origins(_allowed_origins(request))
+    resp = body.response or {}
+    try:
+        expected = pk.consume_challenge("create", body.challenge)
+        cred_id, pub_hex = pk.verify_registration(
+            client_data_b64=str(resp.get("clientDataJSON") or ""),
+            attestation_b64=str(resp.get("attestationObject") or ""),
+            expected_challenge=expected,
+            expected_rp_id=_rp_id(request),
+        )
+    except pk.PasskeyError as exc:
+        await auth.audit(actor, "operator.passkey_register_failed", {"code": exc.code})
+        raise RegistryError(400, exc.code, exc.message) from None
+    transports = body.transports
+    joined = ",".join(t for t in transports if isinstance(t, str)) if transports else None
+    await save_passkey(
+        auth.session_factory,
+        credential_id=cred_id,
+        public_key=pub_hex,
+        name=name,
+        transports=joined or None,
+    )
+    await auth.audit(actor, "operator.passkey_registered", {"name": name})
+    return {"ok": True, "credential_id": cred_id}
+
+
+@router.get("/auth/passkeys")
+async def passkeys_list(request: Request, actor: str = Depends(require_operator)) -> dict[str, Any]:
+    rows = await list_passkeys(_auth(request).session_factory)
+    return {"passkeys": [_passkey_view(r) for r in rows]}
+
+
+@router.delete("/auth/passkeys/{credential_id}")
+async def passkey_delete(
+    credential_id: str, request: Request, actor: str = Depends(require_operator)
+) -> dict[str, Any]:
+    auth = _auth(request)
+    deleted = await delete_passkey(auth.session_factory, credential_id)
+    await auth.audit(actor, "operator.passkey_deleted", {"credential_id": credential_id[:24]})
+    return {"ok": True, "deleted": deleted}
 
 
 @router.get("/status")

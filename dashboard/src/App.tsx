@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { api } from "./api";
+import { api, type AuthStatus } from "./api";
+import { AccountPage } from "./AccountPage";
 import { AppsPage } from "./AppsPage";
 import { FleetPage } from "./FleetPage";
 import { BrandMark, Icon } from "./icons/ui";
 import { KeysPage } from "./KeysPage";
 import { Login } from "./Login";
 import { LogsPage } from "./LogsPage";
+import { Setup } from "./Setup";
 import { TemporalPage } from "./TemporalPage";
 
-type View = "apps" | "keys" | "fleet" | "logs" | "workflows";
+type View = "apps" | "keys" | "fleet" | "logs" | "workflows" | "account";
 
 async function copyText(text: string) {
   await navigator.clipboard.writeText(text);
@@ -109,19 +111,26 @@ const VIEW_META: Record<
     description: "Sites, live children, and package drift — read-only operational truth.",
     index: "03",
   },
-  logs: {
-    title: "Logs",
-    eyebrow: "Event history",
-    headline: "What happened, when.",
-    description: "Operator audit trail and tool-call timing without arguments or results.",
-    index: "04",
-  },
   workflows: {
     title: "Workflows",
     eyebrow: "Control plane",
     headline: "Durable work, visible.",
     description: "Temporal runs for OAuth refresh, probes, Connect, and fleet skill sync.",
+    index: "04",
+  },
+  logs: {
+    title: "Logs",
+    eyebrow: "Event history",
+    headline: "What happened, when.",
+    description: "Operator audit trail and tool-call timing without arguments or results.",
     index: "05",
+  },
+  account: {
+    title: "Account",
+    eyebrow: "Operator",
+    headline: "Sign-in for this console.",
+    description: "Password, two-factor, recovery keys, and passkeys for the single operator.",
+    index: "06",
   },
 };
 
@@ -197,6 +206,18 @@ function Shell({
             <button
               type="button"
               className="nav-item"
+              aria-current={view === "workflows" ? "page" : undefined}
+              onClick={() => setView("workflows")}
+            >
+              <span className="nav-item-label">
+                <Icon name="bolt" size={16} />
+                Workflows
+              </span>
+              <Icon name="arrow-up-right" size={13} className="nav-arrow" />
+            </button>
+            <button
+              type="button"
+              className="nav-item"
               aria-current={view === "logs" ? "page" : undefined}
               onClick={() => setView("logs")}
             >
@@ -209,12 +230,12 @@ function Shell({
             <button
               type="button"
               className="nav-item"
-              aria-current={view === "workflows" ? "page" : undefined}
-              onClick={() => setView("workflows")}
+              aria-current={view === "account" ? "page" : undefined}
+              onClick={() => setView("account")}
             >
               <span className="nav-item-label">
-                <Icon name="bolt" size={16} />
-                Workflows
+                <Icon name="shield" size={16} />
+                Account
               </span>
               <Icon name="arrow-up-right" size={13} className="nav-arrow" />
             </button>
@@ -276,6 +297,7 @@ function Shell({
 
 export function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [view, setView] = useState<View>("apps");
   const [runners, setRunners] = useState<number | null>(null);
   const [keyCount, setKeyCount] = useState<number | null>(null);
@@ -283,12 +305,31 @@ export function App() {
   useEffect(() => {
     api.session().then(
       () => setAuthed(true),
-      () => setAuthed(false),
+      async () => {
+        try {
+          setAuthStatus(await api.authStatus());
+        } catch {
+          setAuthStatus({
+            configured: true,
+            has_password: true,
+            has_totp: false,
+            has_passkey: false,
+          });
+        }
+        setAuthed(false);
+      },
     );
   }, []);
 
+  function showSignedOut() {
+    setAuthed(false);
+    void api.authStatus().then(setAuthStatus, () =>
+      setAuthStatus({ configured: true, has_password: true, has_totp: false, has_passkey: false }),
+    );
+  }
+
   useEffect(() => {
-    const onUnauth = () => setAuthed(false);
+    const onUnauth = () => showSignedOut();
     window.addEventListener("portunus-unauthorized", onUnauth);
     return () => window.removeEventListener("portunus-unauthorized", onUnauth);
   }, []);
@@ -330,8 +371,11 @@ export function App() {
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
-  if (authed === null) return <div className="boot">Loading console</div>;
-  if (!authed) return <Login onLogin={() => setAuthed(true)} />;
+  if (authed === null || (authed === false && authStatus === null)) return <div className="boot">Loading console</div>;
+  if (!authed && authStatus && !authStatus.configured) {
+    return <Setup status={authStatus} onSetup={() => setAuthed(true)} />;
+  }
+  if (!authed && authStatus) return <Login status={authStatus} onLogin={() => setAuthed(true)} />;
 
   return (
     <Shell
@@ -339,13 +383,14 @@ export function App() {
       setView={setView}
       runners={runners}
       keyCount={keyCount}
-      onLogout={() => api.logout().finally(() => setAuthed(false))}
+      onLogout={() => api.logout().finally(() => showSignedOut())}
     >
       {view === "apps" ? <AppsPage /> : null}
       {view === "keys" ? <KeysPage /> : null}
       {view === "fleet" ? <FleetPage /> : null}
       {view === "logs" ? <LogsPage /> : null}
       {view === "workflows" ? <TemporalPage /> : null}
+      {view === "account" ? <AccountPage /> : null}
     </Shell>
   );
 }
