@@ -60,14 +60,16 @@ cd packages/portunus_skill_bridge && uv run python -c \
   'from portunus_skill_bridge.manifest import load_manifest; print(load_manifest("manifests/<slug>.example.yaml").name)'
 ```
 
-### 3. Seed `DEFAULT_APPS`
+### 3. Seed `DEFAULT_APPS` **and** `catalog/apps/<slug>.toml`
 
-In `gateway/portunus_gateway/catalog.py`:
+1. In `gateway/portunus_gateway/catalog.py`: `_load_packaged_manifest` (skill_bridge) + append `DEFAULT_APPS`.
+2. Add matching `catalog/apps/<slug>.toml` (filename stem = slug). skill_bridge uses
+   `spec.manifest = "<slug>.example.yaml"` + `secrets = ["ENV_NAME"]` (not inlined YAML).
+   Keep TOML and `DEFAULT_APPS` in parity — `test_packaged_apps_cover_default_apps` enforces it.
+   Optional regenerate: `python scripts/_gen_catalog_tomls.py`.
 
-1. `_load_packaged_manifest("<slug>.example.yaml")`
-2. Append a `DEFAULT_APPS` entry: `slug`, `label`, `name`, `description`, `connection: skill_bridge`, `categories`, `tags`, `sort_order`, `spec.manifest`, `spec.secrets`, `spec.env_defaults` (`SKILL_ROOT` / `STATE_DIR` when json_cli).
-
-`ensure_defaults()` **inserts missing `skill_bridge` seeds** and refreshes when tool names or `auth` change. Other connections only auto-seed when the catalog table is empty — for oauth/http/webdav on a live DB, insert via operator API or a one-shot seed script after editing `DEFAULT_APPS`.
+`ensure_defaults()` **inserts missing `skill_bridge` / `http` / `oauth` / rclone-stdio seeds**
+and refreshes skill_bridge when tools/auth change.
 
 ### 4. Dashboard icon
 

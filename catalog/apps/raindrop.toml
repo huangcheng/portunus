@@ -1,0 +1,11 @@
+slug = "raindrop"
+label = "Raindrop.io"
+description = "Raindrop bookmarks via remote MCP (Bearer API token; Pro beta)."
+connection = "http"
+popular = true
+categories = ["Productivity"]
+tags = ["raindrop", "bookmarks", "http"]
+sort_order = 52
+
+[spec]
+url = "https://api.raindrop.io/rest/v2/ai/mcp"

@@ -126,6 +126,20 @@ def test_install_script_xor_requires_arch_or_by_arch(tmp_path: Path) -> None:
         parse_recipe(path)
 
 
+def test_packaged_apps_cover_default_apps() -> None:
+    """Every DEFAULT_APPS slug has a parsing TOML recipe under catalog/apps/."""
+    from portunus_gateway.catalog import DEFAULT_APPS
+    from portunus_gateway.toml_catalog import load_apps_dir, packaged_apps_dir
+
+    apps_dir = packaged_apps_dir()
+    loaded = load_apps_dir(apps_dir)
+    enabled = {r.slug for r in loaded.recipes if r.enabled}
+    want = {a["slug"] for a in DEFAULT_APPS}
+    assert want <= enabled, f"missing TOML recipes: {sorted(want - enabled)}"
+    disabled = [r for r in loaded.recipes if not r.enabled]
+    assert not disabled, [(r.slug, r.disable_reasons) for r in disabled]
+
+
 def test_load_apps_dir_shared_install_as_clash(tmp_path: Path) -> None:
     hx_a = "a" * 64
     hx_b = "b" * 64

@@ -1,0 +1,13 @@
+slug = "weiyun"
+label = "微云"
+description = "Tencent Weiyun drive via remote MCP (WyHeader token)."
+connection = "http"
+popular = true
+categories = ["Storage"]
+tags = ["weiyun", "tencent", "drive", "http"]
+sort_order = 55
+
+[spec]
+url = "https://www.weiyun.com/api/v3/mcpserver"
+auth_header = "WyHeader"
+token_prefix = "mcp_token="

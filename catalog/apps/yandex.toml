@@ -1,0 +1,18 @@
+slug = "yandex"
+label = "Yandex Disk"
+description = "Yandex Disk files via rclone (paste your `rclone config show yandex` output at Connect; authorize first with `rclone authorize \"yandex\"`)."
+connection = "stdio"
+popular = true
+categories = ["Storage"]
+tags = ["yandex", "disk", "files", "rclone"]
+sort_order = 37
+
+[spec]
+command = "/var/lib/portunus/skills/rclone-shim/shim"
+args = []
+
+[[spec.env]]
+name = "RCLONE_REMOTE_CONFIG"
+label = "rclone remote config — run `rclone config show yandex` (authorize first with `rclone authorize \"yandex\"`)"
+secret = true
+multiline = true

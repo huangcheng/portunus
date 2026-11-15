@@ -9,6 +9,7 @@ WEREAD = ROOT / "manifests" / "weread.example.yaml"
 GUANG = ROOT / "manifests" / "guangyapan.example.yaml"
 QUARK = ROOT / "manifests" / "quark.example.yaml"
 CUBOX = ROOT / "manifests" / "cubox.example.yaml"
+IMA = ROOT / "manifests" / "ima.example.yaml"
 
 
 def test_load_weread_example():
@@ -59,6 +60,23 @@ def test_load_cubox_example():
     folder = next(t for t in m.tools if t.name == "folder_list")
     assert folder.cli == ["folder", "list"]
     assert {t.name for t in m.tools} >= {"folder_list", "card_list", "card_rag", "save"}
+
+
+def test_load_ima_example():
+    m = load_manifest(IMA)
+    assert m.backend == "http_rpc"
+    assert m.http is not None
+    assert m.http.dispatch_mode == "url_path"
+    assert m.auth.type == "header_env"
+    assert m.auth.env == "IMA_OPENAPI_APIKEY"
+    assert m.auth.header == "ima-openapi-apikey"
+    assert m.auth.extra_headers_env["ima-openapi-clientid"] == "IMA_OPENAPI_CLIENTID"
+    assert {t.name for t in m.tools} >= {
+        "search_note",
+        "import_doc",
+        "search_knowledge_base",
+        "import_urls",
+    }
 
 
 def test_oauth_link_browser_capture_defaults_off():

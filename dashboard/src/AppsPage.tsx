@@ -20,6 +20,7 @@ import {
   isStdioApp,
   oauthLinkAuthOptions,
   isWebDavApp,
+  specBool,
   specString,
   specStringList,
   type CatalogApp,
@@ -73,7 +74,9 @@ function appStatus(app: CatalogApp, server: Server | null): {
     return { active, configured: !!server };
   }
   if (isHttpApp(app)) {
-    return { active: !!server?.has_auth, configured: !!server?.has_auth };
+    const needsUrl = specBool(app.spec, "url_from_operator");
+    const active = needsUrl ? !!(server?.url && server.has_auth) : !!server?.has_auth;
+    return { active, configured: active };
   }
   if (isStdioApp(app)) {
     const secrets = Array.isArray(app.spec.env) ? app.spec.env : [];
@@ -1330,7 +1333,7 @@ function SkillBridgeManagePanel({
         </p>
         {app.slug === "cubox" ? (
           <p className="provider-hint">
-            Enable API Extension and copy the token/URL from{" "}
+            Enable API Extension and paste the full save URL (or bare token) from{" "}
             <a href="https://cubox.pro/web/settings/extensions" target="_blank" rel="noreferrer">
               cubox.pro
             </a>{" "}
@@ -1338,12 +1341,30 @@ function SkillBridgeManagePanel({
             <a href="https://cubox.cc/web/settings/extensions" target="_blank" rel="noreferrer">
               cubox.cc
             </a>
-            . Default server env is <code>cubox.pro</code> — set <code>CUBOX_SERVER=cubox.cc</code> on
-            the server if you use the international site. Docs:{" "}
+            . A URL like <code>https://cubox.pro/c/api/save/…</code> is split into{" "}
+            <code>CUBOX_TOKEN</code> + <code>CUBOX_SERVER</code> automatically. Docs:{" "}
             <a href="https://help.cubox.pro/ai/agents/" target="_blank" rel="noreferrer">
               help.cubox.pro/ai/agents
             </a>
             .
+          </p>
+        ) : null}
+        {app.slug === "ima" ? (
+          <p className="provider-hint">
+            Create Client ID + API Key at{" "}
+            <a href="https://ima.qq.com/agent-interface" target="_blank" rel="noreferrer">
+              ima.qq.com/agent-interface
+            </a>
+            . Official skill package:{" "}
+            <a
+              href="https://app-dl.ima.qq.com/skills/ima-skills-1.1.10.zip"
+              target="_blank"
+              rel="noreferrer"
+            >
+              ima-skills-1.1.10.zip
+            </a>
+            . Portunus bridges notes + knowledge-base OpenAPI (URL import included; local file→COS
+            upload stays in the vendor skill scripts).
           </p>
         ) : null}
         {secretDefs.map((def) => (
@@ -1873,10 +1894,13 @@ function HttpManagePanel({
   const [notice, setNotice] = useState("");
   const [current, setCurrent] = useState<Server | null>(server);
   const [token, setToken] = useState("");
+  const urlFromOperator = specBool(app.spec, "url_from_operator");
+  const [mcpUrl, setMcpUrl] = useState(server?.url || "");
 
   useEffect(() => {
     setCurrent(server);
     setToken("");
+    setMcpUrl(server?.url || "");
     setError("");
     setNotice("");
   }, [server, app]);
@@ -1888,14 +1912,22 @@ function HttpManagePanel({
     ? !!current?.env_names.some((n) => n.toLowerCase() === authHeader.toLowerCase()) ||
       !!current?.has_auth
     : !!current?.has_auth;
+  const configured = urlFromOperator ? !!(current?.url && active) : active;
 
-  async function ensureServer(): Promise<Server> {
-    if (current) return current;
+  async function ensureServer(url: string): Promise<Server> {
+    if (current) {
+      if (urlFromOperator && url && url !== current.url) {
+        const updated = await api.updateServer(current.id, { url });
+        setCurrent(updated);
+        return updated;
+      }
+      return current;
+    }
     const created = await api.createServer({
       name: app.name,
       slug: app.slug,
       kind: "remote",
-      url: specString(app.spec, "url"),
+      url,
     });
     setCurrent(created);
     return created;
@@ -1903,25 +1935,36 @@ function HttpManagePanel({
 
   async function saveToken(e: FormEvent) {
     e.preventDefault();
-    if (!token.trim()) return;
+    const url = urlFromOperator ? mcpUrl.trim() : specString(app.spec, "url");
+    if (urlFromOperator && !url) {
+      setError("MCP endpoint URL is required.");
+      return;
+    }
+    if (!token.trim() && !active) return;
+    if (!token.trim() && active && !(urlFromOperator && url && url !== current?.url)) {
+      setNotice("Already connected. Enter a new token only when rotating.");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
-      const target = await ensureServer();
-      const raw = token.trim();
-      let updated: Server;
-      if (customHeader) {
-        const value =
-          tokenPrefix && !raw.toLowerCase().startsWith(tokenPrefix.toLowerCase())
-            ? `${tokenPrefix}${raw}`
-            : raw;
-        updated = await api.updateServer(target.id, { env: { [authHeader]: value } });
-      } else {
-        updated = await api.setBearerToken(target.id, raw);
+      const target = await ensureServer(url);
+      let updated: Server = target;
+      if (token.trim()) {
+        const raw = token.trim();
+        if (customHeader) {
+          const value =
+            tokenPrefix && !raw.toLowerCase().startsWith(tokenPrefix.toLowerCase())
+              ? `${tokenPrefix}${raw}`
+              : raw;
+          updated = await api.updateServer(target.id, { env: { [authHeader]: value } });
+        } else {
+          updated = await api.setBearerToken(target.id, raw);
+        }
       }
       setCurrent(updated);
       setToken("");
-      setNotice("Token saved.");
+      setNotice(token.trim() ? "Saved. Probe tools to go live for agents." : "URL updated.");
       await onChanged();
     } catch (err) {
       setError((err as Error).message);
@@ -1933,6 +1976,9 @@ function HttpManagePanel({
   const tokenLabel = customHeader
     ? `${authHeader} token${active ? " (replace)" : ""}`
     : `Bearer token${active ? " (replace)" : ""}`;
+  const canSubmit = urlFromOperator
+    ? !!mcpUrl.trim() && (!!token.trim() || active)
+    : !!token.trim();
 
   return (
     <DrawerShell
@@ -1942,24 +1988,41 @@ function HttpManagePanel({
       onClose={onClose}
       current={current}
       active={active}
-      configured={active}
+      configured={configured}
     >
       <form className="stack drawer-section" onSubmit={saveToken}>
-        <p className="provider-hint">
-          MCP: <code>{specString(app.spec, "url")}</code>
-          {customHeader ? (
-            <>
-              <br />
-              Auth header: <code>{authHeader}</code>
-              {tokenPrefix ? (
-                <>
-                  {" "}
-                  (<code>{tokenPrefix}…</code>)
-                </>
-              ) : null}
-            </>
-          ) : null}
-        </p>
+        {urlFromOperator ? (
+          <p className="provider-hint">
+            Self-hosted MCP — paste the endpoint URL from your deployment (path looks like{" "}
+            <code>/mcp/&lt;endpoint_id&gt;</code>).
+          </p>
+        ) : (
+          <p className="provider-hint">
+            MCP: <code>{specString(app.spec, "url")}</code>
+            {customHeader ? (
+              <>
+                <br />
+                Auth header: <code>{authHeader}</code>
+                {tokenPrefix ? (
+                  <>
+                    {" "}
+                    (<code>{tokenPrefix}…</code>)
+                  </>
+                ) : null}
+              </>
+            ) : null}
+          </p>
+        )}
+        {app.slug === "weknora" ? (
+          <p className="provider-hint">
+            In WeKnora: 设置 → 发布集成 → MCP Server. Copy the endpoint URL and Bearer token (
+            <code>mcp_…</code>). Docs:{" "}
+            <a href="https://github.com/Tencent/WeKnora" target="_blank" rel="noreferrer">
+              github.com/Tencent/WeKnora
+            </a>
+            .
+          </p>
+        ) : null}
         {app.slug === "weiyun" ? (
           <p className="provider-hint">
             Get a token at{" "}
@@ -1978,6 +2041,37 @@ function HttpManagePanel({
             . MCP is Pro-beta.
           </p>
         ) : null}
+        {app.slug === "youdaonote" ? (
+          <p className="provider-hint">
+            Paste the API Key from the{" "}
+            <a href="https://mopen.163.com" target="_blank" rel="noreferrer">
+              NetEase MCP console
+            </a>{" "}
+            (phone-bound Youdao Note account). Same key as{" "}
+            <code>YOUDAONOTE_API_KEY</code> / <code>youdaonote config set apiKey</code>. Guides:{" "}
+            <a href="https://note.youdao.com/help-center/cli-guide.html" target="_blank" rel="noreferrer">
+              CLI
+            </a>
+            ,{" "}
+            <a href="https://note.youdao.com/help-center/skill-guide.html" target="_blank" rel="noreferrer">
+              Skills
+            </a>
+            .
+          </p>
+        ) : null}
+        {urlFromOperator ? (
+          <label className="field">
+            MCP endpoint URL
+            <input
+              type="url"
+              value={mcpUrl}
+              onChange={(e) => setMcpUrl(e.target.value)}
+              autoComplete="off"
+              placeholder="https://your-host/mcp/<endpoint_id>"
+              required
+            />
+          </label>
+        ) : null}
         <label className="field">
           {tokenLabel}
           <input
@@ -1990,8 +2084,8 @@ function HttpManagePanel({
           />
         </label>
         <div className="apps-actions">
-          <button className="primary sm" type="submit" disabled={busy || !token.trim()}>
-            {current ? "Save token" : "Connect"}
+          <button className="primary sm" type="submit" disabled={busy || !canSubmit}>
+            {current ? "Save" : "Connect"}
           </button>
         </div>
         <ServerLifecycle

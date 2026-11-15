@@ -60,6 +60,8 @@ def _load_packaged_manifest(name: str) -> dict[str, Any]:
 
 # Seeded WeRead http_rpc manifest (operator Connect supplies WEREAD_API_KEY → vault).
 WEREAD_MANIFEST: dict[str, Any] = _load_packaged_manifest("weread.example.yaml")
+# Tencent IMA OpenAPI — Client ID + API Key headers (notes + knowledge base).
+IMA_MANIFEST: dict[str, Any] = _load_packaged_manifest("ima.example.yaml")
 # Cubox json_cli — wraps official cubox-cli (fixed API Extension token).
 CUBOX_MANIFEST: dict[str, Any] = _load_packaged_manifest("cubox.example.yaml")
 # 光鸭云盘 json_cli — skill tree shipped under third_party/; runners mount/copy it.
@@ -260,6 +262,41 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "spec": {"url": "https://api.raindrop.io/rest/v2/ai/mcp"},
     },
     {
+        "slug": "youdaonote",
+        "label": "有道云笔记",
+        "name": "有道云笔记",
+        "description": (
+            "Youdao Note via remote MCP (x-api-key). Same API Key as youdaonote CLI / Skills."
+        ),
+        "connection": "http",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["youdaonote", "notes", "http", "netease"],
+        "sort_order": 53,
+        "spec": {
+            "url": "https://open.mail.163.com/api/ynote/mcp/sse",
+            "auth_header": "x-api-key",
+            "token_prefix": "",
+        },
+    },
+    {
+        "slug": "weknora",
+        "label": "WeKnora",
+        "name": "WeKnora",
+        "description": (
+            "Tencent WeKnora self-hosted knowledge MCP. Paste your /mcp/<endpoint_id> URL "
+            "and Bearer endpoint token (settings → 发布集成 → MCP Server)."
+        ),
+        "connection": "http",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["weknora", "tencent", "knowledge", "rag", "http"],
+        "sort_order": 54,
+        "spec": {
+            "url_from_operator": True,
+        },
+    },
+    {
         "slug": "weread",
         "label": "微信读书",
         "name": "微信读书",
@@ -298,6 +335,35 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "env_defaults": {
                 "CUBOX_SERVER": "cubox.pro",
             },
+        },
+    },
+    {
+        "slug": "ima",
+        "label": "IMA",
+        "name": "IMA",
+        "description": (
+            "Tencent IMA notes and knowledge base via OpenAPI "
+            "(Client ID + API Key from ima.qq.com/agent-interface)."
+        ),
+        "connection": "skill_bridge",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["ima", "notes", "knowledge", "http_rpc"],
+        "sort_order": 74,
+        "spec": {
+            "manifest": IMA_MANIFEST,
+            "secrets": [
+                {
+                    "name": "IMA_OPENAPI_CLIENTID",
+                    "label": "IMA Client ID",
+                    "secret": True,
+                },
+                {
+                    "name": "IMA_OPENAPI_APIKEY",
+                    "label": "IMA API Key",
+                    "secret": True,
+                },
+            ],
         },
     },
     {
@@ -545,7 +611,20 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
             out["token_endpoint_auth_method"] = method
         return out
     if connection == "http":
-        out = {"url": _require_str(spec, "url")}
+        # Self-hosted MCP (e.g. WeKnora): operator pastes endpoint URL at Connect.
+        url_from_operator = bool(spec.get("url_from_operator"))
+        out: dict[str, Any] = {}
+        if url_from_operator:
+            out["url_from_operator"] = True
+            hint = spec.get("url")
+            if hint is not None and hint != "":
+                if not isinstance(hint, str) or not hint.strip():
+                    raise RegistryError(
+                        422, "invalid_request", "spec.url must be a non-empty string when set"
+                    )
+                out["url"] = hint.strip()
+        else:
+            out["url"] = _require_str(spec, "url")
         # Optional custom request header for Connect (e.g. Weiyun WyHeader).
         auth_header = spec.get("auth_header")
         if auth_header is not None and auth_header != "":
@@ -643,6 +722,13 @@ def _validate_skill_bridge_spec(spec: dict[str, Any]) -> dict[str, Any]:
                 "invalid_request",
                 f"spec.secrets must include auth env {manifest.auth.env!r}",
             )
+        for env_name in (manifest.auth.extra_headers_env or {}).values():
+            if env_name not in names:
+                raise RegistryError(
+                    422,
+                    "invalid_request",
+                    f"spec.secrets must include auth extra_headers_env {env_name!r}",
+                )
     env_defaults = spec.get("env_defaults") or {}
     if not isinstance(env_defaults, dict):
         raise RegistryError(422, "invalid_request", "spec.env_defaults must be an object")

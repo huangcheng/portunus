@@ -1,0 +1,13 @@
+slug = "youdaonote"
+label = "有道云笔记"
+description = "Youdao Note via remote MCP (x-api-key). Same API Key as youdaonote CLI / Skills."
+connection = "http"
+popular = true
+categories = ["Productivity"]
+tags = ["youdaonote", "notes", "http", "netease"]
+sort_order = 53
+
+[spec]
+url = "https://open.mail.163.com/api/ynote/mcp/sse"
+auth_header = "x-api-key"
+token_prefix = ""

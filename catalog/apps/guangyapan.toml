@@ -1,0 +1,22 @@
+slug = "guangyapan"
+label = "光鸭云盘"
+description = "Guangyapan Drive via skill-bridge (device_qr login; agents get drive tools only)."
+connection = "skill_bridge"
+popular = true
+categories = ["Storage"]
+tags = ["guangyapan", "drive", "json_cli"]
+sort_order = 75
+
+[spec]
+manifest = "guangyapan.example.yaml"
+secrets = []
+
+[spec.env_defaults]
+SKILL_ROOT = "/var/lib/portunus/skills/guangyapan-drive"
+STATE_DIR = "/var/lib/portunus/skill-state/guangyapan"
+
+[[artifacts]]
+id = "guangyapan-drive"
+kind = "tree"
+install_as = "/var/lib/portunus/skills/guangyapan-drive"
+path = "third_party/guangyapan-drive"

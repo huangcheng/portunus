@@ -1,0 +1,15 @@
+slug = "cubox"
+label = "Cubox"
+description = "Cubox library via skill-bridge (official cubox-cli; paste API Extension token)."
+connection = "skill_bridge"
+popular = true
+categories = ["Reading"]
+tags = ["cubox", "bookmarks", "json_cli"]
+sort_order = 72
+
+[spec]
+manifest = "cubox.example.yaml"
+secrets = ["CUBOX_TOKEN"]
+
+[spec.env_defaults]
+CUBOX_SERVER = "cubox.pro"

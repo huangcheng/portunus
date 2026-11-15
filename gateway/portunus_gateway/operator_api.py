@@ -121,6 +121,8 @@ class UpdateServer(BaseModel):
     oauth: dict[str, Any] | None = None
     oauth_client_secret: str | None = Field(default=None, max_length=4096)
     env: dict[str, str] | None = None
+    # Remote MCP endpoint URL (e.g. self-hosted WeKnora /mcp/<endpoint_id>).
+    url: str | None = Field(default=None, max_length=2048)
 
 
 class EnableBody(BaseModel):
@@ -288,6 +290,7 @@ async def update_server(
         oauth=body.oauth,
         oauth_client_secret=body.oauth_client_secret,
         env=body.env,
+        url=body.url,
     )
 
 

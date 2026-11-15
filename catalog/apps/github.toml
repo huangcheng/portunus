@@ -1,0 +1,25 @@
+slug = "github"
+label = "GitHub"
+description = "GitHub remote MCP (api.githubcopilot.com). OAuth via your GitHub OAuth App or GitHub App — paste Client ID/secret at Connect (no DCR)."
+connection = "oauth"
+popular = true
+categories = ["Developer Tools"]
+tags = ["github", "oauth", "mcp", "repos"]
+sort_order = 15
+
+[spec]
+url = "https://api.githubcopilot.com/mcp/"
+authorize_url = "https://github.com/login/oauth/authorize"
+token_url = "https://github.com/login/oauth/access_token"
+token_endpoint_auth_method = "client_secret_post"
+resource = "https://api.githubcopilot.com/mcp/"
+scopes = [
+  "repo",
+  "read:org",
+  "read:user",
+  "user:email",
+  "gist",
+  "notifications",
+  "read:packages",
+  "read:project",
+]

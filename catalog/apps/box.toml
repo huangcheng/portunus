@@ -1,0 +1,18 @@
+slug = "box"
+label = "Box"
+description = "Box files via rclone (paste your `rclone config show box` output at Connect; authorize first with `rclone authorize \"box\"`)."
+connection = "stdio"
+popular = true
+categories = ["Storage"]
+tags = ["box", "files", "storage", "rclone"]
+sort_order = 26
+
+[spec]
+command = "/var/lib/portunus/skills/rclone-shim/shim"
+args = []
+
+[[spec.env]]
+name = "RCLONE_REMOTE_CONFIG"
+label = "rclone remote config — run `rclone config show box` (authorize first with `rclone authorize \"box\"`)"
+secret = true
+multiline = true

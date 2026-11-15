@@ -1,0 +1,232 @@
+# Tencent IMA OpenAPI — notes + knowledge base (skill v1.1.10 surface).
+# Secrets: IMA_OPENAPI_CLIENTID + IMA_OPENAPI_APIKEY from https://ima.qq.com/agent-interface
+# File→COS upload (create_media / cos-upload / add_knowledge) stays in the official
+# skill scripts; this bridge covers pure HTTP note/KB tools + URL import.
+
+name: ima
+version: "1.1.10"
+backend: http_rpc
+
+auth:
+  type: header_env
+  env: IMA_OPENAPI_APIKEY
+  header: ima-openapi-apikey
+  extra_headers_env:
+    ima-openapi-clientid: IMA_OPENAPI_CLIENTID
+  connect_hint: "Paste Client ID and API Key from https://ima.qq.com/agent-interface (扩展中心 / Agent 接口)."
+
+http:
+  base_url: https://ima.qq.com
+  method: POST
+  dispatch_mode: url_path
+  headers:
+    ima-openapi-ctx: skill_version=1.1.10
+  timeout_s: 60
+
+tools:
+  - name: search_note
+    description: Search IMA notes by title or body
+    dispatch: openapi/note/v1/search_note
+    input:
+      search_type:
+        type: integer
+        description: "0=title (default), 1=body"
+      sort_type:
+        type: integer
+        description: "0=modify time, 1=create time, 2=title, 3=size"
+      query_info:
+        type: object
+        description: "Search fields — {title?: string, content?: string}"
+      start:
+        type: integer
+        required: true
+        description: Page start index
+      end:
+        type: integer
+        required: true
+        description: Page end index (span ≤ 20)
+
+  - name: list_notebook
+    description: List IMA notebooks (folders)
+    dispatch: openapi/note/v1/list_notebook
+    input:
+      cursor:
+        type: string
+        required: true
+        description: "Cursor; first page use \"0\""
+      limit:
+        type: integer
+        required: true
+        description: Page size (1–20)
+      version:
+        type: string
+        description: Incremental version from prior response
+
+  - name: list_note
+    description: List notes in a notebook (empty folder_id = all notes)
+    dispatch: openapi/note/v1/list_note
+    input:
+      folder_id:
+        type: string
+        description: Notebook id; omit/empty for all notes
+      sort_type:
+        type: integer
+        description: "0=modify time (default)"
+      cursor:
+        type: string
+        required: true
+        description: "Cursor; first page use \"\""
+      limit:
+        type: integer
+        required: true
+        description: Page size (1–20)
+
+  - name: get_doc_content
+    description: Read note body (prefer plaintext format 0)
+    dispatch: openapi/note/v1/get_doc_content
+    input:
+      note_id:
+        type: string
+        required: true
+        description: Note id
+      target_content_format:
+        type: integer
+        required: true
+        description: "0=plaintext (recommended), 1=markdown unsupported, 2=json"
+
+  - name: import_doc
+    description: Create a new Markdown note
+    dispatch: openapi/note/v1/import_doc
+    input:
+      content_format:
+        type: integer
+        required: true
+        description: "Must be 1 (Markdown)"
+      content:
+        type: string
+        required: true
+        description: Markdown body
+      folder_id:
+        type: string
+        description: Target notebook id
+      folder_name:
+        type: string
+        description: Target notebook name
+
+  - name: append_doc
+    description: Append Markdown to an existing note (must name the target note)
+    dispatch: openapi/note/v1/append_doc
+    input:
+      note_id:
+        type: string
+        required: true
+        description: Target note id
+      content_format:
+        type: integer
+        required: true
+        description: "Must be 1 (Markdown)"
+      content:
+        type: string
+        required: true
+        description: Markdown to append
+
+  - name: search_knowledge_base
+    description: Search or list knowledge bases
+    dispatch: openapi/wiki/v1/search_knowledge_base
+    input:
+      query:
+        type: string
+        required: true
+        description: Keyword; empty string lists bases
+      cursor:
+        type: string
+        required: true
+        description: "Cursor; first page use \"\""
+      limit:
+        type: integer
+        required: true
+        description: Page size (1–20)
+
+  - name: get_addable_knowledge_base_list
+    description: List knowledge bases the user can write to
+    dispatch: openapi/wiki/v1/get_addable_knowledge_base_list
+    input:
+      cursor:
+        type: string
+        required: true
+        description: "Cursor; first page use \"\""
+      limit:
+        type: integer
+        required: true
+        description: Page size (1–50)
+
+  - name: get_knowledge_base
+    description: Get knowledge base metadata by ids
+    dispatch: openapi/wiki/v1/get_knowledge_base
+    input:
+      ids:
+        type: array
+        required: true
+        description: Knowledge base ids (1–20)
+        items:
+          type: string
+
+  - name: get_knowledge_list
+    description: Browse knowledge base root or a folder
+    dispatch: openapi/wiki/v1/get_knowledge_list
+    input:
+      knowledge_base_id:
+        type: string
+        required: true
+      folder_id:
+        type: string
+        description: Folder id; omit for root
+      cursor:
+        type: string
+        required: true
+        description: "Cursor; first page use \"\""
+      limit:
+        type: integer
+        required: true
+        description: Page size (1–50)
+
+  - name: search_knowledge
+    description: Search content inside one knowledge base
+    dispatch: openapi/wiki/v1/search_knowledge
+    input:
+      query:
+        type: string
+        required: true
+      knowledge_base_id:
+        type: string
+        required: true
+      cursor:
+        type: string
+        required: true
+        description: "Cursor; first page use \"\""
+
+  - name: import_urls
+    description: Import web/WeChat article URLs into a knowledge base folder
+    dispatch: openapi/wiki/v1/import_urls
+    input:
+      knowledge_base_id:
+        type: string
+        required: true
+      folder_id:
+        type: string
+        required: true
+        description: Destination folder id
+      urls:
+        type: array
+        required: true
+        description: URLs (1–10)
+        items:
+          type: string
+
+  - name: get_media_info
+    description: Get media/source access info for a knowledge item
+    dispatch: openapi/wiki/v1/get_media_info
+    input:
+      media_id:
+        type: string
+        required: true

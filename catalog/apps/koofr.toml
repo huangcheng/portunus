@@ -1,0 +1,14 @@
+slug = "koofr"
+label = "Koofr"
+description = "Koofr cloud storage over WebDAV (app password)."
+connection = "webdav"
+popular = false
+categories = ["Storage"]
+tags = ["webdav", "files", "storage"]
+sort_order = 40
+
+[spec]
+root_url = "https://app.koofr.net/dav/Koofr"
+root_path = "/"
+package = "webdav-mcp-server@1.0.4"
+args = ["-y", "--ignore-scripts", "webdav-mcp-server@1.0.4"]

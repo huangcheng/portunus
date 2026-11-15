@@ -138,6 +138,70 @@ async def test_bearer_env_skill_app_not_flagged_auth_required(db, pepper_file):
     assert health[sid]["status"] != "auth_required", health[sid]
 
 
+@pytest.mark.anyio
+async def test_auth_none_skill_app_not_flagged_auth_required(db, pepper_file):
+    """json_cli apps with auth.type=none (Cubox CUBOX_TOKEN) must not show auth_required.
+
+    Regression: only bearer_env/header_env were excluded from requires_skill_session,
+    so Cubox stayed permanently Needs auth despite paste-token Connect.
+    """
+    import os
+    import uuid as _uuid
+
+    from portunus_gateway.db.models import CatalogApp, Server, Tool
+    from portunus_gateway.db.session import async_session
+    from portunus_gateway.registry import Registry
+    from portunus_gateway.runner_pool import RunnerPool
+    from portunus_gateway.vault import Vault
+
+    async with async_session() as s:
+        s.add(
+            CatalogApp(
+                id=_uuid.uuid4(),
+                slug="cuboxish",
+                label="Cuboxish",
+                name="Cuboxish",
+                description="CLI token skill app",
+                connection="skill_bridge",
+                spec={
+                    "manifest": {"auth": {"type": "none"}, "backend": "json_cli", "tools": []},
+                    "secrets": [{"name": "CUBOX_TOKEN", "label": "Token", "secret": True}],
+                    "env_defaults": {"CUBOX_SERVER": "cubox.pro"},
+                },
+                sort_order=1,
+            )
+        )
+        sid = _uuid.uuid4()
+        srv = Server(
+            id=sid,
+            name="Cuboxish",
+            slug="cuboxish",
+            kind="stdio",
+            enabled=True,
+            command="python",
+            args=["-c", "pass"],
+        )
+        s.add(srv)
+        s.add(Tool(server_id=sid, upstream_name="t", schema={}, schema_hash="h"))
+        await s.commit()
+
+    reg = Registry(
+        async_session,
+        Vault({1: os.urandom(32)}),
+        RunnerPool([]),
+        trusted_path=["/usr/bin"],
+        binary_allowlist=[],
+    )
+    async with async_session() as s:
+        server = (
+            await s.execute(
+                __import__("sqlalchemy").select(Server).where(Server.slug == "cuboxish")
+            )
+        ).scalar_one()
+    health = await reg.health_by_server_ids([server])
+    assert health[sid]["status"] != "auth_required", health[sid]
+
+
 def test_rclone_drive_seeds_shape():
     """Box/OneDrive/Yandex/Drime ship as rclone-shim stdio apps with a multiline config paste."""
     from portunus_gateway.catalog import DEFAULT_APPS, RCLONE_SHIM, validate_spec
@@ -231,3 +295,44 @@ def test_raindrop_http_seed_shape():
     spec = validate_spec("http", raw["spec"])
     assert spec["url"] == "https://api.raindrop.io/rest/v2/ai/mcp"
     assert "auth_header" not in spec
+
+
+def test_youdaonote_http_seed_shape():
+    from portunus_gateway.catalog import DEFAULT_APPS, preferred_regions_for_slug, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "youdaonote")
+    assert raw["connection"] == "http"
+    spec = validate_spec("http", raw["spec"])
+    assert spec["url"] == "https://open.mail.163.com/api/ynote/mcp/sse"
+    assert spec["auth_header"] == "x-api-key"
+    assert spec["token_prefix"] == ""
+    assert preferred_regions_for_slug("youdaonote") == []
+
+
+def test_validate_ima_skill_bridge_spec():
+    from portunus_gateway.catalog import IMA_MANIFEST
+
+    out = validate_spec(
+        "skill_bridge",
+        {
+            "manifest": IMA_MANIFEST,
+            "secrets": [
+                {"name": "IMA_OPENAPI_CLIENTID", "label": "IMA Client ID"},
+                {"name": "IMA_OPENAPI_APIKEY", "label": "IMA API Key"},
+            ],
+        },
+    )
+    assert out["manifest"]["http"]["dispatch_mode"] == "url_path"
+    names = {s["name"] for s in out["secrets"]}
+    assert names == {"IMA_OPENAPI_CLIENTID", "IMA_OPENAPI_APIKEY"}
+    assert {t["name"] for t in out["manifest"]["tools"]} >= {"search_note", "import_urls"}
+
+
+def test_weknora_http_seed_url_from_operator():
+    from portunus_gateway.catalog import DEFAULT_APPS, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "weknora")
+    assert raw["connection"] == "http"
+    spec = validate_spec("http", raw["spec"])
+    assert spec["url_from_operator"] is True
+    assert "url" not in spec

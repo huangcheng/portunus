@@ -1,0 +1,26 @@
+slug = "pikpak"
+label = "PikPak"
+description = "PikPak cloud drive via the official remote MCP (OAuth 2.1 + PKCE)."
+connection = "oauth"
+popular = true
+categories = ["Storage"]
+tags = ["pikpak", "drive", "mcp", "oauth"]
+sort_order = 78
+
+[spec]
+url = "https://pikpak.ai/mcp"
+authorize_url = "https://mypikpak.com/drive/auth-center"
+token_url = "https://user.mypikpak.com/v1/auth/token"
+token_endpoint_auth_method = "none"
+resource = "https://pikpak.ai/mcp"
+issuer = "https://user.mypikpak.com"
+registration_endpoint = "https://user.mypikpak.com/v1/clients-registrations/openid-connect"
+scopes = [
+  "files:read",
+  "files:write",
+  "files:manage",
+  "files:purge",
+  "cloud_download",
+  "share",
+  "account",
+]

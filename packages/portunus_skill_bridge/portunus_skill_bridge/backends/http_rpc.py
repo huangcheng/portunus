@@ -18,19 +18,26 @@ class HttpRpcBackend:
         self.http = manifest.http
 
     async def call(self, tool: ToolSpec, arguments: dict[str, Any]) -> Any:
-        body: dict[str, Any] = {
-            **self.http.const,
-            self.http.dispatch_field: tool.dispatch,
-            **arguments,
-        }
+        if self.http.dispatch_mode == "url_path":
+            path = (tool.dispatch or "").lstrip("/")
+            url = f"{self.http.base_url.rstrip('/')}/{path}"
+            body: dict[str, Any] = {**self.http.const, **arguments}
+        else:
+            url = self.http.base_url
+            body = {
+                **self.http.const,
+                self.http.dispatch_field: tool.dispatch,
+                **arguments,
+            }
         headers = {
             "Content-Type": "application/json",
+            **(self.http.headers or {}),
             **resolve_auth_headers(self.manifest),
         }
         async with httpx.AsyncClient(timeout=self.http.timeout_s) as client:
             resp = await client.request(
                 self.http.method,
-                self.http.base_url,
+                url,
                 json=body,
                 headers=headers,
             )

@@ -81,6 +81,8 @@ class AuthSpec(BaseModel):
     token_paste: bool = True
     # Optional Connect copy under QR / authorize link (vendor-specific instructions).
     connect_hint: str | None = None
+    # Additional HTTP headers from vault env (header name → env var), e.g. IMA Client ID.
+    extra_headers_env: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("login_env")
     @classmethod
@@ -90,6 +92,22 @@ class AuthSpec(BaseModel):
             if not isinstance(k, str) or not k.strip() or not isinstance(val, str):
                 raise ValueError("login_env must map non-empty strings to strings")
             out[k.strip()] = val
+        return out
+
+    @field_validator("extra_headers_env")
+    @classmethod
+    def _extra_headers_env(cls, v: dict[str, str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for header, env_name in v.items():
+            if not isinstance(header, str) or not header.strip():
+                raise ValueError("extra_headers_env keys must be non-empty header names")
+            if not isinstance(env_name, str) or not env_name.strip():
+                raise ValueError("extra_headers_env values must be non-empty env names")
+            if "\n" in header or "\r" in header or ":" in header:
+                raise ValueError(f"invalid header name {header!r}")
+            out[header.strip()] = env_name.strip()
+        if len(out) > 16:
+            raise ValueError("extra_headers_env supports at most 16 headers")
         return out
 
     @field_validator("qr_path_field")
@@ -146,8 +164,27 @@ class HttpSpec(BaseModel):
     base_url: str
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "POST"
     const: dict[str, Any] = Field(default_factory=dict)
+    # Fixed request headers (non-secret), e.g. ima-openapi-ctx.
+    headers: dict[str, str] = Field(default_factory=dict)
+    # body_field: WeRead-style — put tool.dispatch into JSON under dispatch_field.
+    # url_path: IMA-style — POST to base_url + "/" + tool.dispatch with arguments as body.
+    dispatch_mode: Literal["body_field", "url_path"] = "body_field"
     dispatch_field: str = "api_name"
     timeout_s: float = 60.0
+
+    @field_validator("headers")
+    @classmethod
+    def _http_headers(cls, v: dict[str, str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for k, val in v.items():
+            if not isinstance(k, str) or not k.strip() or not isinstance(val, str):
+                raise ValueError("http.headers must map strings to strings")
+            if "\n" in k or "\r" in k or ":" in k:
+                raise ValueError(f"invalid header name {k!r}")
+            out[k.strip()] = val
+        if len(out) > 32:
+            raise ValueError("http.headers supports at most 32 entries")
+        return out
 
 
 class CliIdentity(BaseModel):

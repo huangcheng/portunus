@@ -8,7 +8,7 @@ backend: json_cli
 
 auth:
   type: none
-  connect_hint: "Paste the API Extension token (or full save URL) from Cubox 扩展中心. Use cubox.pro or cubox.cc to match your account region."
+  connect_hint: "Paste the full API Extension save URL (https://cubox.pro|cc/c/api/save/…) or bare token from Cubox 扩展中心. Full URLs set CUBOX_SERVER automatically."
 
 cli:
   # Pinned npm release of the official Go CLI wrapper.

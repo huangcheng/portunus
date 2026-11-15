@@ -1,0 +1,12 @@
+slug = "ima"
+label = "IMA"
+description = "Tencent IMA notes and knowledge base via OpenAPI (Client ID + API Key)."
+connection = "skill_bridge"
+popular = true
+categories = ["Productivity"]
+tags = ["ima", "notes", "knowledge", "http_rpc"]
+sort_order = 74
+
+[spec]
+manifest = "ima.example.yaml"
+secrets = ["IMA_OPENAPI_CLIENTID", "IMA_OPENAPI_APIKEY"]

@@ -1,0 +1,11 @@
+slug = "flomo"
+label = "flomo"
+description = "flomo memos via remote MCP."
+connection = "http"
+popular = false
+categories = ["Productivity"]
+tags = ["notes", "memos", "http"]
+sort_order = 50
+
+[spec]
+url = "https://flomoapp.com/mcp"

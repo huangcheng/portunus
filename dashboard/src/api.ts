@@ -98,6 +98,8 @@ export type UpdateServerBody = {
   oauth_client_secret?: string | null;
   /** Vault upsert: stdio env names, or remote request headers (e.g. WyHeader). */
   env?: Record<string, string>;
+  /** Remote MCP endpoint URL (self-hosted apps like WeKnora). */
+  url?: string;
 };
 
 export type ServerStatus = "probing" | "ok" | "auth_required" | "unreachable";

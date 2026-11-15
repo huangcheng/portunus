@@ -170,6 +170,29 @@ def validate_schema_override(schema: Any) -> dict[str, Any]:
     return schema
 
 
+# Cubox API Extension URLs look like https://cubox.pro/c/api/save/<token>.
+# cubox-cli only splits these on interactive ``auth login``; env mode needs a
+# bare CUBOX_TOKEN plus CUBOX_SERVER — Connect pastes often include the full URL.
+_CUBOX_SAVE_URL = re.compile(
+    r"^https?://(?P<host>cubox\.(?:pro|cc))/c/api/save/(?P<token>[A-Za-z0-9_-]+)/?\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_cubox_env(env: dict[str, str]) -> dict[str, str]:
+    """If CUBOX_TOKEN is a full Extension save URL, split into token + server."""
+    raw = env.get("CUBOX_TOKEN")
+    if not isinstance(raw, str):
+        return env
+    m = _CUBOX_SAVE_URL.match(raw.strip())
+    if not m:
+        return env
+    out = dict(env)
+    out["CUBOX_TOKEN"] = m.group("token")
+    out["CUBOX_SERVER"] = m.group("host").lower()
+    return out
+
+
 def validate_env(env: dict[str, str]) -> dict[str, str]:
     if not isinstance(env, dict) or len(env) > MAX_ENV_ENTRIES:
         raise RegistryError(422, "invalid_env", "env must be an object of string literals")
@@ -187,7 +210,7 @@ def validate_env(env: dict[str, str]) -> dict[str, str]:
         total += len(k) + len(v)
     if total > MAX_ENV_BYTES:
         raise RegistryError(422, "invalid_env", "env too large")
-    return dict(env)
+    return normalize_cubox_env(dict(env))
 
 
 def validate_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -378,10 +401,15 @@ class Registry:
     async def _skill_bridge_slugs(self, s: AsyncSession) -> set[str]:
         """skill_bridge apps whose auth is a *login session* (flows that write SKILL_SESSION).
 
-        Env-backed apps (``bearer_env``/``header_env``, WeRead-style http_rpc) authenticate
-        every request from the vault and have no session at all — they must not be
-        flagged ``auth_required`` for lacking one. Absent/unknown auth blocks stay
-        session-requiring (the conservative pre-existing behavior for cli/oauth_link).
+        Env/token apps do not use SKILL_SESSION and must not be flagged
+        ``auth_required`` for lacking one:
+
+        - ``bearer_env`` / ``header_env`` (WeRead-style http_rpc)
+        - ``none`` (CLI reads vault secrets itself, e.g. Cubox ``CUBOX_TOKEN``)
+
+        Login flows (``device_qr`` / ``oauth_link`` / ``external_session``) stay
+        session-requiring. Unknown/absent auth types stay session-requiring
+        (conservative pre-existing behavior).
         """
         rows = (
             await s.execute(
@@ -390,10 +418,12 @@ class Registry:
                 )
             )
         ).all()
+        # Auth models with no SKILL_SESSION — pasted env secrets / request headers.
+        _no_skill_session = frozenset({"bearer_env", "header_env", "none"})
         out: set[str] = set()
         for slug, spec in rows:
             auth = ((spec or {}).get("manifest") or {}).get("auth") or {}
-            if auth.get("type") not in ("bearer_env", "header_env"):
+            if auth.get("type") not in _no_skill_session:
                 out.add(str(slug))
         return out
 
@@ -954,12 +984,14 @@ class Registry:
         oauth: dict[str, Any] | None = None,
         oauth_client_secret: str | None = None,
         env: dict[str, str] | None = None,
+        url: str | None = None,
     ) -> dict[str, Any]:
         if (
             preferred_regions is None
             and oauth is None
             and oauth_client_secret is None
             and env is None
+            and url is None
         ):
             raise RegistryError(422, "invalid_request", "no fields to update")
         regions = validate_regions(preferred_regions) if preferred_regions is not None else None
@@ -970,15 +1002,18 @@ class Registry:
         if oauth_client_secret is not None:
             if not isinstance(oauth_client_secret, str) or "\x00" in oauth_client_secret:
                 raise RegistryError(422, "invalid_oauth", "invalid oauth_client_secret")
+        remote_url = validate_remote_url(url) if url is not None else None
         secrets: dict[str, str] | None = None
         if env is not None:
             # Decided after we know server.kind (stdio env vs remote headers).
             secrets = dict(env)
-        creds_changed = bool(secrets) or bool(oauth_client_secret)
+        creds_changed = bool(secrets) or bool(oauth_client_secret) or remote_url is not None
         async with self._sf() as s:
             server = await self._get_server(s, server_id)
             if (oauth is not None or oauth_client_secret is not None) and server.kind != "remote":
                 raise RegistryError(422, "invalid_request", "stdio servers do not take oauth")
+            if remote_url is not None and server.kind != "remote":
+                raise RegistryError(422, "invalid_request", "stdio servers do not take url")
             if secrets is not None:
                 secrets = (
                     validate_env(secrets) if server.kind == "stdio" else validate_headers(secrets)
@@ -987,6 +1022,9 @@ class Registry:
             if regions is not None:
                 server.preferred_regions = regions
                 audit["preferred_regions"] = regions
+            if remote_url is not None:
+                server.url = remote_url
+                audit["url"] = True
             if oauth is not None:
                 # Empty object clears oauth; non-empty replaces config.
                 server.oauth = oauth_cfg

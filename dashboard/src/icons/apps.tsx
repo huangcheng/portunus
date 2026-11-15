@@ -27,6 +27,9 @@ export type AppIconId =
   | "cubox"
   | "github"
   | "cloudflare"
+  | "youdaonote"
+  | "ima"
+  | "weknora"
   | "pikpak"
   | "generic";
 
@@ -49,6 +52,9 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "cubox") return "cubox";
   if (slug === "github") return "github";
   if (slug === "cloudflare") return "cloudflare";
+  if (slug === "youdaonote" || slug === "youdao") return "youdaonote";
+  if (slug === "ima") return "ima";
+  if (slug === "weknora") return "weknora";
   if (slug === "pikpak") return "pikpak";
   return "generic";
 }
@@ -68,9 +74,12 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   guangyapan: "guangyapan.svg",
   weiyun: "weiyun.png",
   raindrop: "raindrop.svg",
-  cubox: "cubox.svg",
+  cubox: "cubox.png",
   github: "github.svg",
   cloudflare: "cloudflare.svg",
+  youdaonote: "youdaonote.svg",
+  ima: "ima.svg",
+  weknora: "weknora.svg",
   pikpak: "pikpak.png",
 };
 

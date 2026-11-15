@@ -1,0 +1,11 @@
+slug = "dida365"
+label = "滴答清单"
+description = "TickTick / 滴答清单 tasks via remote MCP."
+connection = "http"
+popular = false
+categories = ["Productivity"]
+tags = ["tasks", "todo", "http"]
+sort_order = 60
+
+[spec]
+url = "https://mcp.dida365.com"

@@ -1,0 +1,14 @@
+slug = "nutstore"
+label = "Nutstore"
+description = "坚果云 files over WebDAV (app password)."
+connection = "webdav"
+popular = true
+categories = ["Storage"]
+tags = ["webdav", "files", "storage"]
+sort_order = 30
+
+[spec]
+root_url = "https://dav.jianguoyun.com/dav/"
+root_path = "/"
+package = "webdav-mcp-server@1.0.4"
+args = ["-y", "--ignore-scripts", "webdav-mcp-server@1.0.4"]

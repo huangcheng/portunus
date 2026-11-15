@@ -136,6 +136,10 @@ export function specString(spec: Record<string, unknown>, key: string, fallback 
   return typeof v === "string" ? v : fallback;
 }
 
+export function specBool(spec: Record<string, unknown>, key: string): boolean {
+  return spec[key] === true;
+}
+
 export function specStringList(spec: Record<string, unknown>, key: string): string[] {
   const v = spec[key];
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];

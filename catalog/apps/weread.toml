@@ -1,0 +1,12 @@
+slug = "weread"
+label = "微信读书"
+description = "WeRead search, shelf, and notes via skill-bridge (API key)."
+connection = "skill_bridge"
+popular = true
+categories = ["Reading"]
+tags = ["weread", "books", "http_rpc"]
+sort_order = 70
+
+[spec]
+manifest = "weread.example.yaml"
+secrets = ["WEREAD_API_KEY"]

@@ -23,9 +23,19 @@ def resolve_auth_headers(manifest: Manifest) -> dict[str, str]:
         raise RuntimeError(
             f"missing secret env {auth.env!r}; connect the app in Portunus first"
         )
+    headers: dict[str, str]
     if auth.type == "bearer_env":
         token = value if value.lower().startswith("bearer ") else f"{auth.prefix}{value}".strip()
-        return {auth.header: token}
-    if auth.type == "header_env":
-        return {auth.header: value}
-    raise RuntimeError(f"unsupported auth.type {auth.type!r}")
+        headers = {auth.header: token}
+    elif auth.type == "header_env":
+        headers = {auth.header: value}
+    else:
+        raise RuntimeError(f"unsupported auth.type {auth.type!r}")
+    for header, env_name in (auth.extra_headers_env or {}).items():
+        companion = os.environ.get(env_name, "").strip()
+        if not companion:
+            raise RuntimeError(
+                f"missing secret env {env_name!r}; connect the app in Portunus first"
+            )
+        headers[header] = companion
+    return headers
