@@ -61,6 +61,7 @@ def test_control_chars_fail():
 
 def test_backend_allowlist():
     assert "box" in shim.ALLOWED_BACKENDS and "onedrive" in shim.ALLOWED_BACKENDS
+    assert "yandex" in shim.ALLOWED_BACKENDS and "drime" in shim.ALLOWED_BACKENDS
     assert "local" not in shim.ALLOWED_BACKENDS and "alias" not in shim.ALLOWED_BACKENDS
 
 

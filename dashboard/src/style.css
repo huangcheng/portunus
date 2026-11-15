@@ -585,7 +585,7 @@ th.text-right { text-align: right; }
 .app-card-mark.nutstore.is-official { background: oklch(0.95 0.025 85); }
 .app-card-mark.generic { background: var(--secondary); color: var(--foreground); }
 .app-brand-image { display: block; width: 30px; height: 30px; object-fit: contain; }
-.app-brand-image.ardot, .app-brand-image.flomo, .app-brand-image.dida365, .app-brand-image.weread, .app-brand-image.guangyapan, .app-brand-image.weiyun, .app-brand-image.pikpak { width: 48px; height: 48px; border-radius: inherit; }
+.app-brand-image.ardot, .app-brand-image.flomo, .app-brand-image.dida365, .app-brand-image.weread, .app-brand-image.guangyapan, .app-brand-image.weiyun, .app-brand-image.pikpak, .app-brand-image.yandex, .app-brand-image.drime { width: 48px; height: 48px; border-radius: inherit; }
 .app-brand-image.koofr { width: 32px; height: 32px; border-radius: 8px; }
 .app-brand-image.dropbox { width: 32px; height: 27px; }
 .app-brand-image.box { width: 28px; height: 28px; }
@@ -993,6 +993,31 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
   justify-content: space-between;
   gap: 12px;
 }
+.temporal-filters {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  background: color-mix(in oklch, var(--card) 88%, var(--bg));
+}
+.temporal-filters button {
+  height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  cursor: pointer;
+}
+.temporal-filters button.active {
+  background: var(--card);
+  color: var(--fg);
+  box-shadow: 0 1px 2px color-mix(in oklch, var(--fg) 12%, transparent);
+}
 .temporal-search {
   display: flex;
   flex: 1;
@@ -1002,6 +1027,8 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
 }
 .temporal-search input { flex: 1; height: 40px; min-width: 0; }
 .temporal-toolbar-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.temporal-filter-hint { margin: -6px 2px 0; font-size: 13px; }
+.temporal-load-more { margin-top: 14px; }
 .temporal-counts {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

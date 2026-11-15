@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from . import NAMESPACE, TASK_QUEUE
+from . import NAMESPACE, PROBE_TASK_QUEUE, TASK_QUEUE
 
 
 def temporal_host() -> str:
@@ -17,6 +17,10 @@ def temporal_namespace() -> str:
 
 def temporal_task_queue() -> str:
     return os.environ.get("TEMPORAL_TASK_QUEUE", TASK_QUEUE).strip() or TASK_QUEUE
+
+
+def temporal_probe_task_queue() -> str:
+    return os.environ.get("TEMPORAL_PROBE_TASK_QUEUE", PROBE_TASK_QUEUE).strip() or PROBE_TASK_QUEUE
 
 
 def temporal_enabled() -> bool:

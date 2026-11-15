@@ -1,4 +1,4 @@
-#!/app/gateway/.venv/bin/python3
+#!/usr/bin/env python3
 """Portunus rclone connector shim (runner-local).
 
 Launch form: absolute path, no args; all configuration arrives via env:
@@ -47,7 +47,19 @@ VFS_CACHE_MAX_SIZE = "2G"
 # Only cloud-storage backends: ``local``/``alias``/``union``/``crypt`` would turn
 # the runner filesystem (cwd "/") into a WebDAV share for the agent.
 ALLOWED_BACKENDS = frozenset(
-    {"box", "onedrive", "drive", "dropbox", "webdav", "s3", "b2", "pcloud", "sftp"}
+    {
+        "box",
+        "onedrive",
+        "drive",
+        "dropbox",
+        "webdav",
+        "s3",
+        "b2",
+        "pcloud",
+        "sftp",
+        "yandex",
+        "drime",
+    }
 )
 # Env the npm-installed MCP child may inherit — never RCLONE_REMOTE_CONFIG.
 MCP_ENV_ALLOW = frozenset({"PATH", "HOME", "LANG", "LC_ALL"})

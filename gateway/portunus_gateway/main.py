@@ -337,20 +337,50 @@ def create_gateway_app() -> FastAPI:
         pool.start()
         stop = asyncio.Event()
         retention_task = asyncio.create_task(retention_loop(stop), name="portunus-retention")
+        probe_worker_task: asyncio.Task | None = None
         try:
-            from portunus_worker.client import ensure_fleet_skills_schedule
+            from portunus_worker.client import (
+                ensure_enabled_server_probes,
+                ensure_fleet_skills_schedule,
+                ensure_oauth_refresh_workflow,
+            )
+            from portunus_worker.runtime import bind_gateway_registry
+            from portunus_worker.worker import run_embedded_probe_worker
 
+            # Stdio probes need this process's sole-client RunnerPool; Temporal
+            # schedules them, but the activity must run here — not in portunus-worker.
+            bind_gateway_registry(registry)
+            log.warning("starting embedded Temporal probe worker (sole-client pool)")
+            probe_worker_task = asyncio.create_task(
+                run_embedded_probe_worker(), name="portunus-temporal-probe"
+            )
+
+            def _probe_worker_done(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    log.error("embedded Temporal probe worker crashed: %s", exc, exc_info=exc)
+
+            probe_worker_task.add_done_callback(_probe_worker_done)
             await ensure_fleet_skills_schedule()
+            await ensure_oauth_refresh_workflow()
+            await ensure_enabled_server_probes()
         except Exception:  # noqa: BLE001 — Temporal optional
-            log.debug("temporal fleet schedule skipped", exc_info=True)
+            log.exception("temporal fleet/probe bootstrap skipped")
         try:
             async with inner_lifespan(a):
                 yield
         finally:
             stop.set()
             retention_task.cancel()
+            if probe_worker_task is not None:
+                probe_worker_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await retention_task
+            if probe_worker_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await probe_worker_task
             await pool.close()
 
     app.router.lifespan_context = lifespan

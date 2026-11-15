@@ -60,11 +60,13 @@ from .vault import Vault, VaultError
 log = logging.getLogger("portunus.gateway.registry")
 
 # Failure codes that implicate the runner site's network path (not the server itself):
-# a request timeout on a live child, or the gateway<->runner link failing, say "this
-# site cannot reach the upstream right now" — the signal auto-failover keys on
-# (GFW-class partitions included). ``spawn_failed`` is excluded: it fires before the
-# hosting site is known. ``runner_unavailable`` with no site attached is a no-op.
-NETWORK_FAILURE_CODES = frozenset({"upstream_timeout", "runner_unavailable"})
+# timeouts / link loss, and ``upstream_crash`` when a child dies because the site cannot
+# reach the vendor (GFW-class partitions: rclone/WebDAV exits before answering). The
+# scheduler avoids those (server, site) pairs after ``SiteHealthPolicy.threshold``.
+# ``spawn_failed`` / ``spawn_rejected`` are local exec/policy failures — they still carry
+# a site when known, but do not mark the *path* unhealthy. ``runner_unavailable`` with
+# no site attached is a no-op in ``_record_site_outcome``.
+NETWORK_FAILURE_CODES = frozenset({"upstream_timeout", "runner_unavailable", "upstream_crash"})
 
 
 class SiteHealthPolicy:
@@ -103,11 +105,23 @@ _RUNNER_STATUS = {
 class RegistryError(Exception):
     """An API-level failure: HTTP ``status`` plus a machine-readable ``code``."""
 
-    def __init__(self, status: int, code: str, message: str = "") -> None:
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        message: str = "",
+        *,
+        site_id: str | None = None,
+        site_health_recorded: bool = False,
+    ) -> None:
         super().__init__(f"{code}: {message}" if message else code)
         self.status = status
         self.code = code
         self.message = message
+        # Runner site that hosted the failing probe/invoke when known (site-health feed).
+        self.site_id = site_id
+        # True when ``_probe`` already wrote site_health for this failure (in-probe failover).
+        self.site_health_recorded = site_health_recorded
 
 
 class _Runner(Protocol):
@@ -421,6 +435,8 @@ class Registry:
             last_error_code=server.last_error_code,
             last_error_at=server.last_error_at,
             enabled_tool_count=enabled_tool_count,
+            token_expires_at=server.token_expires_at,
+            has_refresh_token=bool(server.has_oauth_refresh),
         )
 
     async def health_for_server(
@@ -527,6 +543,9 @@ class Registry:
                 server.last_ok_at = now
                 if is_probe:
                     server.last_probe_at = now
+                # A successful observation clears the sticky error so the UI matches reality.
+                server.last_error_code = None
+                server.last_error_at = None
                 await s.commit()
             return
 
@@ -796,12 +815,21 @@ class Registry:
         self._schedule_probe(server_id, actor)
 
     def _schedule_probe(self, server_id: uuid.UUID, actor: str) -> None:
+        """Schedule a probe via Temporal when enabled; fall back to an in-process task."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
 
         async def _run() -> None:
+            try:
+                from portunus_worker.client import request_server_probe, temporal_enabled
+
+                if temporal_enabled():
+                    await request_server_probe(server_id, immediate=True)
+                    return
+            except Exception:  # noqa: BLE001 — Temporal optional; fall back locally
+                log.debug("temporal probe schedule failed for %s", server_id, exc_info=True)
             try:
                 await self.probe(server_id, actor)
             except RegistryError as e:
@@ -1016,6 +1044,14 @@ class Registry:
         view = await self._enriched_view(server, names)
         if not enabled and self.slots is not None:
             self.slots.disable_server(server_id)  # children -> pending_stop, killed when reachable
+        if enabled:
+            try:
+                from portunus_worker.client import start_server_probe, temporal_enabled
+
+                if temporal_enabled():
+                    await start_server_probe(server_id)
+            except Exception:  # noqa: BLE001 — Temporal optional
+                log.debug("temporal server-probe ensure on enable skipped", exc_info=True)
         return view
 
     async def set_tool_enabled(self, tool_id: uuid.UUID, enabled: bool, actor: str) -> dict[str, Any]:
@@ -1145,7 +1181,14 @@ class Registry:
         try:
             return await self._probe(server_id, actor)
         except RegistryError as e:
-            await self.record_outcome(server_id, e.code, is_probe=True, message=e.message)
+            await self.record_outcome(
+                server_id,
+                e.code,
+                is_probe=True,
+                message=e.message,
+                # Skip re-attributing site health when in-probe failover already wrote it.
+                site_id=None if e.site_health_recorded else e.site_id,
+            )
             raise
         finally:
             self._probing.discard(server_id)
@@ -1446,34 +1489,99 @@ class Registry:
         if kind == "stdio":
             assert command is not None
             timeout_s = self.probe_timeout_s
-            try:
-                # Probes are ephemeral inventory refreshes — do not hard-pin to
-                # preferred_site_id (that site being down must not block discovery).
+            # Probes are ephemeral — no preferred_site_id hard pin. Use learned
+            # site health + in-probe failover so a CN partition (aliyun) does not
+            # block discovery when an overseas runner can reach the vendor.
+            excluded = await self.unhealthy_sites(server_id)
+            live = {i.site_id for i in self.pool.connected()}
+            all_marked = bool(live) and live <= excluded
+            tried: set[str] = set()
+            last_err: RunnerRequestError | None = None
+            last_site: str | None = None
+            reply: dict[str, Any] | None = None
+            decision = None
+            while True:
                 latency = await self.site_latencies(server_id)
                 decision = self.pool.pick(
                     preferred_regions,
                     latency_ms=latency,
+                    exclude_sites=frozenset() if all_marked else frozenset(excluded | tried),
                 )
                 if decision is None:
-                    raise RunnerRequestError("runner_unavailable", "runner not connected", sent=False)
-                reply = await self.pool.request(
-                    decision.site_id,
-                    "probe",
-                    timeout=timeout_s + PROBE_TRANSPORT_SLACK_S,
-                    probe_id=uuid.uuid4().hex,
-                    server_id=str(server_id),
-                    argv=[command, *args],
-                    trailing_allowlist=[],
-                    env=env,
-                    timeout_s=timeout_s,
-                )
-            except RunnerRequestError as e:
-                raise RegistryError(_RUNNER_STATUS.get(e.code, 502), e.code, e.message) from e
+                    break
+                if decision.site_id in tried:
+                    # Scheduler fell back to the full pool after every live site was
+                    # tried/excluded — stop rather than looping the same failure.
+                    break
+                tried.add(decision.site_id)
+                last_site = decision.site_id
+                try:
+                    reply = await self.pool.request(
+                        decision.site_id,
+                        "probe",
+                        timeout=timeout_s + PROBE_TRANSPORT_SLACK_S,
+                        probe_id=uuid.uuid4().hex,
+                        server_id=str(server_id),
+                        argv=[command, *args],
+                        trailing_allowlist=[],
+                        env=env,
+                        timeout_s=timeout_s,
+                    )
+                    break
+                except RunnerRequestError as e:
+                    last_err = RunnerRequestError(
+                        e.code,
+                        f"{e.message} (site={decision.site_id})",
+                        sent=e.sent,
+                        reason=getattr(e, "reason", None),
+                        reply=getattr(e, "reply", None),
+                    )
+                    # Feed site health immediately so the next pick in this loop
+                    # (and future probes/invokes) can exclude a partitioned site.
+                    if e.code in NETWORK_FAILURE_CODES:
+                        await self.record_outcome(
+                            server_id,
+                            e.code,
+                            is_probe=True,
+                            message=last_err.message,
+                            site_id=decision.site_id,
+                        )
+                        excluded = await self.unhealthy_sites(server_id)
+                        all_marked = bool(live) and live <= excluded
+                        continue
+                    # Local exec/policy failures: do not burn other sites.
+                    raise RegistryError(
+                        _RUNNER_STATUS.get(e.code, 502),
+                        e.code,
+                        last_err.message,
+                        site_id=decision.site_id,
+                    ) from e
+            if reply is None:
+                if last_err is None:
+                    raise RegistryError(
+                        503, "runner_unavailable", "runner not connected", site_id=last_site
+                    )
+                raise RegistryError(
+                    _RUNNER_STATUS.get(last_err.code, 502),
+                    last_err.code,
+                    last_err.message,
+                    site_id=last_site,
+                    # Network failures already hit record_outcome in the retry loop.
+                    site_health_recorded=last_err.code in NETWORK_FAILURE_CODES,
+                ) from last_err
+            assert decision is not None
             incoming = _normalize_tools(reply.get("tools"))
             audit_extra = {
                 "site_id": decision.site_id,
                 "preferred_miss": decision.preferred_miss,
+                "tried_sites": sorted(tried),
             }
+            view = await self._commit_probe(server_id, actor, incoming, audit_extra)
+            # Success clears the sticky error and refreshes site EWMA / failure streak.
+            await self.record_outcome(
+                server_id, None, is_probe=True, site_id=decision.site_id
+            )
+            return view
         else:
             if self.remote is None:
                 raise RegistryError(503, "unsupported", "remote proxy is not configured")
@@ -1498,6 +1606,8 @@ class Registry:
             await self._upsert_vault(s, server, AUTH_HEADER_NAME, value)
             # Paste is not an OAuth refresh cycle — drop any stale refresh token.
             await self._delete_vault(s, server_id, OAUTH_REFRESH_TOKEN_NAME)
+            server.has_oauth_refresh = False
+            server.token_expires_at = None
             s.add(self._audit(actor, "server.auth_token", server_id, None))
             await s.commit()
             names = await self._env_names(s, server_id)
@@ -1536,9 +1646,24 @@ class Registry:
             await self._upsert_vault(s, server, AUTH_HEADER_NAME, authorization.strip())
             if bundle.refresh_token:
                 await self._upsert_vault(s, server, OAUTH_REFRESH_TOKEN_NAME, bundle.refresh_token)
+                server.has_oauth_refresh = True
+            else:
+                # Refresh grants often omit refresh_token; keep the flag if still vaulted.
+                names_now = await self._env_names(s, server_id)
+                server.has_oauth_refresh = OAUTH_REFRESH_TOKEN_NAME in names_now
+            if bundle.expires_in is not None and bundle.expires_in > 0:
+                server.token_expires_at = datetime.now(timezone.utc) + timedelta(
+                    seconds=int(bundle.expires_in)
+                )
             detail = None
             if bundle.expires_in is not None:
-                detail = {"expires_in": bundle.expires_in, "has_refresh": bool(bundle.refresh_token)}
+                detail = {
+                    "expires_in": bundle.expires_in,
+                    "has_refresh": bool(server.has_oauth_refresh),
+                    "token_expires_at": (
+                        server.token_expires_at.isoformat() if server.token_expires_at else None
+                    ),
+                }
             s.add(self._audit(actor, action, server_id, detail))
             await s.commit()
             names = await self._env_names(s, server_id)
@@ -1726,6 +1851,8 @@ class Registry:
             missing = sorted(n for n in existing if n not in seen)
             server.last_probe_at = now
             server.last_ok_at = now
+            server.last_error_code = None
+            server.last_error_at = None
             s.add(
                 self._audit(
                     actor,

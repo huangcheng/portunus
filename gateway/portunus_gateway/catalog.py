@@ -269,6 +269,65 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         },
     },
     {
+        "slug": "yandex",
+        "label": "Yandex Disk",
+        "name": "Yandex Disk",
+        "description": (
+            "Yandex Disk files via rclone (paste your `rclone config show yandex` "
+            "output at Connect; authorize first with `rclone authorize \"yandex\"`)."
+        ),
+        "connection": "stdio",
+        "popular": True,
+        "categories": ["Storage"],
+        "tags": ["yandex", "disk", "files", "rclone"],
+        "sort_order": 37,
+        "spec": {
+            "command": RCLONE_SHIM,
+            "args": [],
+            "env": [
+                {
+                    "name": "RCLONE_REMOTE_CONFIG",
+                    "label": (
+                        "rclone remote config — run `rclone config show yandex` "
+                        "(authorize first with `rclone authorize \"yandex\"`)"
+                    ),
+                    "secret": True,
+                    "multiline": True,
+                },
+            ],
+        },
+    },
+    {
+        "slug": "drime",
+        "label": "Drime",
+        "name": "Drime",
+        "description": (
+            "Drime Cloud files via rclone (create an API token in Drime Settings → "
+            "Developers, configure a `drime` remote, then paste `rclone config show drime` "
+            "at Connect). Requires rclone ≥ 1.73."
+        ),
+        "connection": "stdio",
+        "popular": True,
+        "categories": ["Storage"],
+        "tags": ["drime", "files", "storage", "rclone"],
+        "sort_order": 38,
+        "spec": {
+            "command": RCLONE_SHIM,
+            "args": [],
+            "env": [
+                {
+                    "name": "RCLONE_REMOTE_CONFIG",
+                    "label": (
+                        "rclone remote config — run `rclone config show drime` "
+                        "(type=drime + access_token from Drime Settings → Developers)"
+                    ),
+                    "secret": True,
+                    "multiline": True,
+                },
+            ],
+        },
+    },
+    {
         "slug": "pikpak",
         "label": "PikPak",
         "name": "PikPak",
@@ -616,11 +675,19 @@ class CatalogStore:
 
         # Idempotent: add new skill_bridge seeds (e.g. weread) on existing deploys,
         # and refresh skill_bridge manifests when the packaged seed grows (tool list).
+        # Also insert missing rclone-shim stdio seeds (yandex/drime/…) — same gap as
+        # skill_bridge: empty-DB seed only runs once.
         added = 0
         refreshed = 0
         async with self._sf() as s:
             for raw in DEFAULT_APPS:
-                if raw.get("connection") != "skill_bridge":
+                connection = raw.get("connection")
+                is_rclone_stdio = (
+                    connection == "stdio"
+                    and isinstance(raw.get("spec"), dict)
+                    and raw["spec"].get("command") == RCLONE_SHIM
+                )
+                if connection != "skill_bridge" and not is_rclone_stdio:
                     continue
                 spec = validate_spec(raw["connection"], raw["spec"])
                 row = (
@@ -643,6 +710,8 @@ class CatalogStore:
                         )
                     )
                     added += 1
+                    continue
+                if connection != "skill_bridge":
                     continue
                 seed_manifest = spec.get("manifest") or {}
                 live_manifest = (row.spec or {}).get("manifest") or {}

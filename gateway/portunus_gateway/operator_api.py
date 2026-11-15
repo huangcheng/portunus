@@ -314,7 +314,20 @@ async def probe_server(
     actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
-    return await registry.probe(server_id, actor)
+    """Run a probe and ensure the durable ServerProbeWorkflow is running when Temporal is up.
+
+    The HTTP response stays a synchronous registry probe (dashboard needs tools/status).
+    Background / post-credential probes go through Temporal only (see Registry._schedule_probe).
+    """
+    view = await registry.probe(server_id, actor)
+    try:
+        from portunus_worker.client import start_server_probe, temporal_enabled
+
+        if temporal_enabled():
+            await start_server_probe(server_id)
+    except Exception:  # noqa: BLE001 — Temporal optional
+        logger.debug("temporal server-probe ensure skipped", exc_info=True)
+    return view
 
 
 class SkillAuthBody(BaseModel):
@@ -1237,12 +1250,17 @@ async def temporal_list_workflows(
     actor: str = Depends(require_operator),
     query: str = "",
     page_size: int = 50,
+    page_token: str = "",
 ) -> dict[str, Any]:
-    """List control-plane workflows (Visibility query; defaults to Portunus task queue)."""
+    """List control-plane workflows (Visibility query; defaults to running on Portunus queue)."""
     try:
         from portunus_worker.client import list_workflows
 
-        return await list_workflows(query=query, page_size=page_size)
+        return await list_workflows(
+            query=query,
+            page_size=page_size,
+            page_token=page_token or None,
+        )
     except Exception as e:  # noqa: BLE001
         raise RegistryError(503, "unsupported", f"temporal unavailable: {e}") from e
 

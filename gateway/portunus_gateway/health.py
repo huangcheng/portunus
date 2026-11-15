@@ -49,6 +49,9 @@ class HealthFacts:
     last_error_code: str | None
     last_error_at: datetime | None
     enabled_tool_count: int
+    # OAuth grant lifetime (F9): null expires_at = unknown / not applicable.
+    token_expires_at: datetime | None = None
+    has_refresh_token: bool = False
 
 
 def _iso(ts: datetime | None) -> str | None:
@@ -96,21 +99,25 @@ def derive_status(facts: HealthFacts) -> str:
 
 
 def health_fields(facts: HealthFacts) -> dict[str, Any]:
-    """Six fields shared by discovery and ``server_view``."""
+    """Discovery / ``server_view`` health projection (includes OAuth grant lifetime)."""
     tool_count: int | None
     # tool_count stays null until the first successful observation (probe or live ok).
     if facts.last_probe_at is None and facts.last_ok_at is None:
         tool_count = None
     else:
         tool_count = facts.enabled_tool_count
-    return {
+    out: dict[str, Any] = {
         "status": derive_status(facts),
         "tool_count": tool_count,
         "last_probe_at": _iso(facts.last_probe_at),
         "last_ok_at": _iso(facts.last_ok_at),
         "last_error_code": facts.last_error_code,
         "last_error_at": _iso(facts.last_error_at),
+        # F9: clients can distinguish "will expire soon" from "already broken".
+        "token_expires_at": _iso(facts.token_expires_at),
+        "has_refresh_token": bool(facts.has_refresh_token),
     }
+    return out
 
 
 def should_record_failure(code: str, *, message: str = "", caller_shortened_timeout: bool = False) -> bool:

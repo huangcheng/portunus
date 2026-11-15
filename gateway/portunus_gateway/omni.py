@@ -197,8 +197,11 @@ _DESCRIPTIONS = {
     "portunus_discover_servers": (
         "List the MCP servers this key may use (paged). Each item includes a derived "
         "status (probing|ok|auth_required|unreachable), tool_count (null until the first "
-        "successful probe or live invoke), and last_probe_at / last_ok_at / last_error_* "
-        "timestamps. An unreachable status reflects the last observation; a retry is allowed."
+        "successful probe or live invoke), last_probe_at / last_ok_at / last_error_* "
+        "timestamps, token_expires_at (UTC ISO when the access grant's lifetime is known; "
+        "null if unknown or non-OAuth), and has_refresh_token (true when a refresh_token is "
+        "vaulted so renew is possible without re-auth). An unreachable status reflects the "
+        "last observation; a retry is allowed."
     ),
     "portunus_discover_tools": "List the enabled tools of a granted server (paged).",
     "portunus_get_tool_schema": "Get the input schema and description of one tool.",

@@ -387,10 +387,11 @@ export const api = {
       temporal?: TemporalStatus;
     }>("GET", "/status"),
   temporalStatus: () => call<TemporalStatus>("GET", "/temporal/status"),
-  temporalWorkflows: (q?: { query?: string; page_size?: number }) => {
+  temporalWorkflows: (q?: { query?: string; page_size?: number; page_token?: string }) => {
     const p = new URLSearchParams();
     if (q?.query) p.set("query", q.query);
     if (q?.page_size != null) p.set("page_size", String(q.page_size));
+    if (q?.page_token) p.set("page_token", q.page_token);
     const qs = p.toString();
     return call<TemporalWorkflowList>("GET", `/temporal/workflows${qs ? `?${qs}` : ""}`);
   },

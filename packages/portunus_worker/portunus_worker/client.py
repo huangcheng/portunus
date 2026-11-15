@@ -68,7 +68,15 @@ async def _client():
     return await Client.connect(temporal_host(), namespace=temporal_namespace())
 
 
-def oauth_refresh_id(server_id: uuid.UUID) -> str:
+def oauth_refresh_id() -> str:
+    """Fixed workflow id for the shared OAuth refresher."""
+    from .workflows.oauth_refresh import shared_workflow_id
+
+    return shared_workflow_id()
+
+
+def legacy_oauth_refresh_id(server_id: uuid.UUID) -> str:
+    """Pre-shared per-server workflow id (terminate on boot)."""
     return f"oauth-refresh:{server_id}"
 
 
@@ -80,37 +88,80 @@ def connect_ensure_id(server_id: uuid.UUID) -> str:
     return f"connect-ensure:{server_id}"
 
 
+async def ensure_oauth_refresh_workflow() -> None:
+    """Start the shared OAuth refresher and retire per-server legacy workflows."""
+    client = await _client()
+    if client is None:
+        return
+    from .workflows.oauth_refresh import OAuthRefreshWorkflow
+
+    wid = oauth_refresh_id()
+    try:
+        await client.start_workflow(
+            OAuthRefreshWorkflow.run,
+            id=wid,
+            task_queue=temporal_task_queue(),
+        )
+        log.info("started shared OAuthRefreshWorkflow id=%s", wid)
+    except Exception:  # noqa: BLE001 — already running is fine
+        log.debug("shared oauth refresh already running", exc_info=True)
+
+    # Retire old per-server oauth-refresh:{uuid} executions so they stop racing.
+    try:
+        async for wf in client.list_workflows(
+            query='WorkflowType = "OAuthRefreshWorkflow" AND ExecutionStatus = "Running"'
+        ):
+            if wf.id == wid:
+                continue
+            if not wf.id.startswith("oauth-refresh:"):
+                continue
+            try:
+                await client.get_workflow_handle(wf.id).terminate(
+                    reason="replaced by shared oauth-refresh workflow"
+                )
+                log.info("terminated legacy OAuthRefreshWorkflow id=%s", wf.id)
+            except Exception:  # noqa: BLE001
+                log.debug("legacy oauth terminate skipped id=%s", wf.id, exc_info=True)
+    except Exception:  # noqa: BLE001
+        log.debug("legacy oauth refresh sweep skipped", exc_info=True)
+
+
 async def signal_oauth_tokens_stored(
     server_id: uuid.UUID,
     *,
     expires_in: int | None,
     has_refresh: bool,
 ) -> None:
-    """Start or signal the OAuth refresh workflow after a successful code exchange."""
+    """Kick the shared OAuth refresher after a successful code exchange.
+
+    ``server_id`` / ``expires_in`` / ``has_refresh`` are kept for call-site
+    compatibility; the shared workflow re-reads due servers from the DB.
+    """
+    del expires_in  # plan activity reads token_expires_at from DB
+    if not has_refresh:
+        return
     client = await _client()
     if client is None:
         return
-    from .workflows.oauth_refresh import OAuthRefreshWorkflow, TokensStored
+    from .workflows.oauth_refresh import OAuthRefreshWorkflow
 
-    wid = oauth_refresh_id(server_id)
+    wid = oauth_refresh_id()
     handle = client.get_workflow_handle(wid)
     try:
-        await handle.signal(
-            OAuthRefreshWorkflow.tokens_stored,
-            TokensStored(expires_in=expires_in, has_refresh=has_refresh),
-        )
+        await handle.signal(OAuthRefreshWorkflow.kick)
+        log.debug("oauth refresh kick server=%s", server_id)
         return
     except Exception:  # noqa: BLE001 — workflow may not exist yet
-        log.debug("oauth refresh signal miss; starting workflow", exc_info=True)
-    await client.start_workflow(
-        OAuthRefreshWorkflow.run,
-        args=[str(server_id), expires_in, has_refresh],
-        id=wid,
-        task_queue=temporal_task_queue(),
-    )
+        log.debug("oauth refresh kick miss; ensuring workflow", exc_info=True)
+    await ensure_oauth_refresh_workflow()
+    try:
+        await client.get_workflow_handle(wid).signal(OAuthRefreshWorkflow.kick)
+    except Exception:  # noqa: BLE001
+        log.debug("oauth refresh kick after ensure failed", exc_info=True)
 
 
 async def start_server_probe(server_id: uuid.UUID) -> None:
+    """Ensure the long-running ServerProbeWorkflow exists (idempotent)."""
     client = await _client()
     if client is None:
         return
@@ -126,6 +177,58 @@ async def start_server_probe(server_id: uuid.UUID) -> None:
         )
     except Exception:  # noqa: BLE001 — already running is fine
         log.debug("server probe start skipped", exc_info=True)
+
+
+async def request_server_probe(server_id: uuid.UUID, *, immediate: bool = True) -> None:
+    """Start ServerProbeWorkflow if needed; optionally signal probe_now to skip the wait."""
+    client = await _client()
+    if client is None:
+        return
+    from .workflows.server_probe import ServerProbeWorkflow
+
+    wid = server_probe_id(server_id)
+    handle = client.get_workflow_handle(wid)
+    started = False
+    try:
+        await handle.describe()
+    except Exception:  # noqa: BLE001 — not running yet
+        try:
+            await client.start_workflow(
+                ServerProbeWorkflow.run,
+                args=[str(server_id)],
+                id=wid,
+                task_queue=temporal_task_queue(),
+            )
+            started = True
+        except Exception:  # noqa: BLE001 — race with another starter
+            log.debug("server probe start race", exc_info=True)
+    if immediate and not started:
+        # Fresh start already probes on entry; only signal when waking a sleeper.
+        try:
+            await handle.signal(ServerProbeWorkflow.probe_now)
+        except Exception:  # noqa: BLE001
+            log.debug("server probe_now signal skipped", exc_info=True)
+    elif immediate and started:
+        pass
+
+
+async def ensure_enabled_server_probes() -> int:
+    """Start ServerProbeWorkflow for every enabled server (gateway boot / reconnect)."""
+    client = await _client()
+    if client is None:
+        return 0
+    from sqlalchemy import select
+
+    from portunus_gateway.db.models import Server
+    from portunus_gateway.db.session import async_session
+
+    async with async_session() as s:
+        rows = (await s.execute(select(Server.id).where(Server.enabled.is_(True)))).all()
+    ids = [row[0] for row in rows]
+    for sid in ids:
+        await start_server_probe(sid)
+    log.info("ensured ServerProbeWorkflow for %d enabled server(s)", len(ids))
+    return len(ids)
 
 
 async def start_connect_ensure(server_id: uuid.UUID, *, wait_oauth: bool = False) -> str | None:
@@ -237,35 +340,59 @@ def _workflow_summary(exec: Any) -> dict[str, Any]:
     }
 
 
+def _encode_page_token(raw: Any) -> str | None:
+    if isinstance(raw, (bytes, bytearray)) and raw:
+        import base64
+
+        return base64.urlsafe_b64encode(bytes(raw)).decode("ascii")
+    if isinstance(raw, str) and raw:
+        return raw
+    return None
+
+
+def _decode_page_token(token: str | None) -> bytes | None:
+    if not token:
+        return None
+    import base64
+
+    try:
+        return base64.urlsafe_b64decode(token.encode("ascii"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def list_workflows(
     *,
     query: str = "",
     page_size: int = 50,
+    page_token: str | None = None,
 ) -> dict[str, Any]:
-    """List recent workflows on the Portunus task queue (and optional Visibility query)."""
+    """List workflows (Visibility query). Default: running on the control queue."""
     client = await _client()
     if client is None:
         return {"enabled": False, "items": [], "next_page_token": None}
     q = (query or "").strip()
-    # Default: workflows on our control queue so the console stays focused.
+    # Default: open runs on our control queue (closed FAILED/TERMINATED noise is opt-in).
     if not q:
-        q = f'TaskQueue = "{temporal_task_queue()}"'
+        q = (
+            f'TaskQueue = "{temporal_task_queue()}" '
+            f'AND ExecutionStatus = "Running"'
+        )
     items: list[dict[str, Any]] = []
     next_token: str | None = None
+    size = min(max(page_size, 1), 100)
     try:
-        pager = client.list_workflows(query=q, page_size=min(max(page_size, 1), 100))
+        pager = client.list_workflows(
+            query=q,
+            page_size=size,
+            next_page_token=_decode_page_token(page_token),
+        )
         async for exec in pager:
             items.append(_workflow_summary(exec))
-            if len(items) >= page_size:
+            if len(items) >= size:
                 break
-        # temporalio AsyncWorkflowPager may expose next_page_token after iteration
         raw = getattr(pager, "next_page_token", None) or getattr(pager, "_next_page_token", None)
-        if isinstance(raw, (bytes, bytearray)) and raw:
-            import base64
-
-            next_token = base64.urlsafe_b64encode(bytes(raw)).decode("ascii")
-        elif isinstance(raw, str) and raw:
-            next_token = raw
+        next_token = _encode_page_token(raw)
     except Exception as e:  # noqa: BLE001
         return {
             "enabled": True,

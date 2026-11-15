@@ -8,10 +8,14 @@ import {
 import { fmtTimestamp } from "./format";
 import { Icon } from "./icons/ui";
 
+type StatusFilter = "running" | "failed" | "all";
+
+const PAGE_SIZE = 50;
+
 function statusKind(status: string | null | undefined): "ok" | "warn" | "bad" | "" {
   if (!status) return "";
   const u = status.toUpperCase();
-  if (u.includes("COMPLETED") || u.includes("RUNNING")) return u.includes("RUNNING") ? "ok" : "ok";
+  if (u.includes("COMPLETED") || u.includes("RUNNING")) return "ok";
   if (u.includes("FAILED") || u.includes("TERMINATED") || u.includes("TIMED")) return "bad";
   if (u.includes("CANCELED") || u.includes("CONTINUED")) return "warn";
   return "";
@@ -22,9 +26,25 @@ function statusLabel(status: string | null | undefined): string {
   return status.replace(/^WORKFLOW_EXECUTION_STATUS_/, "").replace(/_/g, " ");
 }
 
+function buildQuery(filter: StatusFilter, custom: string): string {
+  const trimmed = custom.trim();
+  if (trimmed) return trimmed;
+  const queue = 'TaskQueue = "portunus-control"';
+  if (filter === "running") return `${queue} AND ExecutionStatus = "Running"`;
+  if (filter === "failed") {
+    return (
+      `${queue} AND (ExecutionStatus = "Failed" OR ExecutionStatus = "TimedOut" ` +
+      `OR ExecutionStatus = "Terminated")`
+    );
+  }
+  return queue;
+}
+
 export function TemporalPage() {
   const [status, setStatus] = useState<TemporalStatus | null>(null);
   const [items, setItems] = useState<TemporalWorkflowSummary[]>([]);
+  const [nextToken, setNextToken] = useState<string | null>(null);
+  const [filter, setFilter] = useState<StatusFilter>("running");
   const [query, setQuery] = useState("");
   const [appliedQuery, setAppliedQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -32,22 +52,34 @@ export function TemporalPage() {
   const [selected, setSelected] = useState<TemporalWorkflowDetail | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
+  const [loadMoreBusy, setLoadMoreBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      const [st, list] = await Promise.all([
-        api.temporalStatus(),
-        api.temporalWorkflows({ query: appliedQuery || undefined, page_size: 50 }),
-      ]);
-      setStatus(st);
-      setItems(list.items ?? []);
-      setListError(list.error ?? null);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load Temporal");
-    }
-  }, [appliedQuery]);
+  const visibilityQuery = buildQuery(filter, appliedQuery);
+
+  const load = useCallback(
+    async (opts?: { append?: boolean; pageToken?: string | null }) => {
+      const append = Boolean(opts?.append);
+      try {
+        const [st, list] = await Promise.all([
+          api.temporalStatus(),
+          api.temporalWorkflows({
+            query: visibilityQuery,
+            page_size: PAGE_SIZE,
+            page_token: opts?.pageToken || undefined,
+          }),
+        ]);
+        setStatus(st);
+        setItems((prev) => (append ? [...prev, ...(list.items ?? [])] : (list.items ?? [])));
+        setNextToken(list.next_page_token ?? null);
+        setListError(list.error ?? null);
+        setError(null);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load Temporal");
+      }
+    },
+    [visibilityQuery],
+  );
 
   useEffect(() => {
     void load();
@@ -82,6 +114,16 @@ export function TemporalPage() {
       setError(e instanceof Error ? e.message : "Fleet sync failed");
     } finally {
       setSyncBusy(false);
+    }
+  }
+
+  async function loadMore() {
+    if (!nextToken) return;
+    setLoadMoreBusy(true);
+    try {
+      await load({ append: true, pageToken: nextToken });
+    } finally {
+      setLoadMoreBusy(false);
     }
   }
 
@@ -143,11 +185,37 @@ export function TemporalPage() {
       {enabled && (
         <>
           <div className="temporal-toolbar">
+            <div className="temporal-filters" role="tablist" aria-label="Workflow status filter">
+              {(
+                [
+                  ["running", "Running"],
+                  ["failed", "Failed"],
+                  ["all", "All"],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={filter === id}
+                  className={filter === id ? "active" : ""}
+                  onClick={() => {
+                    setFilter(id);
+                    setAppliedQuery("");
+                    setQuery("");
+                    setNextToken(null);
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <form
               className="temporal-search"
               onSubmit={(e) => {
                 e.preventDefault();
                 setAppliedQuery(query.trim());
+                setNextToken(null);
               }}
             >
               <label className="sr-only" htmlFor="temporal-query">
@@ -155,7 +223,7 @@ export function TemporalPage() {
               </label>
               <input
                 id="temporal-query"
-                placeholder='Visibility query (default: TaskQueue = "portunus-control")'
+                placeholder="Custom Visibility query (overrides filter)"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
               />
@@ -195,6 +263,11 @@ export function TemporalPage() {
           </div>
 
           {listError && <div className="notice warn">{listError}</div>}
+          {filter === "running" && !appliedQuery && (
+            <p className="muted temporal-filter-hint">
+              Showing open runs only. Switch to Failed or All for closed history from earlier deploys.
+            </p>
+          )}
 
           <section className="card fleet-section">
             <div className="card-header">
@@ -220,7 +293,7 @@ export function TemporalPage() {
                     {items.length === 0 ? (
                       <tr>
                         <td colSpan={6} className="muted">
-                          No workflows on this queue yet
+                          No workflows match this filter
                         </td>
                       </tr>
                     ) : (
@@ -257,6 +330,16 @@ export function TemporalPage() {
                   </tbody>
                 </table>
               </div>
+              {nextToken ? (
+                <button
+                  type="button"
+                  className="outline sm temporal-load-more"
+                  disabled={loadMoreBusy}
+                  onClick={() => void loadMore()}
+                >
+                  {loadMoreBusy ? "Loading…" : "Load more"}
+                </button>
+              ) : null}
             </div>
           </section>
         </>
@@ -277,8 +360,8 @@ export function TemporalPage() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="apps-drawer-header">
-                <div className="apps-drawer-heading">
-                  <p className="drawer-kicker">Workflow</p>
+              <div className="apps-drawer-heading">
+                <p className="drawer-kicker">Workflow</p>
                 <div className="apps-drawer-title-row">
                   <h2 className="mono" title={selected?.workflow.workflow_id ?? undefined}>
                     {detailBusy ? "Loading…" : selected?.workflow.workflow_id}
@@ -344,7 +427,9 @@ export function TemporalPage() {
                           </span>
                           <span className="temporal-event-type">
                             {ev.event_type || "Unknown"}
-                            {ev.summary ? <span className="muted temporal-event-summary"> · {ev.summary}</span> : null}
+                            {ev.summary ? (
+                              <span className="muted temporal-event-summary"> · {ev.summary}</span>
+                            ) : null}
                           </span>
                           <span className="muted mono">{fmtTimestamp(ev.event_time)}</span>
                         </li>

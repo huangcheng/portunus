@@ -115,6 +115,15 @@ def test_health_fields_null_tool_count_until_probe():
     )
     assert fields["status"] == "probing"
     assert fields["tool_count"] is None
+    assert fields["token_expires_at"] is None
+    assert fields["has_refresh_token"] is False
+
+
+def test_health_fields_oauth_grant_lifetime():
+    expires = datetime(2026, 11, 15, 18, 0, tzinfo=timezone.utc)
+    fields = health_fields(_facts(token_expires_at=expires, has_refresh_token=True))
+    assert fields["token_expires_at"] == "2026-11-15T18:00:00Z"
+    assert fields["has_refresh_token"] is True
 
 
 def test_health_fields_tool_count_after_live_ok_without_probe():

@@ -85,12 +85,18 @@ async def test_site_health_threshold_and_recovery(db, pepper_file):
     await outcome("runner_unavailable", "eu")
     assert await reg.unhealthy_sites(sid) == {"cn-a"}  # one failure stays below threshold
 
-    # Non-network errors never touch the site row (no streak growth, no TTL refresh).
+    # App/auth errors never touch the site row (no streak growth, no TTL refresh).
     await reg.record_outcome(sid, "auth_required", site_id="eu")
     assert await reg.unhealthy_sites(sid) == {"cn-a"}
+    # upstream_crash IS a path signal (GFW / vendor unreachable from that site).
+    # eu already has one runner_unavailable above; one crash crosses the threshold.
+    await outcome("upstream_crash", "eu")
+    assert await reg.unhealthy_sites(sid) == {"cn-a", "eu"}
 
-    # A success from cn-a clears the mark.
+    # A success clears that site's mark (eu stays marked until it recovers).
     await outcome(None, "cn-a")
+    assert await reg.unhealthy_sites(sid) == {"eu"}
+    await outcome(None, "eu")
     assert await reg.unhealthy_sites(sid) == set()
 
     # A caller-chosen tiny timeout is not the site's fault: suppressed entirely.
@@ -276,3 +282,104 @@ async def test_cold_start_failure_carries_site(authz, db, pepper_file):
     )
     await reg.record_outcome(sid, "upstream_timeout", site_id="eu")
     assert await reg.unhealthy_sites(sid) == {"eu"}
+
+
+async def test_probe_failsover_off_partitioned_site(db, pepper_file):
+    """stdio probe retries another live site when the first dies with upstream_crash."""
+    import os
+
+    from portunus_gateway.db.session import async_session as sf
+    from portunus_gateway.runner_pool import RunnerPool, ScheduleDecision
+    from portunus_gateway.vault import Vault as V
+
+    sid = await _mk_server(db)
+
+    class _SiteClient:
+        connected = True
+        conn_seq = 1
+        site_id = "x"
+
+        def __init__(self, site: str, *, fail: bool = False):
+            self.site_id = site
+            self.fail = fail
+            self.calls = 0
+
+        def start(self) -> None:
+            return None
+
+        async def request(self, op, **kw):
+            from portunus_gateway.runner_client import RunnerRequestError
+
+            self.calls += 1
+            if self.fail:
+                raise RunnerRequestError(
+                    "upstream_crash", "child exited before answering", sent=True
+                )
+            return {
+                "op": op,
+                "ok": True,
+                "tools": [{"name": "t", "inputSchema": {"type": "object"}}],
+            }
+
+    cn = _SiteClient("aliyun", fail=True)
+    eu = _SiteClient("vultr", fail=False)
+    picks: list[frozenset[str]] = []
+
+    class _Pool(RunnerPool):
+        def connected(self, loads=None):
+            return [
+                RunnerInfo(site_id="aliyun", regions=("cn-aliyun", "cn")),
+                RunnerInfo(site_id="vultr", regions=("overseas-vultr", "overseas")),
+            ]
+
+        def pick(self, preferred_regions=(), *, loads=None, exclude_sites=frozenset(),
+                 sticky_site_id=None, latency_ms=None):
+            picks.append(frozenset(exclude_sites))
+            # Prefer aliyun unless excluded (mirrors alphabetical / empty-preference bias).
+            for site in ("aliyun", "vultr"):
+                if site not in exclude_sites:
+                    return ScheduleDecision(site_id=site, preferred_miss=False)
+            return ScheduleDecision(site_id="aliyun", preferred_miss=False)
+
+        def site_ids(self):
+            return ["aliyun", "vultr"]
+
+        async def request(self, site_id, op, **kw):
+            client = cn if site_id == "aliyun" else eu
+            return await client.request(op, **kw)
+
+    import tempfile
+    from pathlib import Path
+
+    shim = Path(tempfile.mkdtemp(prefix="probe-failover-")) / "shim"
+    shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    shim.chmod(0o755)
+
+    pool = _Pool()
+    reg = Registry(
+        sf,
+        V({1: os.urandom(32)}),
+        pool,
+        trusted_path=[str(shim.parent)],
+        binary_allowlist=[str(shim)],
+    )
+    from portunus_gateway.db.models import Server
+
+    async with sf() as s:
+        server = await s.get(Server, sid)
+        assert server is not None
+        server.command = str(shim)
+        server.args = []
+        await s.commit()
+
+    view = await reg.probe(sid, "test")
+    assert any(t["name"] == "t" for t in view["tools"])
+    assert cn.calls == 1 and eu.calls == 1
+    # First pick had no exclusions; after aliyun crash the retry excluded it.
+    assert frozenset() in picks
+    assert any("aliyun" in ex for ex in picks)
+    # Crash was attributed so future picks/invokes avoid aliyun (threshold=2 needs
+    # one more strike — in-probe already succeeded, so streak is 1).
+    assert await reg.unhealthy_sites(sid) == set()
+    await reg.record_outcome(sid, "upstream_crash", site_id="aliyun")
+    assert await reg.unhealthy_sites(sid) == {"aliyun"}

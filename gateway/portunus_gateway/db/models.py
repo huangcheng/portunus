@@ -102,6 +102,10 @@ class Server(Base):
     # Last failure that counts for derived status (see health.py).
     last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Access-token expiry (UTC) when known from OAuth expires_in; null = unknown / non-OAuth.
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # True when a refresh_token is vaulted (proactive / on-demand renew is possible).
+    has_oauth_refresh: Mapped[bool] = mapped_column(default=False, server_default=false())
     created_at: Mapped[datetime] = _created_at()
 
     @validates("slug")
