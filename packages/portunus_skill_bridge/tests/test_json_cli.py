@@ -7,6 +7,7 @@ from portunus_skill_bridge.backends.json_cli import JsonCliBackend
 from portunus_skill_bridge.manifest import load_manifest
 
 GUANG = Path(__file__).resolve().parents[1] / "manifests" / "guangyapan.example.yaml"
+CUBOX = Path(__file__).resolve().parents[1] / "manifests" / "cubox.example.yaml"
 
 
 @pytest.mark.anyio
@@ -86,3 +87,28 @@ async def test_json_cli_sets_home_from_state_dir(monkeypatch, tmp_path):
     assert out["exit_code"] == 0
     assert out["result"]["home"] == str(state)
     assert os.environ["HOME"] == str(tmp_path / "wrong-home")
+
+
+@pytest.mark.anyio
+async def test_json_cli_multi_token_cli_prefix(tmp_path):
+    """Cubox-style tools pass cli as ['folder','list'] before flags."""
+    recorder = tmp_path / "recorder.py"
+    recorder.write_text(
+        "\n".join(
+            [
+                "import json,sys",
+                "print(json.dumps({\"argv\": sys.argv[1:]}))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    m = load_manifest(CUBOX)
+    m.cli.command = [sys_executable(), str(recorder)]  # type: ignore[union-attr]
+    backend = JsonCliBackend(m)
+    tool = next(t for t in m.tools if t.name == "card_list")
+    out = await backend.call(tool, {"keyword": "AI", "page": 1})
+    assert out["exit_code"] == 0
+    argv = out["result"]["argv"]
+    assert argv[:2] == ["card", "list"]
+    assert "--keyword" in argv and "AI" in argv
+    assert "--page" in argv and "1" in argv

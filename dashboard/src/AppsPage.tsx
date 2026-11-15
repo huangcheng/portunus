@@ -866,6 +866,53 @@ function OAuthManagePanel({
             .
           </p>
         )}
+        {app.slug === "github" ? (
+          <p className="provider-hint">
+            Create a GitHub{" "}
+            <a
+              href="https://github.com/settings/developers"
+              target="_blank"
+              rel="noreferrer"
+            >
+              OAuth App
+            </a>{" "}
+            or{" "}
+            <a
+              href="https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/about-creating-github-apps"
+              target="_blank"
+              rel="noreferrer"
+            >
+              GitHub App
+            </a>{" "}
+            (remote MCP has no DCR). Set the callback to the Redirect URI below. Docs:{" "}
+            <a
+              href="https://docs.github.com/en/copilot/how-tos/copilot-in-your-ide/customize-copilot/extend-copilot-with-tools-and-context/set-up-the-github-mcp-server"
+              target="_blank"
+              rel="noreferrer"
+            >
+              GitHub MCP setup
+            </a>
+            .
+          </p>
+        ) : null}
+        {app.slug === "cloudflare" ? (
+          <p className="provider-hint">
+            Authorize opens Cloudflare OAuth (account + API scopes). Agent skills from{" "}
+            <a href="https://github.com/cloudflare/skills" target="_blank" rel="noreferrer">
+              cloudflare/skills
+            </a>{" "}
+            stay in the IDE; this Portunus app is the remote MCP at{" "}
+            <code>mcp.cloudflare.com</code>. Setup source:{" "}
+            <a
+              href="https://developers.cloudflare.com/agent-setup/prompt.md"
+              target="_blank"
+              rel="noreferrer"
+            >
+              agent-setup/prompt.md
+            </a>
+            .
+          </p>
+        ) : null}
         <p className="provider-hint">
           Redirect URI: <code>{`${window.location.origin}/api/oauth/callback`}</code>
         </p>
@@ -1281,6 +1328,24 @@ function SkillBridgeManagePanel({
               ? `${oauthOpts?.connectHint || "Open the authorize link and confirm in the vendor app."} Login stays on the runner — agents never see codes.`
               : "API secrets stay in the Portunus vault. The tool manifest lives in the catalog and updates without rebuilding — connected servers respawn on save."}
         </p>
+        {app.slug === "cubox" ? (
+          <p className="provider-hint">
+            Enable API Extension and copy the token/URL from{" "}
+            <a href="https://cubox.pro/web/settings/extensions" target="_blank" rel="noreferrer">
+              cubox.pro
+            </a>{" "}
+            or{" "}
+            <a href="https://cubox.cc/web/settings/extensions" target="_blank" rel="noreferrer">
+              cubox.cc
+            </a>
+            . Default server env is <code>cubox.pro</code> — set <code>CUBOX_SERVER=cubox.cc</code> on
+            the server if you use the international site. Docs:{" "}
+            <a href="https://help.cubox.pro/ai/agents/" target="_blank" rel="noreferrer">
+              help.cubox.pro/ai/agents
+            </a>
+            .
+          </p>
+        ) : null}
         {secretDefs.map((def) => (
           <label className="field" key={def.name}>
             {def.label} {active ? "(leave blank to keep)" : ""}
@@ -1902,6 +1967,15 @@ function HttpManagePanel({
               weiyun.com/act/openclaw
             </a>
             .
+          </p>
+        ) : null}
+        {app.slug === "raindrop" ? (
+          <p className="provider-hint">
+            Paste a Raindrop API access token (Bearer). Docs:{" "}
+            <a href="https://developer.raindrop.io/mcp/mcp" target="_blank" rel="noreferrer">
+              developer.raindrop.io/mcp
+            </a>
+            . MCP is Pro-beta.
           </p>
         ) : null}
         <label className="field">

@@ -33,7 +33,9 @@ WEBDAV_MCP_ARGS = ["-y", "--ignore-scripts", WEBDAV_MCP_PACKAGE]
 # (e.g. include ``overseas`` on sites that can reach those vendors). SiteHealth
 # still fails over on network errors among healthy sites.
 OVERSEAS_PREFERRED_REGIONS = ["overseas"]
-OVERSEAS_EGRESS_SLUGS = frozenset({"yandex", "drime", "box", "onedrive"})
+OVERSEAS_EGRESS_SLUGS = frozenset(
+    {"yandex", "drime", "box", "onedrive", "raindrop", "github", "cloudflare"}
+)
 
 
 def preferred_regions_for_slug(slug: str) -> list[str]:
@@ -58,6 +60,8 @@ def _load_packaged_manifest(name: str) -> dict[str, Any]:
 
 # Seeded WeRead http_rpc manifest (operator Connect supplies WEREAD_API_KEY → vault).
 WEREAD_MANIFEST: dict[str, Any] = _load_packaged_manifest("weread.example.yaml")
+# Cubox json_cli — wraps official cubox-cli (fixed API Extension token).
+CUBOX_MANIFEST: dict[str, Any] = _load_packaged_manifest("cubox.example.yaml")
 # 光鸭云盘 json_cli — skill tree shipped under third_party/; runners mount/copy it.
 GUANGYAPAN_MANIFEST: dict[str, Any] = _load_packaged_manifest("guangyapan.example.yaml")
 # Default paths on Portunus runners (see deploy). Overridable via Connect env.
@@ -84,6 +88,61 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "resource": "https://ardot.tencent.com/mcp",
             "registration_endpoint": "https://ardot.tencent.com/oauth/register",
             "token_endpoint_auth_method": "none",
+        },
+    },
+    {
+        "slug": "github",
+        "label": "GitHub",
+        "name": "GitHub",
+        "description": (
+            "GitHub remote MCP (api.githubcopilot.com). OAuth via your GitHub OAuth App "
+            "or GitHub App — paste Client ID/secret at Connect (no DCR)."
+        ),
+        "connection": "oauth",
+        "popular": True,
+        "categories": ["Developer Tools"],
+        "tags": ["github", "oauth", "mcp", "repos"],
+        "sort_order": 15,
+        "spec": {
+            "url": "https://api.githubcopilot.com/mcp/",
+            "authorize_url": "https://github.com/login/oauth/authorize",
+            "token_url": "https://github.com/login/oauth/access_token",
+            "token_endpoint_auth_method": "client_secret_post",
+            "resource": "https://api.githubcopilot.com/mcp/",
+            "scopes": [
+                "repo",
+                "read:org",
+                "read:user",
+                "user:email",
+                "gist",
+                "notifications",
+                "read:packages",
+                "read:project",
+            ],
+        },
+    },
+    {
+        "slug": "cloudflare",
+        "label": "Cloudflare",
+        "name": "Cloudflare",
+        "description": (
+            "Cloudflare API MCP (Code Mode search/execute/docs) via OAuth. "
+            "Maps to https://mcp.cloudflare.com/mcp from Cloudflare agent-setup."
+        ),
+        "connection": "oauth",
+        "popular": True,
+        "categories": ["Developer Tools"],
+        "tags": ["cloudflare", "oauth", "mcp", "workers"],
+        "sort_order": 16,
+        "spec": {
+            "url": "https://mcp.cloudflare.com/mcp",
+            "authorize_url": "https://mcp.cloudflare.com/authorize",
+            "token_url": "https://mcp.cloudflare.com/token",
+            "registration_endpoint": "https://mcp.cloudflare.com/register",
+            "token_endpoint_auth_method": "none",
+            "resource": "https://mcp.cloudflare.com/mcp",
+            "issuer": "https://mcp.cloudflare.com",
+            "scopes": ["user:read", "account:read", "offline_access"],
         },
     },
     {
@@ -189,6 +248,18 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         },
     },
     {
+        "slug": "raindrop",
+        "label": "Raindrop.io",
+        "name": "Raindrop.io",
+        "description": "Raindrop bookmarks via remote MCP (Bearer API token; Pro beta).",
+        "connection": "http",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["raindrop", "bookmarks", "http"],
+        "sort_order": 52,
+        "spec": {"url": "https://api.raindrop.io/rest/v2/ai/mcp"},
+    },
+    {
         "slug": "weread",
         "label": "微信读书",
         "name": "微信读书",
@@ -203,6 +274,30 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "secrets": [
                 {"name": "WEREAD_API_KEY", "label": "WeRead API key", "secret": True},
             ],
+        },
+    },
+    {
+        "slug": "cubox",
+        "label": "Cubox",
+        "name": "Cubox",
+        "description": "Cubox library via skill-bridge (official cubox-cli; paste API Extension token).",
+        "connection": "skill_bridge",
+        "popular": True,
+        "categories": ["Reading"],
+        "tags": ["cubox", "bookmarks", "json_cli"],
+        "sort_order": 72,
+        "spec": {
+            "manifest": CUBOX_MANIFEST,
+            "secrets": [
+                {
+                    "name": "CUBOX_TOKEN",
+                    "label": "Cubox API token (or full API Extension URL)",
+                    "secret": True,
+                },
+            ],
+            "env_defaults": {
+                "CUBOX_SERVER": "cubox.pro",
+            },
         },
     },
     {
@@ -689,8 +784,8 @@ class CatalogStore:
 
         # Idempotent: add new skill_bridge seeds (e.g. weread) on existing deploys,
         # and refresh skill_bridge manifests when the packaged seed grows (tool list).
-        # Also insert missing rclone-shim stdio seeds (yandex/drime/…) — same gap as
-        # skill_bridge: empty-DB seed only runs once.
+        # Also insert missing rclone-shim stdio seeds (yandex/drime/…) and http
+        # seeds (raindrop/…) — same gap as skill_bridge: empty-DB seed only runs once.
         added = 0
         refreshed = 0
         async with self._sf() as s:
@@ -701,7 +796,10 @@ class CatalogStore:
                     and isinstance(raw.get("spec"), dict)
                     and raw["spec"].get("command") == RCLONE_SHIM
                 )
-                if connection != "skill_bridge" and not is_rclone_stdio:
+                if (
+                    connection not in ("skill_bridge", "http", "oauth")
+                    and not is_rclone_stdio
+                ):
                     continue
                 spec = validate_spec(raw["connection"], raw["spec"])
                 row = (
@@ -757,8 +855,8 @@ class CatalogStore:
             if added or refreshed:
                 await s.commit()
 
-        # Backfill portable overseas preferred_regions on linked servers that still
-        # have none (probe/invoke soft-affinity without a manual regions edit).
+        # Backfill / normalize portable overseas preferred_regions on linked servers
+        # (empty, or legacy host-specific overseas-* tags from private fleets).
         regions_fixed = 0
         async with self._sf() as s:
             linked = (
@@ -767,10 +865,12 @@ class CatalogStore:
                 )
             ).scalars().all()
             for srv in linked:
-                if list(srv.preferred_regions or []):
-                    continue
                 hint = preferred_regions_for_slug(srv.slug)
                 if not hint:
+                    continue
+                cur = list(srv.preferred_regions or [])
+                needs = (not cur) or any(r.startswith("overseas-") for r in cur)
+                if not needs or cur == hint:
                     continue
                 srv.preferred_regions = hint
                 regions_fixed += 1

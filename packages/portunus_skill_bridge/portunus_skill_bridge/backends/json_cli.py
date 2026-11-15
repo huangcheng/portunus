@@ -57,8 +57,19 @@ class JsonCliBackend:
 
         if tool.cli or self.cli.run_wrapper == "raw":
             # Raw subcommand: quark-style `search --keyword …` (no identity unless set).
-            sub = tool.cli or tool.name
-            argv = [*self.cli.command, sub, *self._identity_args(), *self._flag_args(arguments)]
+            # `cli` may be a multi-token prefix (e.g. cubox `folder list`).
+            if isinstance(tool.cli, list):
+                if not tool.cli or not all(isinstance(p, str) and p for p in tool.cli):
+                    raise RuntimeError(f"tool {tool.name!r} cli list must be non-empty strings")
+                sub_argv = list(tool.cli)
+            else:
+                sub_argv = [tool.cli or tool.name]
+            argv = [
+                *self.cli.command,
+                *sub_argv,
+                *self._identity_args(),
+                *self._flag_args(arguments),
+            ]
             return await self._run(argv, cwd=cwd, stdin=None)
 
         if self.cli.run_wrapper == "run_operation":

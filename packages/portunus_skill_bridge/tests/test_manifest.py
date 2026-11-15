@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WEREAD = ROOT / "manifests" / "weread.example.yaml"
 GUANG = ROOT / "manifests" / "guangyapan.example.yaml"
 QUARK = ROOT / "manifests" / "quark.example.yaml"
+CUBOX = ROOT / "manifests" / "cubox.example.yaml"
 
 
 def test_load_weread_example():
@@ -46,6 +47,18 @@ def test_load_quark_example():
     assert m.cli.run_wrapper == "raw"
     assert m.cli.identity.agent_name is None
     assert {t.name for t in m.tools} >= {"search", "browse", "get_user_info", "download"}
+
+
+def test_load_cubox_example():
+    m = load_manifest(CUBOX)
+    assert m.backend == "json_cli"
+    assert m.auth.type == "none"
+    assert m.cli is not None
+    assert m.cli.run_wrapper == "raw"
+    assert m.cli.command[:2] == ["npx", "-y"]
+    folder = next(t for t in m.tools if t.name == "folder_list")
+    assert folder.cli == ["folder", "list"]
+    assert {t.name for t in m.tools} >= {"folder_list", "card_list", "card_rag", "save"}
 
 
 def test_oauth_link_browser_capture_defaults_off():

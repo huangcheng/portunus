@@ -585,7 +585,7 @@ th.text-right { text-align: right; }
 .app-card-mark.nutstore.is-official { background: oklch(0.95 0.025 85); }
 .app-card-mark.generic { background: var(--secondary); color: var(--foreground); }
 .app-brand-image { display: block; width: 30px; height: 30px; object-fit: contain; }
-.app-brand-image.ardot, .app-brand-image.flomo, .app-brand-image.dida365, .app-brand-image.weread, .app-brand-image.guangyapan, .app-brand-image.weiyun, .app-brand-image.pikpak, .app-brand-image.yandex, .app-brand-image.drime { width: 48px; height: 48px; border-radius: inherit; }
+.app-brand-image.ardot, .app-brand-image.flomo, .app-brand-image.dida365, .app-brand-image.weread, .app-brand-image.guangyapan, .app-brand-image.weiyun, .app-brand-image.raindrop, .app-brand-image.cubox, .app-brand-image.github, .app-brand-image.cloudflare, .app-brand-image.pikpak, .app-brand-image.yandex, .app-brand-image.drime { width: 48px; height: 48px; border-radius: inherit; }
 .app-brand-image.koofr { width: 32px; height: 32px; border-radius: 8px; }
 .app-brand-image.dropbox { width: 32px; height: 27px; }
 .app-brand-image.box { width: 28px; height: 28px; }

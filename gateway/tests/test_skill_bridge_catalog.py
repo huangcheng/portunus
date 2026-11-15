@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from portunus_gateway.catalog import (
+    CUBOX_MANIFEST,
     GUANGYAPAN_MANIFEST,
     GUANGYAPAN_SKILL_ROOT,
     GUANGYAPAN_STATE_DIR,
@@ -159,7 +160,74 @@ def test_overseas_preferred_regions_for_rclone_slugs():
         preferred_regions_for_slug,
     )
 
-    for slug in ("yandex", "drime", "box", "onedrive", "Yandex"):
+    for slug in (
+        "yandex",
+        "drime",
+        "box",
+        "onedrive",
+        "raindrop",
+        "github",
+        "cloudflare",
+        "Yandex",
+    ):
         assert preferred_regions_for_slug(slug) == OVERSEAS_PREFERRED_REGIONS
     assert preferred_regions_for_slug("guangyapan") == []
+    assert preferred_regions_for_slug("cubox") == []
     assert preferred_regions_for_slug("") == []
+
+
+def test_github_oauth_seed_shape():
+    from portunus_gateway.catalog import DEFAULT_APPS, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "github")
+    assert raw["connection"] == "oauth"
+    spec = validate_spec("oauth", raw["spec"])
+    assert spec["url"] == "https://api.githubcopilot.com/mcp/"
+    assert spec["authorize_url"] == "https://github.com/login/oauth/authorize"
+    assert spec["token_url"] == "https://github.com/login/oauth/access_token"
+    assert "registration_endpoint" not in spec  # GitHub remote MCP has no DCR
+    assert "repo" in spec["scopes"]
+    assert spec["resource"] == "https://api.githubcopilot.com/mcp/"
+
+
+def test_cloudflare_oauth_seed_shape():
+    from portunus_gateway.catalog import DEFAULT_APPS, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "cloudflare")
+    assert raw["connection"] == "oauth"
+    spec = validate_spec("oauth", raw["spec"])
+    assert spec["url"] == "https://mcp.cloudflare.com/mcp"
+    assert spec["registration_endpoint"] == "https://mcp.cloudflare.com/register"
+    assert spec["authorize_url"] == "https://mcp.cloudflare.com/authorize"
+    assert spec["token_url"] == "https://mcp.cloudflare.com/token"
+    assert spec["token_endpoint_auth_method"] == "none"
+    assert "offline_access" in spec["scopes"]
+
+
+def test_validate_cubox_skill_bridge_spec():
+    out = validate_spec(
+        "skill_bridge",
+        {
+            "manifest": CUBOX_MANIFEST,
+            "secrets": [{"name": "CUBOX_TOKEN", "label": "Cubox API token"}],
+            "env_defaults": {"CUBOX_SERVER": "cubox.pro"},
+        },
+    )
+    assert out["manifest"]["backend"] == "json_cli"
+    assert out["manifest"]["auth"]["type"] == "none"
+    assert out["secrets"][0]["name"] == "CUBOX_TOKEN"
+    assert out["env_defaults"]["CUBOX_SERVER"] == "cubox.pro"
+    names = {t["name"] for t in out["manifest"]["tools"]}
+    assert {"folder_list", "card_list", "card_rag", "save", "delete"} <= names
+    folder = next(t for t in out["manifest"]["tools"] if t["name"] == "folder_list")
+    assert folder["cli"] == ["folder", "list"]
+
+
+def test_raindrop_http_seed_shape():
+    from portunus_gateway.catalog import DEFAULT_APPS, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "raindrop")
+    assert raw["connection"] == "http"
+    spec = validate_spec("http", raw["spec"])
+    assert spec["url"] == "https://api.raindrop.io/rest/v2/ai/mcp"
+    assert "auth_header" not in spec

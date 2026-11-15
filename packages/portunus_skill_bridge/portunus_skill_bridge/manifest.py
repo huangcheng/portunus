@@ -28,7 +28,8 @@ class ToolSpec(BaseModel):
     dispatch: str | None = None
     # json_cli: operation type for run wrapper, or raw cli subcommand
     operation: str | None = None
-    cli: str | None = None
+    # Single token (`search`) or argv prefix (`["folder", "list"]`) before flags.
+    cli: str | list[str] | None = None
     input: dict[str, FieldSpec] = Field(default_factory=dict)
 
 

@@ -1,0 +1,233 @@
+# Cubox — official cubox-cli via skill-bridge (no hosted MCP).
+# Auth: paste API Extension token into Connect; CUBOX_TOKEN/CUBOX_SERVER env.
+# Do not expose auth login/logout as MCP tools.
+
+name: cubox
+version: "1.0.10"
+backend: json_cli
+
+auth:
+  type: none
+  connect_hint: "Paste the API Extension token (or full save URL) from Cubox 扩展中心. Use cubox.pro or cubox.cc to match your account region."
+
+cli:
+  # Pinned npm release of the official Go CLI wrapper.
+  command: ["npx", "-y", "cubox-cli@1.0.10"]
+  identity: {}
+  run_wrapper: raw
+
+tools:
+  - name: folder_list
+    description: List Cubox folders
+    cli: ["folder", "list"]
+    input: {}
+
+  - name: tag_list
+    description: List Cubox tags (nested hierarchy)
+    cli: ["tag", "list"]
+    input: {}
+
+  - name: tag_update
+    description: Rename a tag leaf by id
+    cli: ["tag", "update"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Tag id
+      new_name:
+        type: string
+        required: true
+        description: New leaf name (no /)
+
+  - name: tag_delete
+    description: Delete tag(s) by id (cards keep content; tag links removed)
+    cli: ["tag", "delete"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Tag id or comma-separated ids
+
+  - name: tag_merge
+    description: Merge source tag(s) into a target tag
+    cli: ["tag", "merge"]
+    input:
+      source:
+        type: string
+        required: true
+        description: Source tag id(s), comma-separated
+      target:
+        type: string
+        required: true
+        description: Target tag id
+
+  - name: card_list
+    description: Filter/search Cubox cards (keyword/url use --page; else --last-id cursor)
+    cli: ["card", "list"]
+    input:
+      folder:
+        type: string
+        description: Folder id(s), comma-separated
+      tag:
+        type: string
+        description: Tag id(s), comma-separated
+      starred:
+        type: boolean
+        description: Only starred
+      read:
+        type: boolean
+        description: Only read
+      unread:
+        type: boolean
+        description: Only unread
+      annotated:
+        type: boolean
+        description: Only annotated
+      archived:
+        type: boolean
+        description: Only archived (default is non-archived)
+      keyword:
+        type: string
+        description: Keyword search
+      url:
+        type: string
+        description: Exact card URL match
+      start_time:
+        type: string
+        description: Collect start time filter
+      end_time:
+        type: string
+        description: Collect end time filter
+      limit:
+        type: integer
+        description: Page size (default 50)
+      last_id:
+        type: string
+        description: Cursor for browse mode
+      page:
+        type: integer
+        description: Page number for keyword/url search
+      all:
+        type: boolean
+        description: Auto-paginate all results
+
+  - name: card_detail
+    description: Full card detail including Markdown body, highlights, and AI insights
+    cli: ["card", "detail"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Card id
+
+  - name: card_rag
+    description: Semantic RAG search over Cubox library
+    cli: ["card", "rag"]
+    input:
+      query:
+        type: string
+        required: true
+        description: Natural-language query
+
+  - name: save
+    description: Save URL(s) via --json batch payload [{"url","title","description"}]
+    cli: ["save"]
+    input:
+      json:
+        type: string
+        required: true
+        description: JSON array of cards to save
+      folder:
+        type: string
+        description: Destination folder name (nested ok)
+      tag:
+        type: string
+        description: Tag name(s), comma-separated
+
+  - name: update
+    description: Update card flags, folder, tags, title, or description
+    cli: ["update"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Card id
+      star:
+        type: boolean
+      unstar:
+        type: boolean
+      read:
+        type: boolean
+      unread:
+        type: boolean
+      folder:
+        type: string
+        description: Folder name ("" = uncategorized)
+      tag:
+        type: string
+        description: Replace all tags (comma-separated names)
+      add_tag:
+        type: string
+        description: Add tag name(s)
+      remove_tag:
+        type: string
+        description: Remove tag name(s)
+      title:
+        type: string
+      description:
+        type: string
+
+  - name: archive
+    description: Archive card(s) by id
+    cli: ["archive"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Card id or comma-separated ids
+
+  - name: unarchive
+    description: Restore archived card(s) into a folder
+    cli: ["unarchive"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Card id or comma-separated ids
+      folder:
+        type: string
+        required: true
+        description: Destination folder name ("" = uncategorized)
+
+  - name: delete
+    description: Delete card(s); prefer dry_run first
+    cli: ["delete"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Card id or comma-separated ids
+      dry_run:
+        type: boolean
+        description: Preview only
+
+  - name: annotation_list
+    description: List/search highlights across cards
+    cli: ["annotation", "list"]
+    input:
+      color:
+        type: string
+        description: Yellow, Green, Blue, Pink, and/or Purple
+      keyword:
+        type: string
+      start_time:
+        type: string
+      end_time:
+        type: string
+      limit:
+        type: integer
+      last_id:
+        type: string
+      all:
+        type: boolean
