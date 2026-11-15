@@ -2,14 +2,12 @@
 # Build context: repository root.
 #
 # Base images are overridable so anyone can build without a private registry:
-# defaults are public Docker Hub tags. CN builders (same pattern as sibling
-# products) pass SWR mirrors, e.g.:
-#   --build-arg PY_BASE=swr.cn-north-4.myhuaweicloud.com/<org>/base-python:3.12-slim
-#   --build-arg NODE_BASE=swr.cn-north-4.myhuaweicloud.com/<org>/base-node:22-slim
-# Package indexes (optional; empty keeps upstream defaults). CN builders
-# typically use the same indexes as sibling products:
-#   --build-arg PIP_INDEX=https://mirrors.aliyun.com/pypi/simple/
-#   --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+# defaults are public Docker Hub tags. Optional private/regional mirrors, e.g.:
+#   --build-arg PY_BASE=registry.example.com/base-python:3.12-slim
+#   --build-arg NODE_BASE=registry.example.com/base-node:22-slim
+# Package indexes (optional; empty keeps upstream defaults):
+#   --build-arg PIP_INDEX=https://pypi.example.com/simple/
+#   --build-arg NPM_REGISTRY=https://npm.example.com
 #
 # NODE_BASE must be glibc/Debian-based: the runtime stage copies `node`/`npm`
 # into the Python image for the runner. Do not point NODE_BASE at an Alpine tag.

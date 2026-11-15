@@ -34,7 +34,7 @@ resolve_uid() {
 
 CHILD_UID="$(resolve_uid)"
 if [[ -z "$CHILD_UID" ]]; then
-  local_stack="${PORTUNUS_RUNNER_STACK:-/opt/stacks/portunus/docker-compose.runner.yml}"
+  local_stack="${PORTUNUS_RUNNER_STACK:-docker-compose.runner.yml}"
   cid="$(docker compose -f "$local_stack" ps -q portunus-runner 2>/dev/null || true)"
   if [[ -n "$cid" ]]; then
     CHILD_UID="$(docker inspect "$cid" --format '{{.Config.User}}' 2>/dev/null | cut -d: -f1 || true)"

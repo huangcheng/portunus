@@ -28,6 +28,20 @@ WEBDAV_MCP_PACKAGE = "webdav-mcp-server@1.0.4"
 RCLONE_SHIM = "/var/lib/portunus/skills/rclone-shim/shim"
 WEBDAV_MCP_ARGS = ["-y", "--ignore-scripts", WEBDAV_MCP_PACKAGE]
 
+# Soft affinity for rclone vendors that often need unrestricted egress.
+# Portable tag only — each deploy labels its own runners via PORTUNUS_REGIONS
+# (e.g. include ``overseas`` on sites that can reach those vendors). SiteHealth
+# still fails over on network errors among healthy sites.
+OVERSEAS_PREFERRED_REGIONS = ["overseas"]
+OVERSEAS_EGRESS_SLUGS = frozenset({"yandex", "drime", "box", "onedrive"})
+
+
+def preferred_regions_for_slug(slug: str) -> list[str]:
+    """Default preferred_regions for catalog/connect when the operator left them empty."""
+    if (slug or "").casefold() in OVERSEAS_EGRESS_SLUGS:
+        return list(OVERSEAS_PREFERRED_REGIONS)
+    return []
+
 # Stdio spawn for DB-backed skill manifests (injected as PORTUNUS_MANIFEST at start).
 SKILL_BRIDGE_COMMAND = "python"
 SKILL_BRIDGE_ARGS = ["-m", "portunus_skill_bridge", "--manifest-env", SKILL_BRIDGE_MANIFEST_ENV]
@@ -742,6 +756,30 @@ class CatalogStore:
                     refreshed += 1
             if added or refreshed:
                 await s.commit()
+
+        # Backfill portable overseas preferred_regions on linked servers that still
+        # have none (probe/invoke soft-affinity without a manual regions edit).
+        regions_fixed = 0
+        async with self._sf() as s:
+            linked = (
+                await s.execute(
+                    select(Server).where(Server.slug.in_(sorted(OVERSEAS_EGRESS_SLUGS)))
+                )
+            ).scalars().all()
+            for srv in linked:
+                if list(srv.preferred_regions or []):
+                    continue
+                hint = preferred_regions_for_slug(srv.slug)
+                if not hint:
+                    continue
+                srv.preferred_regions = hint
+                regions_fixed += 1
+            if regions_fixed:
+                await s.commit()
+                log.info(
+                    "overseas preferred_regions backfill: %d server(s)", regions_fixed
+                )
+
         return inserted + added + refreshed
 
     async def list_apps(self) -> list[dict[str, Any]]:

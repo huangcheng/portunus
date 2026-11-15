@@ -22,7 +22,7 @@ Operator console covers **Apps · Keys · Fleet · Logs · Workflows**. Design n
 - **Vaulted secrets** — env/headers sealed under `PORTUNUS_SECRETS_KEY`; never returned raw on read
 - **Stdio + remote MCP** — `npx`/`uvx`/allowlisted binaries locally; HTTP remotes with operator OAuth (code+PKCE) or paste-token
 - **Fleet runners** — multi-site pool with preferred regions, latency-aware pick, and in-probe failover on network / `upstream_crash` failures
-- **Temporal workflows** (optional compose profile) — durable server probes, shared `oauth-refresh` loop (per-server activity isolation so one hung provider cannot stall the queue), connect-ensure
+- **Temporal workflows** (optional compose profile) — shared `server-probe` and `oauth-refresh` loops (per-server activities so one hung job cannot stall the queue), connect-ensure; probes honor overseas `preferred_regions` + learned site health
 - **Operator account** — password + optional Cloudflare Turnstile, TOTP, and passkeys
 
 ## Quickstart (local, dev mode)
@@ -151,6 +151,10 @@ A server's `preferred_regions` is a soft preference among *healthy* sites. On ne
 (`upstream_timeout`, `runner_unavailable`, `upstream_crash`) the gateway records per-(server, site) health,
 stops placing new children on bad sites, and retries another site in the same probe when possible.
 Success clears the mark; marks expire after 15 minutes. A child stays on the site that started it until then.
+
+**Convention:** catalog seeds that need open egress (e.g. Yandex/Drime/Box/OneDrive rclone) default to
+`preferred_regions=["overseas"]`. Tag the matching runners with `PORTUNUS_REGIONS=...,overseas` (or set
+per-server regions yourself). No vendor or host names are hardcoded — your labels, your fleet.
 `scripts/e2e_two_runners.sh` exercises local failover. Design: `docs/superpowers/specs/2026-11-09-portunus-fleet-design.md`.
 
 ### Remote runner links (TLS)
@@ -177,7 +181,7 @@ With `TEMPORAL_HOST` set (compose profile `temporal`):
 | Workflow id | Purpose |
 |---|---|
 | `oauth-refresh` | Shared proactive OAuth access-token refresh (one workflow; per-server activities) |
-| `server-probe:{id}` | Periodic active probe; `probe_server` runs **inside the gateway** (sole-client pool) |
+| `server-probe` | Shared active-probe scheduler; `probe_server` on `portunus-probe` inside the gateway (sole-client pool); GFW-aware via preferred_regions + SiteHealth |
 | `connect-ensure:{id}` | Connect → probe → enable → start children |
 | `fleet-skills-sync:*` | Fleet skill-tree sync |
 

@@ -2,7 +2,6 @@
 # Usage (with main stack env already loaded):
 #   docker compose -f docker-compose.yml -f deploy/docker-compose.temporal.yml --profile temporal up -d
 #
-# Production (vultr) typically merges these services into /opt/stacks/portunus compose.
 # Set TEMPORAL_HOST=temporal:7233 on the gateway service so OAuth callback can start workflows.
 
 services:
@@ -60,12 +59,12 @@ services:
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-portunus-control}
       PORTUNUS_FLEET_HOSTS: ${PORTUNUS_FLEET_HOSTS:-}
-      PORTUNUS_REPO_ROOT: /opt/stacks/portunus
+      PORTUNUS_REPO_ROOT: ${PORTUNUS_REPO_ROOT:-/app}
     volumes:
       - run:/run/portunus
       - data:/var/lib/portunus
       - ./deploy/runner-policy.json:/etc/portunus/runner-policy.json:ro
-      - ./deploy:/opt/stacks/portunus/deploy:ro
+      - ./deploy:/app/deploy:ro
     secrets: [pepper, runner_token]
 
 volumes:

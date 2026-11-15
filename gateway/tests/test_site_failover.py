@@ -321,31 +321,31 @@ async def test_probe_failsover_off_partitioned_site(db, pepper_file):
                 "tools": [{"name": "t", "inputSchema": {"type": "object"}}],
             }
 
-    cn = _SiteClient("aliyun", fail=True)
-    eu = _SiteClient("vultr", fail=False)
+    cn = _SiteClient("site-cn", fail=True)
+    eu = _SiteClient("site-eu", fail=False)
     picks: list[frozenset[str]] = []
 
     class _Pool(RunnerPool):
         def connected(self, loads=None):
             return [
-                RunnerInfo(site_id="aliyun", regions=("cn-aliyun", "cn")),
-                RunnerInfo(site_id="vultr", regions=("overseas-vultr", "overseas")),
+                RunnerInfo(site_id="site-cn", regions=("cn",)),
+                RunnerInfo(site_id="site-eu", regions=("overseas",)),
             ]
 
         def pick(self, preferred_regions=(), *, loads=None, exclude_sites=frozenset(),
                  sticky_site_id=None, latency_ms=None):
             picks.append(frozenset(exclude_sites))
-            # Prefer aliyun unless excluded (mirrors alphabetical / empty-preference bias).
-            for site in ("aliyun", "vultr"):
+            # Prefer site-cn unless excluded (mirrors alphabetical / empty-preference bias).
+            for site in ("site-cn", "site-eu"):
                 if site not in exclude_sites:
                     return ScheduleDecision(site_id=site, preferred_miss=False)
-            return ScheduleDecision(site_id="aliyun", preferred_miss=False)
+            return ScheduleDecision(site_id="site-cn", preferred_miss=False)
 
         def site_ids(self):
-            return ["aliyun", "vultr"]
+            return ["site-cn", "site-eu"]
 
         async def request(self, site_id, op, **kw):
-            client = cn if site_id == "aliyun" else eu
+            client = cn if site_id == "site-cn" else eu
             return await client.request(op, **kw)
 
     import tempfile
@@ -375,11 +375,11 @@ async def test_probe_failsover_off_partitioned_site(db, pepper_file):
     view = await reg.probe(sid, "test")
     assert any(t["name"] == "t" for t in view["tools"])
     assert cn.calls == 1 and eu.calls == 1
-    # First pick had no exclusions; after aliyun crash the retry excluded it.
+    # First pick had no exclusions; after site-cn crash the retry excluded it.
     assert frozenset() in picks
-    assert any("aliyun" in ex for ex in picks)
-    # Crash was attributed so future picks/invokes avoid aliyun (threshold=2 needs
+    assert any("site-cn" in ex for ex in picks)
+    # Crash was attributed so future picks/invokes avoid site-cn (threshold=2 needs
     # one more strike — in-probe already succeeded, so streak is 1).
     assert await reg.unhealthy_sites(sid) == set()
-    await reg.record_outcome(sid, "upstream_crash", site_id="aliyun")
-    assert await reg.unhealthy_sites(sid) == {"aliyun"}
+    await reg.record_outcome(sid, "upstream_crash", site_id="site-cn")
+    assert await reg.unhealthy_sites(sid) == {"site-cn"}

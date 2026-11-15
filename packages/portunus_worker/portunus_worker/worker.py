@@ -44,6 +44,7 @@ def _standalone_activities():
         oauth_acts.list_oauth_refresh_plan,
         oauth_acts.refresh_oauth,
         oauth_acts.mark_auth_required,
+        probe_acts.list_probe_plan,
         probe_acts.ensure_full_grants,
         probe_acts.start_connect_children,
         fleet_acts.sync_skills_host,

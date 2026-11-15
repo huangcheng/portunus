@@ -73,7 +73,14 @@ for host in "$@"; do
 import json
 import os
 shim = '$SHIM_DIR/shim'
-for p in ('/opt/stacks/portunus/runner-policy.json', '/opt/stacks/portunus/deploy/runner-policy.json'):
+for p in (
+    os.environ.get('PORTUNUS_POLICY', ''),
+    '/etc/portunus/runner-policy.json',
+    '/app/deploy/runner-policy.json',
+    'deploy/runner-policy.json',
+):
+    if not p:
+        continue
     try:
         with open(p) as f:
             d = json.load(f)

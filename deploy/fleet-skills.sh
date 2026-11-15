@@ -6,7 +6,7 @@
 #
 # Usage:
 #   deploy/fleet-skills.sh [--from DIR] [--also-rclone] host [host ...]
-#   PORTUNUS_FLEET_HOSTS="tencent contabo aliyun" deploy/fleet-skills.sh
+#   PORTUNUS_FLEET_HOSTS="runner-a runner-b" deploy/fleet-skills.sh
 #
 # --from DIR  Source of skill trees (default: /var/lib/portunus/skills if it
 #             contains at least one tree, else <repo>/third_party).
@@ -14,7 +14,7 @@
 #             --also-rclone) is rsynced to $host:/var/lib/portunus/skills/<name>/.
 #
 # Typical (ops host that already has production trees):
-#   deploy/fleet-skills.sh tencent contabo aliyun
+#   deploy/fleet-skills.sh runner-a runner-b
 #
 # After sync, verifies a known entrypoint when present and ensures skill-state
 # dirs exist (empty shells only — never wipe tokens). Options must precede hosts.
@@ -63,7 +63,7 @@ if [[ ${#HOSTS[@]} -eq 0 && -n "${PORTUNUS_FLEET_HOSTS:-}" ]]; then
 fi
 [[ ${#HOSTS[@]} -gt 0 ]] || {
   echo "usage: $0 [--from DIR] [--also-rclone] host [host ...]" >&2
-  echo "   or: PORTUNUS_FLEET_HOSTS=\"tencent contabo aliyun\" $0" >&2
+  echo "   or: PORTUNUS_FLEET_HOSTS=\"runner-a runner-b\" $0" >&2
   exit 2
 }
 for h in "${HOSTS[@]}"; do

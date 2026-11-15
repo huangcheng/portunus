@@ -138,15 +138,15 @@ services:
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-portunus-control}
       PORTUNUS_FLEET_HOSTS: ${PORTUNUS_FLEET_HOSTS:-}
-      PORTUNUS_REPO_ROOT: /opt/stacks/portunus
+      PORTUNUS_REPO_ROOT: ${PORTUNUS_REPO_ROOT:-/app}
       PORTUNUS_OAUTH_REFRESH_SKEW_S: ${PORTUNUS_OAUTH_REFRESH_SKEW_S:-300}
       PORTUNUS_PROBE_INTERVAL_S: ${PORTUNUS_PROBE_INTERVAL_S:-900}
     volumes:
       - run:/run/portunus
       - data:/var/lib/portunus
       - ./deploy/runner-policy.json:/etc/portunus/runner-policy.json:ro
-      - ./deploy:/opt/stacks/portunus/deploy:ro
-      - ./third_party:/opt/stacks/portunus/third_party:ro
+      - ./deploy:/app/deploy:ro
+      - ./third_party:/app/third_party:ro
     secrets: [pepper, runner_token]
 
 volumes:

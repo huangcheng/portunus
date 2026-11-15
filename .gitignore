@@ -35,6 +35,10 @@ docker-compose.gateway.yml
 
 # Local ops / personal automation (never commit)
 inventory/
+scripts/_*.sh
+scripts/_*.py
+deploy/docker-compose.*.local.yml
+
 *.pem
 *.key
 id_rsa*

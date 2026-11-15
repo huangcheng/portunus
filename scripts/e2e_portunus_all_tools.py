@@ -2,7 +2,7 @@
 """E2E: call every Portunus meta tool and every granted upstream tool once.
 
 Usage:
-  PORTUNUS_MCP_URL=https://portunus.wuhan.dev/mcp \\
+  PORTUNUS_MCP_URL=https://portunus.example.com/mcp \\
   PORTUNUS_MCP_TOKEN=pm-... \\
   gateway/.venv/bin/python scripts/e2e_portunus_all_tools.py
 """
@@ -20,7 +20,7 @@ import httpx
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
-URL = os.environ.get("PORTUNUS_MCP_URL", "https://portunus.wuhan.dev/mcp")
+URL = os.environ.get("PORTUNUS_MCP_URL", "http://127.0.0.1:8080/mcp")
 TOKEN = os.environ.get("PORTUNUS_MCP_TOKEN", "")
 TIMEOUT_S = float(os.environ.get("PORTUNUS_E2E_TIMEOUT", "120"))
 INVOKE_TIMEOUT_S = float(os.environ.get("PORTUNUS_E2E_INVOKE_TIMEOUT", "60"))

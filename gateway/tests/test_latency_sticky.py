@@ -98,13 +98,13 @@ async def test_start_payload_and_server_view_expose_sticky(db, pepper_file, monk
                 enabled=True,
                 command="python",
                 args=["-m", "portunus_skill_bridge", "--manifest-env", "PORTUNUS_MANIFEST"],
-                preferred_site_id="cn-aliyun",
+                preferred_site_id="site-cn",
             )
         )
         s.add(
             SiteHealth(
                 server_id=sid,
-                site_id="cn-aliyun",
+                site_id="site-cn",
                 ewma_upstream_ms=55.0,
                 sample_count=3,
             )
@@ -113,9 +113,9 @@ async def test_start_payload_and_server_view_expose_sticky(db, pepper_file, monk
         server = await s.get(Server, sid)
         assert server is not None
         view = server_view(server, [])
-    assert view["preferred_site_id"] == "cn-aliyun"
+    assert view["preferred_site_id"] == "site-cn"
     start = await reg.start_payload(sid)
-    assert start["sticky_site_id"] == "cn-aliyun"
+    assert start["sticky_site_id"] == "site-cn"
     rows = await reg.list_site_health()
     mine = next(x for x in rows if x["server_id"] == str(sid))
     assert mine["sticky"] is True and mine["ewma_upstream_ms"] == pytest.approx(55.0)
@@ -125,8 +125,8 @@ async def test_skill_auth_login_sets_preferred_site_logout_clears(db, pepper_fil
     monkeypatch.setattr("portunus_shared.argv.which", lambda c, path=None: f"/usr/bin/{c}")
     vault = Vault({1: os.urandom(32)})
     pool = RunnerPool([])
-    pool.pick = lambda *a, **k: ScheduleDecision(site_id="cn-aliyun", preferred_miss=False)  # type: ignore[method-assign]
-    pool.is_connected = lambda site: site == "cn-aliyun"  # type: ignore[method-assign]
+    pool.pick = lambda *a, **k: ScheduleDecision(site_id="site-cn", preferred_miss=False)  # type: ignore[method-assign]
+    pool.is_connected = lambda site: site == "site-cn"  # type: ignore[method-assign]
     pool.request = AsyncMock(  # type: ignore[method-assign]
         return_value={"logged_in": True, "result": {"data": {"logged_in": True}}}
     )
@@ -177,10 +177,10 @@ async def test_skill_auth_login_sets_preferred_site_logout_clears(db, pepper_fil
     async with async_session() as s:
         server = await s.get(Server, sid)
         assert server is not None
-        assert server.preferred_site_id == "cn-aliyun"
+        assert server.preferred_site_id == "site-cn"
 
     start = await reg.start_payload(sid)
-    assert start["sticky_site_id"] == "cn-aliyun"
+    assert start["sticky_site_id"] == "site-cn"
 
     pool.request = AsyncMock(return_value={"logged_in": False, "result": {}})  # type: ignore[method-assign]
     await reg.skill_auth(sid, "logout", "op")

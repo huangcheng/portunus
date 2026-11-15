@@ -7,7 +7,7 @@
 
 ## 1. Problem
 
-A read-only probe of `portunus.wuhan.dev/mcp` showed:
+A read-only probe of a production `/mcp` endpoint showed:
 
 - Quark is unusable: upstream agent-environment gate (`-104`); re-auth does not help.
 - Dropbox / PikPak need OAuth reconnect (ops).

@@ -340,9 +340,9 @@ def create_gateway_app() -> FastAPI:
         probe_worker_task: asyncio.Task | None = None
         try:
             from portunus_worker.client import (
-                ensure_enabled_server_probes,
                 ensure_fleet_skills_schedule,
                 ensure_oauth_refresh_workflow,
+                ensure_server_probe_workflow,
             )
             from portunus_worker.runtime import bind_gateway_registry
             from portunus_worker.worker import run_embedded_probe_worker
@@ -365,7 +365,7 @@ def create_gateway_app() -> FastAPI:
             probe_worker_task.add_done_callback(_probe_worker_done)
             await ensure_fleet_skills_schedule()
             await ensure_oauth_refresh_workflow()
-            await ensure_enabled_server_probes()
+            await ensure_server_probe_workflow()
         except Exception:  # noqa: BLE001 — Temporal optional
             log.exception("temporal fleet/probe bootstrap skipped")
         try:

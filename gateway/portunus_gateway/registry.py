@@ -877,6 +877,12 @@ class Registry:
         if kind not in ("stdio", "remote"):
             raise RegistryError(400, "unsupported", f"server kind {kind!r} is not supported")
         regions = validate_regions(preferred_regions or [])
+        if not regions:
+            # Catalog overseas-egress seeds default to preferred_regions=["overseas"]
+            # (operators tag matching runners via PORTUNUS_REGIONS — no hostnames baked in).
+            from .catalog import preferred_regions_for_slug
+
+            regions = validate_regions(preferred_regions_for_slug(slug))
         try:
             oauth_cfg = validate_oauth_config(oauth)
         except OAuthError as e:
@@ -1490,8 +1496,8 @@ class Registry:
             assert command is not None
             timeout_s = self.probe_timeout_s
             # Probes are ephemeral — no preferred_site_id hard pin. Use learned
-            # site health + in-probe failover so a CN partition (aliyun) does not
-            # block discovery when an overseas runner can reach the vendor.
+            # site health + in-probe failover so a partitioned site does not
+            # block discovery when another runner can reach the vendor.
             excluded = await self.unhealthy_sites(server_id)
             live = {i.site_id for i in self.pool.connected()}
             all_marked = bool(live) and live <= excluded

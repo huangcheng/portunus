@@ -1,15 +1,15 @@
 # iDrive Cloud Drive (not E2)
 
-Status: **not shipped as a Portunus catalog app yet**. Contabo already runs the
+Status: **not shipped as a Portunus catalog app yet**. Some VPS images ship the
 vendor Cloud Drive sync stack; Portunus still lacks a headless, fleet-wide
 file API to wrap.
 
-## Contabo facts (re-checked 2026-11-15)
+## Vendor CLI facts (re-checked 2026-11-15 on a Linux install)
 
 | Piece | Path / unit | Notes |
 |---|---|---|
 | Official Linux CLI | `/opt/IDriveForLinux` **v3.16.0**, `/usr/local/bin/idrive` | Interactive menu |
-| **Menu 12 — Cloud drive** | `menu_cloud_drive` | Present in the CLI (and in your screenshot). Older Contabo note claiming “no Cloud Drive entry” was **wrong** for this build. |
+| **Menu 12 — Cloud drive** | `menu_cloud_drive` | Present in the CLI. Older notes claiming “no Cloud Drive entry” were **wrong** for this build. |
 | What 12 does | launches Electron `cloud-drive` + stores a Cloud Drive session | Not a browsable JSON/file MCP; sets up sync |
 | Sync root | `/root/Cloud-Drive` | Local mirror after daemon is up |
 | Daemon | `idrive-clouddrive.service` → `cloud-drive … run-daemon` | Host-local continuous sync |
@@ -23,8 +23,8 @@ not a stub label.
 
 1. Menu 12 is **interactive** (login / encryption key / confirmations). No
    documented headless token paste for Cloud Drive (unlike rclone remotes).
-2. After setup, agents would only see a **local folder on Contabo**, not a
-   remote drive reachable from vultr/tencent runners.
+2. After setup, agents would only see a **local folder on that host**, not a
+   remote drive reachable from other fleet runners.
 3. Personal Cloud Drive still has **no official rclone backend / WebDAV**;
    **E2** remains a different S3 product (out of scope).
 

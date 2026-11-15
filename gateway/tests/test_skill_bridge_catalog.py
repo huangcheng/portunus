@@ -151,3 +151,15 @@ def test_rclone_drive_seeds_shape():
         assert entry["name"] == "RCLONE_REMOTE_CONFIG"
         assert entry["multiline"] is True
         assert entry["secret"] is True
+
+
+def test_overseas_preferred_regions_for_rclone_slugs():
+    from portunus_gateway.catalog import (
+        OVERSEAS_PREFERRED_REGIONS,
+        preferred_regions_for_slug,
+    )
+
+    for slug in ("yandex", "drime", "box", "onedrive", "Yandex"):
+        assert preferred_regions_for_slug(slug) == OVERSEAS_PREFERRED_REGIONS
+    assert preferred_regions_for_slug("guangyapan") == []
+    assert preferred_regions_for_slug("") == []

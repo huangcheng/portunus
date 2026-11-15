@@ -80,7 +80,15 @@ def legacy_oauth_refresh_id(server_id: uuid.UUID) -> str:
     return f"oauth-refresh:{server_id}"
 
 
-def server_probe_id(server_id: uuid.UUID) -> str:
+def server_probe_id() -> str:
+    """Fixed workflow id for the shared server probe scheduler."""
+    from .workflows.server_probe import shared_workflow_id
+
+    return shared_workflow_id()
+
+
+def legacy_server_probe_id(server_id: uuid.UUID) -> str:
+    """Pre-shared per-server workflow id (terminate on boot)."""
     return f"server-probe:{server_id}"
 
 
@@ -160,75 +168,72 @@ async def signal_oauth_tokens_stored(
         log.debug("oauth refresh kick after ensure failed", exc_info=True)
 
 
-async def start_server_probe(server_id: uuid.UUID) -> None:
-    """Ensure the long-running ServerProbeWorkflow exists (idempotent)."""
+async def ensure_server_probe_workflow() -> None:
+    """Start the shared server-probe scheduler and retire per-server legacy workflows."""
     client = await _client()
     if client is None:
         return
     from .workflows.server_probe import ServerProbeWorkflow
 
-    wid = server_probe_id(server_id)
+    wid = server_probe_id()
     try:
         await client.start_workflow(
             ServerProbeWorkflow.run,
-            args=[str(server_id)],
             id=wid,
             task_queue=temporal_task_queue(),
         )
+        log.info("started shared ServerProbeWorkflow id=%s", wid)
     except Exception:  # noqa: BLE001 — already running is fine
-        log.debug("server probe start skipped", exc_info=True)
+        log.debug("shared server probe already running", exc_info=True)
+
+    try:
+        async for wf in client.list_workflows(
+            query='WorkflowType = "ServerProbeWorkflow" AND ExecutionStatus = "Running"'
+        ):
+            if wf.id == wid:
+                continue
+            if not wf.id.startswith("server-probe:"):
+                continue
+            try:
+                await client.get_workflow_handle(wf.id).terminate(
+                    reason="replaced by shared server-probe workflow"
+                )
+                log.info("terminated legacy ServerProbeWorkflow id=%s", wf.id)
+            except Exception:  # noqa: BLE001
+                log.debug("legacy probe terminate skipped id=%s", wf.id, exc_info=True)
+    except Exception:  # noqa: BLE001
+        log.debug("legacy server probe sweep skipped", exc_info=True)
+
+
+async def start_server_probe(server_id: uuid.UUID) -> None:
+    """Ensure shared probe workflow; prioritize this server on the next wave."""
+    await request_server_probe(server_id, immediate=True)
 
 
 async def request_server_probe(server_id: uuid.UUID, *, immediate: bool = True) -> None:
-    """Start ServerProbeWorkflow if needed; optionally signal probe_now to skip the wait."""
+    """Ensure shared ServerProbeWorkflow; optionally probe_now(server_id)."""
     client = await _client()
     if client is None:
         return
     from .workflows.server_probe import ServerProbeWorkflow
 
-    wid = server_probe_id(server_id)
-    handle = client.get_workflow_handle(wid)
-    started = False
+    wid = server_probe_id()
+    await ensure_server_probe_workflow()
+    if not immediate:
+        return
     try:
-        await handle.describe()
-    except Exception:  # noqa: BLE001 — not running yet
-        try:
-            await client.start_workflow(
-                ServerProbeWorkflow.run,
-                args=[str(server_id)],
-                id=wid,
-                task_queue=temporal_task_queue(),
-            )
-            started = True
-        except Exception:  # noqa: BLE001 — race with another starter
-            log.debug("server probe start race", exc_info=True)
-    if immediate and not started:
-        # Fresh start already probes on entry; only signal when waking a sleeper.
-        try:
-            await handle.signal(ServerProbeWorkflow.probe_now)
-        except Exception:  # noqa: BLE001
-            log.debug("server probe_now signal skipped", exc_info=True)
-    elif immediate and started:
-        pass
+        await client.get_workflow_handle(wid).signal(
+            ServerProbeWorkflow.probe_now, args=[str(server_id)]
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("server probe_now signal skipped server=%s", server_id, exc_info=True)
 
 
 async def ensure_enabled_server_probes() -> int:
-    """Start ServerProbeWorkflow for every enabled server (gateway boot / reconnect)."""
-    client = await _client()
-    if client is None:
-        return 0
-    from sqlalchemy import select
-
-    from portunus_gateway.db.models import Server
-    from portunus_gateway.db.session import async_session
-
-    async with async_session() as s:
-        rows = (await s.execute(select(Server.id).where(Server.enabled.is_(True)))).all()
-    ids = [row[0] for row in rows]
-    for sid in ids:
-        await start_server_probe(sid)
-    log.info("ensured ServerProbeWorkflow for %d enabled server(s)", len(ids))
-    return len(ids)
+    """Boot helper: ensure shared probe workflow (legacy name kept for call sites)."""
+    await ensure_server_probe_workflow()
+    log.info("ensured shared ServerProbeWorkflow id=%s", server_probe_id())
+    return 1
 
 
 async def start_connect_ensure(server_id: uuid.UUID, *, wait_oauth: bool = False) -> str | None:

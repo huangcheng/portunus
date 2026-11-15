@@ -7,7 +7,7 @@ Temporal control-plane worker for Portunus.
 | ID pattern | Purpose |
 |---|---|
 | `oauth-refresh` | Shared proactive OAuth refresher (one workflow; per-server refresh is an activity so one bad provider cannot stall the queue; `kick` after tokens stored; gateway boot ensures it and terminates legacy `oauth-refresh:{uuid}`) |
-| `server-probe:{server_id}` | Periodic active probe (gateway boot ensures one per enabled server; `probe_now` wakes early). The `probe_server` activity runs **inside the gateway** so it shares the sole-client RunnerPool; workflows stay on `portunus-worker`. |
+| `server-probe` | Shared active-probe scheduler (one workflow; `list_probe_plan` then per-server `probe_server` on `portunus-probe` inside the gateway sole-client pool; `probe_now(server_id)` prioritizes; boot terminates legacy `server-probe:{uuid}`). Site pick uses portable `preferred_regions` (e.g. `overseas`) + SiteHealth failover in `Registry.probe`. |
 | `connect-ensure:{server_id}` | Connect → probe → enable → start children |
 | `fleet-skills-sync:*` | Fleet skill-tree rsync (`deploy/fleet-skills.sh`) |
 

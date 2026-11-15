@@ -1,6 +1,6 @@
 # Deploy and verify checklist
 
-Hosts in this fleet (adjust if inventory changes): gateway on `vultr`; runners on `vultr`, `tencent`, `contabo`. Prefer existing SSH host aliases.
+Use your own SSH host aliases / inventory. Below, `$GATEWAY` is the host that runs the gateway container; `$RUNNERS` is a space-separated list of runner hosts. Overlay paths are wherever you bind-mount the repo (often next to your compose files).
 
 ## Sync code
 
@@ -8,21 +8,25 @@ Gateway (bind-mounted overlays + packaged skill_bridge inside the container):
 
 ```bash
 ROOT=/path/to/portunus
-rsync -az --exclude '__pycache__' --exclude '*.pyc' \
-  "$ROOT/gateway/portunus_gateway/" vultr:/opt/stacks/portunus/gateway/portunus_gateway/
-rsync -az --exclude '__pycache__' --exclude '*.pyc' --exclude '.venv' --exclude 'tests' \
-  "$ROOT/packages/portunus_skill_bridge/" vultr:/opt/stacks/portunus/packages/portunus_skill_bridge/
-rsync -az --delete "$ROOT/dashboard/dist/" vultr:/opt/stacks/portunus/dashboard/dist/
+GATEWAY=your-gateway-host
+STACK=/path/on/remote/to/portunus   # remote compose / overlay root
 
-ssh vultr 'docker cp /opt/stacks/portunus/packages/portunus_skill_bridge/. \
+rsync -az --exclude '__pycache__' --exclude '*.pyc' \
+  "$ROOT/gateway/portunus_gateway/" "$GATEWAY:$STACK/gateway/portunus_gateway/"
+rsync -az --exclude '__pycache__' --exclude '*.pyc' --exclude '.venv' --exclude 'tests' \
+  "$ROOT/packages/portunus_skill_bridge/" "$GATEWAY:$STACK/packages/portunus_skill_bridge/"
+rsync -az --delete "$ROOT/dashboard/dist/" "$GATEWAY:$STACK/dashboard/dist/"
+
+ssh "$GATEWAY" "docker cp $STACK/packages/portunus_skill_bridge/. \
   portunus-portunus-1:/app/packages/portunus_skill_bridge/
-  docker restart portunus-portunus-1'
+  docker restart portunus-portunus-1"
 ```
 
 Runners (**required** after any `portunus_skill_bridge` or `session.py` change):
 
 ```bash
-for site in vultr tencent contabo; do
+RUNNERS="runner-a runner-b"   # your SSH aliases
+for site in $RUNNERS; do
   rsync -az --exclude '__pycache__' --exclude '*.pyc' --exclude '.venv' --exclude 'tests' \
     "$ROOT/packages/portunus_skill_bridge/" "$site:/tmp/portunus-patch/skill_bridge/"
   # plus session.py / skill tree as needed
