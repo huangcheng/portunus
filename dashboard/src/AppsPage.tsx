@@ -982,22 +982,8 @@ function OAuthManagePanel({
 }
 
 function skillBridgeSecretDefs(app: SkillBridgeApp): { name: string; label: string; secret: boolean }[] {
-  const raw = app.spec.secrets;
-  if (!Array.isArray(raw)) return [];
-  const out: { name: string; label: string; secret: boolean }[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== "object") continue;
-    const name = (item as { name?: unknown }).name;
-    if (typeof name !== "string" || !name.trim()) continue;
-    const label = (item as { label?: unknown }).label;
-    const secret = (item as { secret?: unknown }).secret;
-    out.push({
-      name: name.trim(),
-      label: typeof label === "string" && label.trim() ? label.trim() : name.trim(),
-      secret: secret !== false,
-    });
-  }
-  return out;
+  // Shared with CatalogConfigForm via parseEnvRows (bare strings + {name,label,secret}).
+  return parseEnvRows(app.spec.secrets).map(({ name, label, secret }) => ({ name, label, secret }));
 }
 
 function skillBridgeEnvDefaults(app: SkillBridgeApp): Record<string, string> {
@@ -1841,6 +1827,17 @@ function StdioManagePanel({
                 guide
               </a>
               ).
+            </>
+          ) : null}
+          {app.slug === "mega" ? (
+            <>
+              <br />
+              Paste the full output of <code>rclone config show mega</code> (obscured{" "}
+              <code>pass</code> is fine). Docs:{" "}
+              <a href="https://rclone.org/mega/" target="_blank" rel="noreferrer">
+                rclone.org/mega
+              </a>
+              .
             </>
           ) : null}
         </p>

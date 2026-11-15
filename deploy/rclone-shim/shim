@@ -25,6 +25,7 @@ Security posture:
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import os
 import secrets
@@ -41,9 +42,20 @@ from pathlib import Path
 from typing import NoReturn
 
 MCP_PACKAGE = "webdav-mcp-server@1.0.4"
-READY_TIMEOUT_S = 20.0
+READY_TIMEOUT_S = 45.0
 STOP_GRACE_S = 5.0
 VFS_CACHE_MAX_SIZE = "2G"
+# Bump when config normalization changes so digest-keyed conf files rebuild
+# instead of reusing a cached paste that rclone cannot read (e.g. plaintext pass).
+CONF_DIGEST_VERSION = "2"
+# rclone Password-typed keys: config files store the obscured form; Connect pastes
+# often contain the human password instead.
+# rclone Password-typed option names on ALLOWED_BACKENDS. Do NOT include OAuth
+# ``token`` JSON blobs or MEGA session fields — those are not Password-typed and
+# must not be run through obscure.
+PASSWORD_KEYS = frozenset(
+    {"pass", "password", "password2", "key_file_pass", "secret_key", "key"}
+)
 # Only cloud-storage backends: ``local``/``alias``/``union``/``crypt`` would turn
 # the runner filesystem (cwd "/") into a WebDAV share for the agent.
 ALLOWED_BACKENDS = frozenset(
@@ -59,6 +71,7 @@ ALLOWED_BACKENDS = frozenset(
         "sftp",
         "yandex",
         "drime",
+        "mega",
     }
 )
 # Env the npm-installed MCP child may inherit — never RCLONE_REMOTE_CONFIG.
@@ -118,6 +131,78 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+def ensure_obscured(rclone: Path, value: str) -> str:
+    """Return an rclone-obscured password; pass through values already obscured.
+
+    Connect pastes often include the login password in plaintext. rclone's
+    config reader always runs Reveal on Password-typed keys and fails with
+    ``input too short when revealing password`` on plaintext — which aborts
+    the connector before session_id/master_key (MEGA) can be tried.
+
+    ``rclone reveal`` succeeds for any base64url blob that decodes to ≥16 bytes
+    (random IV + AES-CTR), so exit status alone is not proof the value was
+    produced by ``obscure``. Require the revealed plaintext to be printable
+    UTF-8; otherwise treat the paste as plaintext and obscure it. ``obscure``
+    reads the password on stdin (``-``) so it never appears on argv;
+    ``reveal`` still takes an argument (rclone has no stdin form) — brief
+    /proc cmdline exposure of an already-obscured blob only.
+    """
+    if not value:
+        return value
+
+    def _run(*argv: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                [str(rclone), *argv],
+                input=input_text,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            fail(f"cannot obscure password field for rclone config ({type(e).__name__})")
+
+    # Obscured values are unpadded base64url decoding to ≥16 bytes (IV + ciphertext).
+    # Anything else is plaintext — obscure via stdin so the password never hits argv.
+    candidate = False
+    try:
+        pad = "=" * (-len(value) % 4)
+        raw = base64.urlsafe_b64decode(value + pad)
+        candidate = len(raw) >= 16 and all(
+            c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+            for c in value
+        )
+    except (ValueError, binascii.Error):
+        candidate = False
+    if candidate:
+        revealed = _run("reveal", "--", value)
+        plain = revealed.stdout.strip() if revealed.returncode == 0 else ""
+        if plain and plain.isprintable() and "\ufffd" not in plain:
+            return value
+    obscured = _run("obscure", "-", input_text=value + "\n")
+    if obscured.returncode != 0 or not obscured.stdout.strip():
+        fail("cannot obscure password field for rclone config")
+    return obscured.stdout.strip()
+
+
+def normalize_config(cfg: dict[str, str], rclone: Path) -> dict[str, str]:
+    """Rewrite operator paste into a form rclone can load from a conf file."""
+    out = dict(cfg)
+    backend = out["type"].lower()
+    # MEGA: a durable session_id+master_key is preferred over pass+2fa. A
+    # plaintext pass in the same paste makes rclone fail during Reveal before
+    # it attempts the session; a stale TOTP 2fa is useless once a session exists.
+    if backend == "mega" and out.get("session_id") and out.get("master_key"):
+        out.pop("pass", None)
+        out.pop("2fa", None)
+    for key in PASSWORD_KEYS:
+        if key in out and out[key]:
+            out[key] = ensure_obscured(rclone, out[key])
+    return out
+
+
 def main() -> None:
     raw = os.environ.get("RCLONE_REMOTE_CONFIG", "")
     if not raw.strip():
@@ -135,6 +220,8 @@ def main() -> None:
     rclone = here / "rclone"
     if not rclone.is_file():
         fail(f"rclone binary missing at {rclone}")
+
+    cfg = normalize_config(cfg, rclone)
 
     port = free_port()
     user = "p" + secrets.token_urlsafe(12)
@@ -156,7 +243,9 @@ def main() -> None:
     state_dir = Path(here).parent.parent / "skill-state" / "rclone"
     state_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(state_dir, 0o700)
-    digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    digest = hashlib.sha256(
+        f"v{CONF_DIGEST_VERSION}\0".encode() + raw.encode()
+    ).hexdigest()[:16]
     conf_file = state_dir / f"rclone-{digest}.conf"
     if conf_file.exists():
         os.utime(conf_file)  # live connector: keep the 30-day prune away

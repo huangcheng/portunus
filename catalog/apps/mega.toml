@@ -1,0 +1,18 @@
+slug = "mega"
+label = "MEGA"
+description = "MEGA cloud storage via rclone (paste `rclone config show mega` — prefer session_id+master_key; user/pass also works)."
+connection = "stdio"
+popular = true
+categories = ["Storage"]
+tags = ["mega", "files", "storage", "rclone"]
+sort_order = 39
+
+[spec]
+command = "/var/lib/portunus/skills/rclone-shim/shim"
+args = []
+
+[[spec.env]]
+name = "RCLONE_REMOTE_CONFIG"
+label = "rclone remote config — `rclone config show mega` (prefer session_id+master_key; user/pass ok)"
+secret = true
+multiline = true

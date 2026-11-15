@@ -17,6 +17,7 @@ export type AppIconId =
   | "onedrive"
   | "yandex"
   | "drime"
+  | "mega"
   | "flomo"
   | "dida365"
   | "ardot"
@@ -42,6 +43,7 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "onedrive") return "onedrive";
   if (slug === "yandex") return "yandex";
   if (slug === "drime") return "drime";
+  if (slug === "mega") return "mega";
   if (slug === "flomo") return "flomo";
   if (slug === "dida365" || slug === "ticktick") return "dida365";
   if (slug === "ardot") return "ardot";
@@ -68,6 +70,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   onedrive: "onedrive.svg",
   yandex: "yandex.png",
   drime: "drime.png",
+  mega: "mega.svg",
   flomo: "flomo.png",
   dida365: "dida365.png",
   weread: "weread.png",
@@ -77,9 +80,9 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   cubox: "cubox.png",
   github: "github.svg",
   cloudflare: "cloudflare.svg",
-  youdaonote: "youdaonote.svg",
+  youdaonote: "youdaonote.png",
   ima: "ima.svg",
-  weknora: "weknora.svg",
+  weknora: "weknora.png",
   pikpak: "pikpak.png",
 };
 

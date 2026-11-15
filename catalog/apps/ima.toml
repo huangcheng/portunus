@@ -9,4 +9,13 @@ sort_order = 74
 
 [spec]
 manifest = "ima.example.yaml"
-secrets = ["IMA_OPENAPI_CLIENTID", "IMA_OPENAPI_APIKEY"]
+
+[[spec.secrets]]
+name = "IMA_OPENAPI_CLIENTID"
+label = "IMA Client ID"
+secret = true
+
+[[spec.secrets]]
+name = "IMA_OPENAPI_APIKEY"
+label = "IMA API Key"
+secret = true

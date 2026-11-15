@@ -34,7 +34,7 @@ WEBDAV_MCP_ARGS = ["-y", "--ignore-scripts", WEBDAV_MCP_PACKAGE]
 # still fails over on network errors among healthy sites.
 OVERSEAS_PREFERRED_REGIONS = ["overseas"]
 OVERSEAS_EGRESS_SLUGS = frozenset(
-    {"yandex", "drime", "box", "onedrive", "raindrop", "github", "cloudflare"}
+    {"yandex", "drime", "box", "onedrive", "mega", "raindrop", "github", "cloudflare"}
 )
 
 
@@ -495,6 +495,35 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "label": (
                         "rclone remote config — run `rclone config show drime` "
                         "(type=drime + access_token from Drime Settings → Developers)"
+                    ),
+                    "secret": True,
+                    "multiline": True,
+                },
+            ],
+        },
+    },
+    {
+        "slug": "mega",
+        "label": "MEGA",
+        "name": "MEGA",
+        "description": (
+            "MEGA cloud storage via rclone (paste `rclone config show mega` — prefer "
+            "session_id+master_key; user/pass also works)."
+        ),
+        "connection": "stdio",
+        "popular": True,
+        "categories": ["Storage"],
+        "tags": ["mega", "files", "storage", "rclone"],
+        "sort_order": 39,
+        "spec": {
+            "command": RCLONE_SHIM,
+            "args": [],
+            "env": [
+                {
+                    "name": "RCLONE_REMOTE_CONFIG",
+                    "label": (
+                        "rclone remote config — `rclone config show mega` "
+                        "(prefer session_id+master_key; user/pass ok)"
                     ),
                     "secret": True,
                     "multiline": True,

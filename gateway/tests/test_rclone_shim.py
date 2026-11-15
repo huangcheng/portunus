@@ -62,6 +62,7 @@ def test_control_chars_fail():
 def test_backend_allowlist():
     assert "box" in shim.ALLOWED_BACKENDS and "onedrive" in shim.ALLOWED_BACKENDS
     assert "yandex" in shim.ALLOWED_BACKENDS and "drime" in shim.ALLOWED_BACKENDS
+    assert "mega" in shim.ALLOWED_BACKENDS
     assert "local" not in shim.ALLOWED_BACKENDS and "alias" not in shim.ALLOWED_BACKENDS
 
 
@@ -98,3 +99,89 @@ def test_multiline_value_write_reencodes(tmp_path):
     enc = "base64;" + base64.b64encode(multiline.encode()).decode()
     cfg = shim.parse_config(f"type = box\nkey = {enc}\n")
     assert cfg["key"] == multiline
+
+
+def test_mega_session_drops_pass_and_2fa(monkeypatch, tmp_path):
+    """session_id+master_key wins; plaintext pass must not reach the conf file."""
+    rclone = tmp_path / "rclone"
+    rclone.write_text("#!/bin/sh\n")
+
+    def _no_obscure(*_a, **_k):  # pragma: no cover - must not be called
+        raise AssertionError("obscure not needed when session credentials present")
+
+    monkeypatch.setattr(shim, "ensure_obscured", _no_obscure)
+    cfg = shim.normalize_config(
+        {
+            "type": "mega",
+            "user": "u@example.com",
+            "pass": "plaintext",
+            "2fa": "123456",
+            "session_id": "sess",
+            "master_key": "mk==",
+        },
+        rclone,
+    )
+    assert "pass" not in cfg and "2fa" not in cfg
+    assert cfg["session_id"] == "sess" and cfg["master_key"] == "mk=="
+
+
+def test_ensure_obscured_passes_through_when_reveal_ok(monkeypatch, tmp_path):
+    rclone = tmp_path / "rclone"
+    rclone.write_text("#!/bin/sh\n")
+    # 24+ chars of base64url → ≥16 decoded bytes → reveal candidate.
+    blob = "YWFhYWFhYWFhYWFhYWFhYWFhYWE"
+
+    class _R:
+        def __init__(self, code: int, out: str = ""):
+            self.returncode = code
+            self.stdout = out
+
+    def _run(argv, **_k):
+        assert argv[1] == "reveal"
+        return _R(0, "plain\n")
+
+    monkeypatch.setattr(shim.subprocess, "run", _run)
+    assert shim.ensure_obscured(rclone, blob) == blob
+
+
+def test_ensure_obscured_obscures_plaintext(monkeypatch, tmp_path):
+    rclone = tmp_path / "rclone"
+    rclone.write_text("#!/bin/sh\n")
+
+    class _R:
+        def __init__(self, code: int, out: str = ""):
+            self.returncode = code
+            self.stdout = out
+
+    calls: list[str] = []
+
+    def _run(argv, **_k):
+        calls.append(argv[1])
+        assert argv[1] == "obscure" and argv[2] == "-"
+        assert _k.get("input") == "plaintext\n"
+        return _R(0, "OBSCURED\n")
+
+    monkeypatch.setattr(shim.subprocess, "run", _run)
+    # Short non-base64url → skip reveal, obscure via stdin only.
+    assert shim.ensure_obscured(rclone, "plaintext") == "OBSCURED"
+    assert calls == ["obscure"]
+
+
+def test_ensure_obscured_reobscures_nonprintable_reveal(monkeypatch, tmp_path):
+    """reveal can 'succeed' on arbitrary base64url; garbage plaintext → obscure."""
+    rclone = tmp_path / "rclone"
+    rclone.write_text("#!/bin/sh\n")
+    blob = "YWxzb2Jhc2U2NHBhc3N3b3JkMTIz"
+
+    class _R:
+        def __init__(self, code: int, out: str = ""):
+            self.returncode = code
+            self.stdout = out
+
+    def _run(argv, **_k):
+        if argv[1] == "reveal":
+            return _R(0, "\x00\x01bin\n")
+        return _R(0, "OBSCURED\n")
+
+    monkeypatch.setattr(shim.subprocess, "run", _run)
+    assert shim.ensure_obscured(rclone, blob) == "OBSCURED"

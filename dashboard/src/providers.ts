@@ -1,5 +1,7 @@
 /** Apps catalog types + helpers. Catalog rows live in the gateway DB (`GET /api/apps`). */
 
+import { parseEnvRows } from "./envRows";
+
 export const WEBDAV_MCP_PACKAGE = "webdav-mcp-server@1.0.4";
 export const WEBDAV_MCP_ARGS = ["-y", "--ignore-scripts", WEBDAV_MCP_PACKAGE] as const;
 
@@ -116,12 +118,7 @@ export function hasSkillBridgeSecrets(
   server: { env_names: string[]; has_skill_session?: boolean } | null | undefined,
 ): boolean {
   if (!server) return false;
-  const secrets = Array.isArray(app.spec.secrets) ? app.spec.secrets : [];
-  const names = secrets
-    .map((s) => (s && typeof s === "object" && typeof (s as { name?: unknown }).name === "string"
-      ? (s as { name: string }).name
-      : ""))
-    .filter(Boolean);
+  const names = parseEnvRows(app.spec.secrets).map((r) => r.name);
   const have = new Set(server.env_names ?? []);
   if (names.length && !names.every((n) => have.has(n))) return false;
   // Platform login (device_qr / oauth_link) requires SKILL_SESSION.

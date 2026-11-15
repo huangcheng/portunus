@@ -140,6 +140,23 @@ def test_packaged_apps_cover_default_apps() -> None:
     assert not disabled, [(r.slug, r.disable_reasons) for r in disabled]
 
 
+def test_skill_bridge_toml_secrets_are_objects() -> None:
+    """Connect UI needs [{name,label,secret}] — not bare env-name strings."""
+    from portunus_gateway.toml_catalog import load_apps_dir, packaged_apps_dir, recipe_public_view
+
+    loaded = load_apps_dir(packaged_apps_dir())
+    ima = next(r for r in loaded.recipes if r.slug == "ima")
+    secrets = ima.spec.get("secrets")
+    assert isinstance(secrets, list) and secrets
+    assert all(isinstance(s, dict) and s.get("name") for s in secrets)
+    by_name = {s["name"]: s for s in secrets}
+    assert set(by_name) == {"IMA_OPENAPI_CLIENTID", "IMA_OPENAPI_APIKEY"}
+    assert by_name["IMA_OPENAPI_CLIENTID"]["label"] == "IMA Client ID"
+    assert by_name["IMA_OPENAPI_APIKEY"]["label"] == "IMA API Key"
+    view = recipe_public_view(ima, catalog_mode="A", id="ima")
+    assert {s["name"] for s in view["spec"]["secrets"]} == set(by_name)
+
+
 def test_load_apps_dir_shared_install_as_clash(tmp_path: Path) -> None:
     hx_a = "a" * 64
     hx_b = "b" * 64

@@ -203,10 +203,10 @@ async def test_auth_none_skill_app_not_flagged_auth_required(db, pepper_file):
 
 
 def test_rclone_drive_seeds_shape():
-    """Box/OneDrive/Yandex/Drime ship as rclone-shim stdio apps with a multiline config paste."""
+    """Box/OneDrive/Yandex/Drime/MEGA ship as rclone-shim stdio apps with a multiline config paste."""
     from portunus_gateway.catalog import DEFAULT_APPS, RCLONE_SHIM, validate_spec
 
-    for slug in ("box", "onedrive", "yandex", "drime"):
+    for slug in ("box", "onedrive", "yandex", "drime", "mega"):
         raw = next(a for a in DEFAULT_APPS if a["slug"] == slug)
         assert raw["connection"] == "stdio"
         spec = validate_spec("stdio", raw["spec"])
@@ -229,6 +229,7 @@ def test_overseas_preferred_regions_for_rclone_slugs():
         "drime",
         "box",
         "onedrive",
+        "mega",
         "raindrop",
         "github",
         "cloudflare",

@@ -38,9 +38,11 @@ async function call<T>(method: string, path: string, body?: unknown, headers: Re
     // so a wrong password stays on the form instead of remounting it.
     // Login, TOTP, passkey, and setup stay on the form. A 401 there is a
     // credential failure, not a dead session.
+    // Only code "unauthorized" means the operator cookie died — upstream MCP
+    // auth_required used to leak as HTTP 401 and falsely logged the console out.
     const publicAuth =
       path === "/auth/setup" || path === "/auth/status" || path.startsWith("/auth/login");
-    if (res.status === 401 && !publicAuth) {
+    if (res.status === 401 && !publicAuth && (data.code ?? "unauthorized") === "unauthorized") {
       csrf = "";
       window.dispatchEvent(new Event("portunus-unauthorized"));
     }

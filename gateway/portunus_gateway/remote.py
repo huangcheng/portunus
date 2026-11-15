@@ -304,6 +304,8 @@ class RemoteClient:
         self, op: Callable[[_Session], Awaitable[Any]], *, timeout_s: float | None = None
     ) -> Any:
         self._parse_start()  # fail fast on malformed URLs before opening anything
+        if _is_classic_sse_url(self.url):
+            return await self._run_classic_sse(op, timeout_s=timeout_s)
         budget = float(self.policy.timeout_s if timeout_s is None else timeout_s)
         try:
             async with asyncio.timeout(budget):
@@ -317,6 +319,45 @@ class RemoteClient:
                     await session.connect()
                     try:
                         return await op(session)
+                    finally:
+                        await session.close()
+        except TimeoutError:
+            raise PortunusError("upstream_timeout", "remote server timed out") from None
+
+    async def _run_classic_sse(
+        self, op: Callable[[_Session], Awaitable[Any]], *, timeout_s: float | None = None
+    ) -> Any:
+        """Legacy MCP SSE (GET /sse + POST /message) — e.g. Youdao Note.
+
+        Streamable HTTP POSTs to the SSE URL 404; responses arrive on the GET
+        event stream while JSON-RPC requests POST to the ``endpoint`` event URL.
+        Two httpx clients share the transport so the open GET does not block POSTs.
+        """
+        budget = float(self.policy.timeout_s if timeout_s is None else timeout_s)
+        limits = httpx.Limits(max_connections=8, max_keepalive_connections=4)
+        timeout = httpx.Timeout(budget, read=max(budget, 60.0))
+        try:
+            async with asyncio.timeout(budget):
+                async with (
+                    httpx.AsyncClient(
+                        transport=self._transport,
+                        follow_redirects=False,
+                        trust_env=False,
+                        timeout=timeout,
+                        limits=limits,
+                    ) as sse_http,
+                    httpx.AsyncClient(
+                        transport=self._transport,
+                        follow_redirects=False,
+                        trust_env=False,
+                        timeout=timeout,
+                        limits=limits,
+                    ) as post_http,
+                ):
+                    session = _ClassicSseSession(self, sse_http, post_http)
+                    try:
+                        await session.connect()
+                        return await op(session)  # type: ignore[arg-type]
                     finally:
                         await session.close()
         except TimeoutError:
@@ -368,9 +409,10 @@ class RemoteClient:
         *,
         body: bytes | None,
         headers: dict[str, str],
+        url: httpx.URL | None = None,
     ) -> tuple[httpx.Response, bytes]:
         """Send with manual, fully re-validated redirects. Returns the final response + body."""
-        url = self._parse_start()
+        url = url if url is not None else self._parse_start()
         hdrs = dict(headers)
         target = await self._target(url, prev=None, start_loopback=None)
         start_loopback = target.loopback
@@ -406,6 +448,8 @@ class RemoteClient:
         target: _Target,
         headers: dict[str, str],
         body: bytes | None,
+        *,
+        stream: bool = False,
     ) -> tuple[httpx.Response, bytes]:
         last: Exception | None = None
         for addr in target.addresses:
@@ -428,6 +472,8 @@ class RemoteClient:
                 continue
             except httpx.HTTPError as e:
                 raise PortunusError("upstream_crash", f"transport error: {type(e).__name__}") from None
+            if stream:
+                return response, b""
             try:
                 data = await self._read_capped(response)
             finally:
@@ -436,6 +482,20 @@ class RemoteClient:
         raise PortunusError(
             "upstream_crash", f"cannot connect: {type(last).__name__ if last else 'no address'}"
         )
+
+    async def open_stream(
+        self,
+        http: httpx.AsyncClient,
+        method: str,
+        *,
+        headers: dict[str, str],
+        url: httpx.URL | None = None,
+    ) -> httpx.Response:
+        """DNS-pinned streaming request (classic SSE GET). Caller must ``aclose``."""
+        url = url if url is not None else self._parse_start()
+        target = await self._target(url, prev=None, start_loopback=None)
+        response, _ = await self._send_pinned(http, method, target, headers, None, stream=True)
+        return response
 
     async def _read_capped(self, response: httpx.Response) -> bytes:
         cap = self.policy.max_response_bytes
@@ -460,6 +520,265 @@ def _mapped_loopback(addr: str) -> bool:
     return isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None and (
         ip.ipv4_mapped.is_loopback
     )
+
+
+def _is_classic_sse_url(url: str) -> bool:
+    """True when the path is the legacy MCP SSE listen URL (…/sse)."""
+    try:
+        path = httpx.URL(url).path.rstrip("/").lower()
+    except (httpx.InvalidURL, ValueError):
+        return False
+    return path.endswith("/sse")
+
+
+class _ClassicSseSession:
+    """Legacy SSE transport: GET event stream + POST to ``endpoint`` URL.
+
+    Compatible with ``_Session.rpc`` so ``list_tools`` / ``call_tool`` stay shared.
+    """
+
+    def __init__(
+        self,
+        client: RemoteClient,
+        sse_http: httpx.AsyncClient,
+        post_http: httpx.AsyncClient,
+    ) -> None:
+        self.c = client
+        self.sse_http = sse_http
+        self.post_http = post_http
+        self.protocol = HANDSHAKE_PROTOCOL_VERSION
+        self.modern = False
+        self._next_id = 0
+        self._endpoint: httpx.URL | None = None
+        self._sse_response: httpx.Response | None = None
+        self._reader: asyncio.Task[None] | None = None
+        self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._endpoint_fut: asyncio.Future[httpx.URL] = asyncio.get_running_loop().create_future()
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "accept": "application/json, text/event-stream",
+            "content-type": "application/json",
+            **self.c._headers,
+        }
+
+    async def connect(self) -> None:
+        sse_headers = {
+            "accept": "text/event-stream",
+            **{k: v for k, v in self.c._headers.items() if k.lower() != "accept"},
+        }
+        response = await self.c.open_stream(self.sse_http, "GET", headers=sse_headers)
+        code = response.status_code
+        if code in (401, 403):
+            await response.aclose()
+            raise PortunusError("auth_required", "remote server requires authorization")
+        if code != 200:
+            body = b""
+            with contextlib.suppress(Exception):
+                body = await self.c._read_capped(response)
+            await response.aclose()
+            log.warning(
+                "remote SSE GET failed status=%s body=%r",
+                code,
+                body[:512].decode("utf-8", "replace"),
+            )
+            raise PortunusError("upstream_crash", f"remote SSE returned HTTP {code}")
+        self._sse_response = response
+        self._reader = asyncio.create_task(self._read_loop(response), name="portunus-sse-reader")
+        try:
+            self._endpoint = await asyncio.wait_for(self._endpoint_fut, timeout=30.0)
+        except TimeoutError:
+            await self.close()
+            raise PortunusError("upstream_timeout", "SSE endpoint event not received") from None
+        # Legacy initialize (Youdao speaks 2024-11-05; skip modern discover).
+        self.protocol = "2024-11-05"
+        result = await self.rpc(
+            "initialize",
+            {
+                "protocolVersion": self.protocol,
+                "capabilities": {},
+                "clientInfo": dict(CLIENT_INFO),
+            },
+        )
+        proto = result.get("protocolVersion")
+        if isinstance(proto, str) and proto:
+            self.protocol = proto
+        await self._post_notify({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def _fail_waiters(self, err: PortunusError) -> None:
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(err)
+        self._pending.clear()
+        if not self._endpoint_fut.done():
+            self._endpoint_fut.set_exception(err)
+
+    async def _read_loop(self, response: httpx.Response) -> None:
+        event = "message"
+        data_lines: list[str] = []
+        event_bytes = 0
+        max_bytes = self.c.policy.max_response_bytes
+        try:
+            async for line in response.aiter_lines():
+                if line.startswith(":"):
+                    continue
+                if line.startswith("event:"):
+                    event = line[6:].strip() or "message"
+                    continue
+                if line.startswith("data:"):
+                    chunk = line[5:].lstrip(" ")
+                    event_bytes += len(chunk.encode("utf-8", "replace"))
+                    if event_bytes > max_bytes:
+                        raise PortunusError("payload_too_large", "SSE event too large")
+                    data_lines.append(chunk)
+                    continue
+                if line != "":
+                    continue
+                data = "\n".join(data_lines)
+                data_lines = []
+                event_bytes = 0
+                ev, event = event, "message"
+                if not data:
+                    continue
+                if ev == "endpoint":
+                    await self._on_endpoint(data.strip())
+                    continue
+                try:
+                    obj = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                mid = obj.get("id")
+                if isinstance(mid, int) and mid in self._pending:
+                    fut = self._pending.pop(mid)
+                    if not fut.done():
+                        fut.set_result(obj)
+        except asyncio.CancelledError:
+            raise
+        except httpx.TimeoutException:
+            self._fail_waiters(PortunusError("upstream_timeout", "SSE read timed out"))
+        except PortunusError as e:
+            self._fail_waiters(e)
+        except Exception as e:  # noqa: BLE001 — surface to waiters
+            self._fail_waiters(PortunusError("upstream_crash", f"SSE read failed: {type(e).__name__}"))
+        else:
+            # Clean EOF with in-flight RPCs: fail fast instead of waiting out rpc timeout.
+            self._fail_waiters(PortunusError("upstream_crash", "SSE stream closed"))
+
+    async def _on_endpoint(self, raw: str) -> None:
+        if self._endpoint_fut.done():
+            return
+        try:
+            base = self.c._parse_start()
+            if raw.startswith("http://") or raw.startswith("https://"):
+                msg = httpx.URL(raw)
+            else:
+                msg = base.join(raw)
+            # Same-origin only — never follow a cross-origin endpoint injection.
+            if (
+                (msg.scheme or "").lower() != (base.scheme or "").lower()
+                or (msg.host or "").lower() != (base.host or "").lower()
+                or msg.port != base.port
+            ):
+                raise PortunusError("upstream_crash", "SSE endpoint changed origin")
+            # Re-validate through SSRF policy.
+            await self.c._target(msg, prev=None, start_loopback=None)
+            self._endpoint_fut.set_result(msg)
+        except Exception as e:  # noqa: BLE001
+            if not self._endpoint_fut.done():
+                self._endpoint_fut.set_exception(e)
+
+    async def _post_notify(self, message: dict[str, Any]) -> None:
+        assert self._endpoint is not None
+        body = json.dumps(message, separators=(",", ":")).encode()
+        response, data = await self.c.send(
+            self.post_http, "POST", body=body, headers=self._headers(), url=self._endpoint
+        )
+        if response.status_code in (401, 403):
+            raise PortunusError("auth_required", "remote server requires authorization")
+        if response.status_code not in (200, 202, 204):
+            raise PortunusError(
+                "upstream_crash", f"remote server returned HTTP {response.status_code}"
+            )
+
+    async def rpc(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        input_schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        del input_schema  # classic SSE has no Mcp-Param mirroring
+        assert self._endpoint is not None
+        self._next_id += 1
+        mid = self._next_id
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._pending[mid] = fut
+        message = {"jsonrpc": "2.0", "id": mid, "method": method, "params": params}
+        body = json.dumps(message, separators=(",", ":")).encode()
+        try:
+            response, data = await self.c.send(
+                self.post_http, "POST", body=body, headers=self._headers(), url=self._endpoint
+            )
+        except Exception:
+            self._pending.pop(mid, None)
+            raise
+        if response.status_code in (401, 403):
+            self._pending.pop(mid, None)
+            raise PortunusError("auth_required", "remote server requires authorization")
+        if response.status_code not in (200, 202, 204):
+            self._pending.pop(mid, None)
+            raise PortunusError(
+                "upstream_crash", f"remote server returned HTTP {response.status_code}"
+            )
+        # Prefer an immediate JSON body; otherwise wait for the SSE frame.
+        if data:
+            try:
+                obj = json.loads(data.decode("utf-8"))
+                if isinstance(obj, dict) and obj.get("id") == mid and (
+                    "result" in obj or "error" in obj
+                ):
+                    self._pending.pop(mid, None)
+                    if "error" in obj:
+                        err = obj["error"] if isinstance(obj["error"], dict) else {}
+                        raise PortunusError(
+                            "upstream_crash", f"upstream JSON-RPC error {err.get('code')}"
+                        )
+                    result = obj.get("result")
+                    if not isinstance(result, dict):
+                        raise PortunusError("upstream_crash", "malformed JSON-RPC result")
+                    return result
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                pass
+        try:
+            msg = await asyncio.wait_for(fut, timeout=min(60.0, float(self.c.policy.timeout_s)))
+        except TimeoutError:
+            self._pending.pop(mid, None)
+            raise PortunusError("upstream_timeout", "SSE response timed out") from None
+        if "error" in msg:
+            err = msg["error"] if isinstance(msg["error"], dict) else {}
+            raise PortunusError("upstream_crash", f"upstream JSON-RPC error {err.get('code')}")
+        result = msg.get("result")
+        if not isinstance(result, dict):
+            raise PortunusError("upstream_crash", "malformed JSON-RPC result")
+        return result
+
+    async def close(self) -> None:
+        if self._reader is not None:
+            self._reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._reader
+            self._reader = None
+        if self._sse_response is not None:
+            with contextlib.suppress(Exception):
+                await self._sse_response.aclose()
+            self._sse_response = None
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
 
 
 class _Session:

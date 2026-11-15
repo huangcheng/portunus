@@ -201,20 +201,31 @@ def _parse_artifact(raw: dict[str, Any]) -> Artifact:
     raise CatalogVerifyError(f"unknown artifact kind {kind!r}")
 
 
-def _normalize_secrets(raw: Any) -> list[str]:
+def _normalize_secret_defs(raw: Any) -> list[dict[str, Any]]:
+    """Return [{name, label, secret}] for Connect UI; names alone become label=name."""
     if raw is None:
         return []
     if not isinstance(raw, list):
         raise CatalogVerifyError("spec.secrets must be a list")
-    names: list[str] = []
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for item in raw:
-        if isinstance(item, str) and item:
-            names.append(item)
-        elif isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]:
-            names.append(item["name"])
+        if isinstance(item, str) and item.strip():
+            name = item.strip()
+            label = name
+            is_secret = True
+        elif isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip():
+            name = item["name"].strip()
+            label_raw = item.get("label")
+            label = label_raw.strip() if isinstance(label_raw, str) and label_raw.strip() else name
+            is_secret = item.get("secret", True) is not False
         else:
             raise CatalogVerifyError("spec.secrets entries must be names or {name=...}")
-    return names
+        if name in seen:
+            raise CatalogVerifyError(f"duplicate secret name {name!r}")
+        seen.add(name)
+        out.append({"name": name, "label": label, "secret": is_secret})
+    return out
 
 
 def _normalize_env_defaults(raw: Any, secret_names: set[str]) -> dict[str, str]:
@@ -282,7 +293,8 @@ def parse_recipe(path: Path, *, manifest_root: Path | None = None) -> Recipe:
 
     # TOML skill_bridge: manifest is a filename; expand for validate_spec compatibility.
     spec_for_validate = dict(spec_raw)
-    secret_names = _normalize_secrets(spec_raw.get("secrets"))
+    secret_defs = _normalize_secret_defs(spec_raw.get("secrets"))
+    secret_names = [s["name"] for s in secret_defs]
     env_defaults = _normalize_env_defaults(spec_raw.get("env_defaults"), set(secret_names))
 
     if connection == "skill_bridge":
@@ -301,7 +313,7 @@ def parse_recipe(path: Path, *, manifest_root: Path | None = None) -> Recipe:
 
         spec_for_validate = {
             "manifest": load_manifest(manifest_path).model_dump(mode="json", exclude_none=True),
-            "secrets": [{"name": n, "label": n, "secret": True} for n in secret_names],
+            "secrets": secret_defs,
         }
         if env_defaults:
             spec_for_validate["env_defaults"] = env_defaults
@@ -320,10 +332,13 @@ def parse_recipe(path: Path, *, manifest_root: Path | None = None) -> Recipe:
         if env_defaults:
             spec["env_defaults"] = env_defaults
     else:
+        # Keep [{name,label,secret}, …] for the SPA Connect panel (string names
+        # were silently dropped, e.g. IMA Client ID + API Key). Re-apply our
+        # normalized defs so the shape does not depend on validate_spec round-trips.
         spec["manifest_name"] = Path(str(spec_raw["manifest"])).name
-        spec["secrets"] = secret_names
         if env_defaults:
             spec["env_defaults"] = env_defaults
+        spec["secrets"] = list(secret_defs)
 
     artifacts_raw = data.get("artifacts", [])
     if artifacts_raw is None:

@@ -97,7 +97,9 @@ _RUNNER_STATUS = {
     "spawn_failed": 502,
     "upstream_crash": 502,
     "payload_too_large": 502,
-    "auth_required": 401,
+    # Upstream MCP 401/403 — NOT an operator-session failure. Must not be HTTP 401
+    # or the dashboard treats it as logout (api.ts clears CSRF on any 401).
+    "auth_required": 422,
     "child_cap": 429,
 }
 
