@@ -6,8 +6,9 @@ import { BrandMark, Icon } from "./icons/ui";
 import { KeysPage } from "./KeysPage";
 import { Login } from "./Login";
 import { LogsPage } from "./LogsPage";
+import { TemporalPage } from "./TemporalPage";
 
-type View = "apps" | "keys" | "fleet" | "logs";
+type View = "apps" | "keys" | "fleet" | "logs" | "workflows";
 
 async function copyText(text: string) {
   await navigator.clipboard.writeText(text);
@@ -115,6 +116,13 @@ const VIEW_META: Record<
     description: "Operator audit trail and tool-call timing without arguments or results.",
     index: "04",
   },
+  workflows: {
+    title: "Workflows",
+    eyebrow: "Control plane",
+    headline: "Durable work, visible.",
+    description: "Temporal runs for OAuth refresh, probes, Connect, and fleet skill sync.",
+    index: "05",
+  },
 };
 
 function Shell({
@@ -195,6 +203,18 @@ function Shell({
               <span className="nav-item-label">
                 <Icon name="terminal" size={16} />
                 Logs
+              </span>
+              <Icon name="arrow-up-right" size={13} className="nav-arrow" />
+            </button>
+            <button
+              type="button"
+              className="nav-item"
+              aria-current={view === "workflows" ? "page" : undefined}
+              onClick={() => setView("workflows")}
+            >
+              <span className="nav-item-label">
+                <Icon name="bolt" size={16} />
+                Workflows
               </span>
               <Icon name="arrow-up-right" size={13} className="nav-arrow" />
             </button>
@@ -325,6 +345,7 @@ export function App() {
       {view === "keys" ? <KeysPage /> : null}
       {view === "fleet" ? <FleetPage /> : null}
       {view === "logs" ? <LogsPage /> : null}
+      {view === "workflows" ? <TemporalPage /> : null}
     </Shell>
   );
 }

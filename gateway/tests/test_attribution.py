@@ -96,6 +96,7 @@ async def test_fake_delayed_upstream_reports_upstream_ms(caplog):
     assert "gateway_ms" in meta
     assert meta.get("queue_ms") == 1
     assert "init_ms" not in meta  # runner did not report init
+    assert meta.get("schema_unpinned") is True  # no schema_hash → soft-warn
 
     records = [r for r in caplog.records if r.name == "portunus.gateway.calls"]
     assert records
@@ -155,6 +156,64 @@ async def test_missing_runner_timing_sets_upstream_omits_queue_init():
     assert "init_ms" not in meta
     assert meta["cold_start"] is True
     assert "start_ms" in meta
+    assert meta.get("schema_unpinned") is True
+
+
+async def test_schema_hash_pin_suppresses_schema_unpinned():
+    """Pinned invoke must not soft-warn; stale pin still schema_drift."""
+    slots = MagicMock()
+    slots.reserve_and_start = AsyncMock(
+        return_value=ReserveResult(child_id="child1", cold_start=False)
+    )
+    slots.site_of = MagicMock(return_value="local")
+    slots.slot = MagicMock(
+        return_value=SimpleNamespace(pending_stop=False, preferred_miss=False, site_id="local")
+    )
+
+    pool = MagicMock()
+    pool.request = AsyncMock(
+        return_value={
+            "ok": True,
+            "result": {"content": [{"type": "text", "text": "ok"}], "isError": False},
+        }
+    )
+    registry = MagicMock()
+    registry.start_payload = AsyncMock(
+        return_value={"argv": ["x"], "env": {}, "vault_version": 1, "preferred_regions": []}
+    )
+    registry.record_outcome = AsyncMock()
+    authz = MagicMock()
+    authz.is_revoked = MagicMock(return_value=False)
+    authz.has_grant = MagicMock(return_value=True)
+
+    omni = Omni(
+        session_factory=MagicMock(),
+        registry=registry,
+        slots=slots,
+        runner=pool,
+        authz=authz,
+    )
+    server = SimpleNamespace(id=__import__("uuid").uuid4(), slug="demo", enabled=True, kind="stdio")
+    tool = SimpleNamespace(upstream_name="t", schema={"type": "object"}, schema_hash="abc")
+    omni._granted_server = AsyncMock(return_value=server)  # noqa: SLF001
+    omni._enabled_tool = AsyncMock(return_value=tool)  # noqa: SLF001
+
+    pinned = await omni.dispatch(
+        "key1",
+        "portunus_invoke_tool",
+        {"server": "demo", "tool": "t", "arguments": {}, "schema_hash": "abc"},
+    )
+    assert not pinned.is_error
+    assert "schema_unpinned" not in _portunus(pinned)
+
+    stale = await omni.dispatch(
+        "key1",
+        "portunus_invoke_tool",
+        {"server": "demo", "tool": "t", "arguments": {}, "schema_hash": "0" * 64},
+    )
+    assert stale.is_error
+    err = (stale.structured_content or {}).get("error") or {}
+    assert err.get("code") == "schema_drift"
 
 
 async def test_meta_portunus_trace_id_on_success_and_error():

@@ -5,6 +5,7 @@
 #   cp deploy/runner-policy.json.example deploy/runner-policy.json
 #   docker compose up --build      # dashboard + API + /mcp on http://localhost:8080
 #   docker compose --profile postgres up --build   # same, but gateway uses Postgres
+#   docker compose --profile temporal up --build   # + Temporal server/UI + portunus-worker
 #
 # The sqlite path is the default; to use Postgres set in .env:
 #   WITH_POSTGRES=1
@@ -35,13 +36,11 @@ services:
       - run:/run/portunus
       - ./deploy/runner-policy.json:/etc/portunus/runner-policy.json:ro
     secrets: [runner_token]
-    # No published ports: the runner is reachable only through the shared socket volume.
 
   portunus:
     <<: *common
     depends_on: [portunus-runner]
     ports:
-      # Localhost only: the default stack is DEV mode. Put a TLS proxy in front to expose it.
       - "127.0.0.1:${PORTUNUS_PORT:-8080}:8080"
     environment:
       PORTUNUS_DEV: ${PORTUNUS_DEV:-1}
@@ -54,9 +53,11 @@ services:
       PORTUNUS_RUNNER_UID: "10001"
       PORTUNUS_DATABASE_URL: ${PORTUNUS_DATABASE_URL:-sqlite+aiosqlite:////var/lib/portunus/portunus.db}
       PORTUNUS_TRUSTED_PROXIES: ${PORTUNUS_TRUSTED_PROXIES:-}
-      # MCP Origin allowlist + RFC 9728 resource id (comma-separated origins; public URL origin is included).
       PORTUNUS_PUBLIC_URL: ${PORTUNUS_PUBLIC_URL:-}
       PORTUNUS_ALLOWED_ORIGINS: ${PORTUNUS_ALLOWED_ORIGINS:-}
+      TEMPORAL_HOST: ${TEMPORAL_HOST:-}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-portunus-control}
     volumes:
       - run:/run/portunus
       - data:/var/lib/portunus
@@ -79,10 +80,77 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # ---- Temporal control plane (profile: temporal) ---------------------------------
+  temporal-postgres:
+    profiles: [temporal]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal_pgdata:/var/lib/postgresql/data
+
+  temporal:
+    profiles: [temporal]
+    image: temporalio/auto-setup:1.25.2
+    restart: unless-stopped
+    depends_on: [temporal-postgres]
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
+    ports:
+      - "127.0.0.1:7233:7233"
+
+  temporal-ui:
+    profiles: [temporal]
+    image: temporalio/ui:2.31.2
+    restart: unless-stopped
+    depends_on: [temporal]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "127.0.0.1:8088:8080"
+
+  portunus-worker:
+    <<: *common
+    profiles: [temporal]
+    command: ["portunus-worker"]
+    depends_on: [temporal, portunus]
+    environment:
+      PORTUNUS_DEV: ${PORTUNUS_DEV:-1}
+      PORTUNUS_SECRETS_KEY: ${PORTUNUS_SECRETS_KEY:?run scripts/init_env.sh}
+      PORTUNUS_PEPPER_FILE: /run/secrets/pepper
+      PORTUNUS_TOKEN_FILE: /run/secrets/runner_token
+      PORTUNUS_SOCKET: /run/portunus/runner.sock
+      PORTUNUS_POLICY: /etc/portunus/runner-policy.json
+      PORTUNUS_DATABASE_URL: ${PORTUNUS_DATABASE_URL:-sqlite+aiosqlite:////var/lib/portunus/portunus.db}
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-portunus-control}
+      PORTUNUS_FLEET_HOSTS: ${PORTUNUS_FLEET_HOSTS:-}
+      PORTUNUS_REPO_ROOT: /opt/stacks/portunus
+      PORTUNUS_OAUTH_REFRESH_SKEW_S: ${PORTUNUS_OAUTH_REFRESH_SKEW_S:-300}
+      PORTUNUS_PROBE_INTERVAL_S: ${PORTUNUS_PROBE_INTERVAL_S:-900}
+    volumes:
+      - run:/run/portunus
+      - data:/var/lib/portunus
+      - ./deploy/runner-policy.json:/etc/portunus/runner-policy.json:ro
+      - ./deploy:/opt/stacks/portunus/deploy:ro
+      - ./third_party:/opt/stacks/portunus/third_party:ro
+    secrets: [pepper, runner_token]
+
 volumes:
   run:
   data:
   pgdata:
+  temporal_pgdata:
 
 secrets:
   pepper:

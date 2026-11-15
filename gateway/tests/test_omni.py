@@ -293,14 +293,28 @@ async def test_auth_scheme_mistake_is_reported_precisely(stack):
 
 
 async def test_tool_calls_are_rate_limited_per_key(rate_stack):
-    """The 60 calls/min/key limit is real; without this test a no-op limiter looks fine."""
+    """Invoke budget is real; discovery must not burn it (F7)."""
     sid = await rate_stack.add_server()
     token, _ = await rate_stack.add_key(sid)
     async with rate_stack.client(token) as c:
-        assert payload(await c.call_tool("portunus_discover_servers", {}))["items"]
-        assert not (await c.call_tool("portunus_discover_servers", {})).is_error
-        over = await c.call_tool("portunus_discover_servers", {})
+        # Discovery stays free even when the invoke window is tiny (rate_per_min=2).
+        for _ in range(5):
+            assert not (await c.call_tool("portunus_discover_servers", {})).is_error
+        assert not (
+            await c.call_tool("portunus_invoke_tool", {"server": "fix", "tool": "alpha"})
+        ).is_error
+        assert not (
+            await c.call_tool("portunus_invoke_tool", {"server": "demo", "tool": "alpha"})
+        ).is_error
+        over = await c.call_tool("portunus_invoke_tool", {"server": "demo", "tool": "alpha"})
     assert error_code(over) == "rate_limited"
+    body = over.structured_content or {}
+    err = body.get("error") if isinstance(body, dict) else None
+    assert isinstance(err, dict)
+    assert isinstance((err.get("data") or {}).get("retry_after_s"), int)
+    meta = over.meta or {}
+    portunus_meta = meta.get("io.portunus.gateway") or meta.get("portunus") or {}
+    assert isinstance(portunus_meta.get("retry_after_s"), int)
 
 
 # ---- discovery ---------------------------------------------------------------------
@@ -849,9 +863,20 @@ async def test_rate_limit_per_key(stack):
     t2, _ = await stack.add_key(sid)
     async with stack.client(t1) as c1, stack.client(t2) as c2:
         for _ in range(3):
-            assert not (await c1.call_tool("portunus_discover_servers", {})).is_error
-        assert error_code(await c1.call_tool("portunus_discover_servers", {})) == "rate_limited"
-        assert not (await c2.call_tool("portunus_discover_servers", {})).is_error  # per key
+            assert not (
+                await c1.call_tool("portunus_invoke_tool", {"server": "demo", "tool": "alpha"})
+            ).is_error
+        assert (
+            error_code(
+                await c1.call_tool("portunus_invoke_tool", {"server": "demo", "tool": "alpha"})
+            )
+            == "rate_limited"
+        )
+        assert not (
+            await c2.call_tool("portunus_invoke_tool", {"server": "demo", "tool": "alpha"})
+        ).is_error  # per key
+        # Discovery never hits the invoke budget.
+        assert not (await c1.call_tool("portunus_discover_servers", {})).is_error
 
 
 async def test_revoke_during_invoke_never_returns_success(fast_timeout_stack):

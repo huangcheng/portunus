@@ -14,11 +14,13 @@ from portunus_gateway.db.session import async_session
 from portunus_gateway.oauth import (
     AUTH_HEADER_NAME,
     OAUTH_CLIENT_SECRET_NAME,
+    OAUTH_REFRESH_TOKEN_NAME,
     OAuthError,
     OAuthPending,
     OAuthStore,
     exchange_code,
     new_pkce,
+    refresh_access_token,
     validate_oauth_config,
 )
 from portunus_gateway.operator_api import create_app, require_operator
@@ -126,7 +128,15 @@ async def test_exchange_code_posts_pkce_and_formats_authorization():
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(200, json={"access_token": "tok-xyz", "token_type": "Bearer"})
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "tok-xyz",
+                "token_type": "Bearer",
+                "refresh_token": "rt-abc",
+                "expires_in": 7200,
+            },
+        )
 
     pending = OAuthPending(
         server_id=uuid.uuid4(),
@@ -136,13 +146,36 @@ async def test_exchange_code_posts_pkce_and_formats_authorization():
         redirect_uri="https://portunus.example/cb",
         created_at=0.0,
     )
-    auth = await exchange_code(pending, "the-code", transport=httpx.MockTransport(handler))
-    assert auth == "Bearer tok-xyz"
+    bundle = await exchange_code(pending, "the-code", transport=httpx.MockTransport(handler))
+    assert bundle.authorization == "Bearer tok-xyz"
+    assert bundle.refresh_token == "rt-abc"
+    assert bundle.expires_in == 7200
     assert seen and seen[0].url.host == "idp.example"
     body = parse_qs(seen[0].content.decode())
     assert body["code"] == ["the-code"]
     assert body["code_verifier"] == ["verifier"]
     assert body["client_id"] == ["cid"]
+
+
+async def test_refresh_access_token_keeps_prior_refresh_when_omitted():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"access_token": "new-tok", "token_type": "Bearer", "expires_in": 60})
+
+    bundle = await refresh_access_token(
+        token_url="https://idp.example/token",
+        client_id="cid",
+        refresh_token="rt-old",
+        transport=httpx.MockTransport(handler),
+    )
+    assert bundle.authorization == "Bearer new-tok"
+    assert bundle.refresh_token == "rt-old"
+    assert bundle.expires_in == 60
+    body = parse_qs(seen[0].content.decode())
+    assert body["grant_type"] == ["refresh_token"]
+    assert body["refresh_token"] == ["rt-old"]
 
 
 async def test_create_remote_with_oauth_and_paste_token(http):
@@ -228,9 +261,13 @@ async def test_oauth_start_and_callback_stores_token(http, monkeypatch):
     assert "code_challenge=" in authorize_url and state in authorize_url
 
     async def fake_exchange(pending, code, *, client_secret=None, transport=None):
+        from portunus_gateway.oauth import TokenBundle
+
         assert code == "auth-code"
         assert pending.server_id == uuid.UUID(sid)
-        return "Bearer from-oauth"
+        return TokenBundle(
+            authorization="Bearer from-oauth", refresh_token="rt-1", expires_in=3600
+        )
 
     monkeypatch.setattr("portunus_gateway.operator_api.exchange_code", fake_exchange)
     cb = await client.get("/api/oauth/callback", params={"code": "auth-code", "state": state})
@@ -240,6 +277,22 @@ async def test_oauth_start_and_callback_stores_token(http, monkeypatch):
     listed = await client.get("/api/servers")
     row = next(s for s in listed.json() if s["id"] == sid)
     assert row["has_auth"] is True
+
+    async with async_session() as s:
+        refresh_row = (
+            await s.execute(
+                select(VaultEntry).where(
+                    VaultEntry.server_id == uuid.UUID(sid),
+                    VaultEntry.name == OAUTH_REFRESH_TOKEN_NAME,
+                )
+            )
+        ).scalar_one()
+        plain = registry.vault.open(
+            bytes(refresh_row.ciphertext),
+            vault_entry_id=str(refresh_row.id),
+            key_version=refresh_row.key_version,
+        ).decode()
+        assert plain == "rt-1"
 
 
 async def test_oauth_start_requires_config(http):
@@ -487,7 +540,9 @@ async def test_callback_accepts_matching_iss(http, monkeypatch):
     state = start.json()["state"]
 
     async def fake_exchange(pending, code, *, client_secret=None, transport=None):
-        return "Bearer ok"
+        from portunus_gateway.oauth import TokenBundle
+
+        return TokenBundle(authorization="Bearer ok")
 
     monkeypatch.setattr("portunus_gateway.operator_api.exchange_code", fake_exchange)
     r = await client.get(

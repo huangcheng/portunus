@@ -809,12 +809,18 @@ class RemoteProxy:
         policy: RemotePolicy | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         resolver: Resolver | None = None,
+        refresh_oauth: Callable[[uuid.UUID], Any] | None = None,
     ) -> None:
         self._sf = session_factory
         self.vault = vault
         self.policy = policy or RemotePolicy.from_env()
         self._transport = transport
         self._resolver = resolver
+        # Optional: ``async (server_id) -> bool`` — on-demand refresh after upstream 401.
+        self.refresh_oauth = refresh_oauth
+
+    def bind_refresh(self, refresh_oauth: Callable[[uuid.UUID], Any]) -> None:
+        self.refresh_oauth = refresh_oauth
 
     async def _client(self, server_id: uuid.UUID) -> RemoteClient:
         async with self._sf() as s:
@@ -851,8 +857,23 @@ class RemoteProxy:
             resolver=self._resolver,
         )
 
+    async def _with_auth_retry(self, server_id: uuid.UUID, op: Callable[[], Any]) -> Any:
+        try:
+            return await op()
+        except PortunusError as e:
+            if e.code != "auth_required" or self.refresh_oauth is None:
+                raise
+            refreshed = await self.refresh_oauth(server_id)
+            ok = refreshed[0] if isinstance(refreshed, tuple) else bool(refreshed)
+            if not ok:
+                raise
+            return await op()
+
     async def probe(self, server_id: uuid.UUID) -> list[dict[str, Any]]:
-        return await (await self._client(server_id)).list_tools()
+        async def once() -> list[dict[str, Any]]:
+            return await (await self._client(server_id)).list_tools()
+
+        return await self._with_auth_retry(server_id, once)
 
     async def invoke(
         self,
@@ -864,6 +885,10 @@ class RemoteProxy:
         input_schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Invoke one tool; ``input_schema`` (stored at probe time) drives ``Mcp-Param-*`` mirroring."""
-        return await (await self._client(server_id)).call_tool(
-            tool, arguments, timeout_s=timeout_s, input_schema=input_schema
-        )
+
+        async def once() -> dict[str, Any]:
+            return await (await self._client(server_id)).call_tool(
+                tool, arguments, timeout_s=timeout_s, input_schema=input_schema
+            )
+
+        return await self._with_auth_retry(server_id, once)

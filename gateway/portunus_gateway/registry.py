@@ -46,8 +46,11 @@ from .health import (
 from .oauth import (
     AUTH_HEADER_NAME,
     OAUTH_CLIENT_SECRET_NAME,
+    OAUTH_REFRESH_TOKEN_NAME,
     OAuthError,
+    TokenBundle,
     oauth_public_view,
+    refresh_access_token,
     validate_oauth_config,
 )
 from .runner_client import RunnerRequestError
@@ -1493,6 +1496,8 @@ class Registry:
             if server.kind != "remote":
                 raise RegistryError(400, "unsupported", "only remote servers take a bearer token")
             await self._upsert_vault(s, server, AUTH_HEADER_NAME, value)
+            # Paste is not an OAuth refresh cycle — drop any stale refresh token.
+            await self._delete_vault(s, server_id, OAUTH_REFRESH_TOKEN_NAME)
             s.add(self._audit(actor, "server.auth_token", server_id, None))
             await s.commit()
             names = await self._env_names(s, server_id)
@@ -1503,7 +1508,25 @@ class Registry:
     async def store_authorization_header(
         self, server_id: uuid.UUID, authorization: str, actor: str, *, action: str = "server.oauth"
     ) -> dict[str, Any]:
-        """Persist a full Authorization header value after OAuth exchange."""
+        """Persist a full Authorization header value (legacy / paste-compatible)."""
+        return await self.store_oauth_tokens(
+            server_id,
+            TokenBundle(authorization=authorization),
+            actor,
+            action=action,
+        )
+
+    async def store_oauth_tokens(
+        self,
+        server_id: uuid.UUID,
+        bundle: TokenBundle,
+        actor: str,
+        *,
+        action: str = "server.oauth",
+        reprobe: bool = True,
+    ) -> dict[str, Any]:
+        """Persist Authorization (+ optional refresh_token) after code exchange or refresh."""
+        authorization = bundle.authorization
         if not isinstance(authorization, str) or not authorization.strip() or "\x00" in authorization:
             raise RegistryError(422, "invalid_oauth", "missing access token")
         async with self._sf() as s:
@@ -1511,12 +1534,103 @@ class Registry:
             if server.kind != "remote":
                 raise RegistryError(400, "unsupported", "only remote servers support oauth")
             await self._upsert_vault(s, server, AUTH_HEADER_NAME, authorization.strip())
-            s.add(self._audit(actor, action, server_id, None))
+            if bundle.refresh_token:
+                await self._upsert_vault(s, server, OAUTH_REFRESH_TOKEN_NAME, bundle.refresh_token)
+            detail = None
+            if bundle.expires_in is not None:
+                detail = {"expires_in": bundle.expires_in, "has_refresh": bool(bundle.refresh_token)}
+            s.add(self._audit(actor, action, server_id, detail))
             await s.commit()
             names = await self._env_names(s, server_id)
-        await self.clear_error_and_reprobe(server_id, actor)
+        if reprobe:
+            await self.clear_error_and_reprobe(server_id, actor)
+        else:
+            # Clear last_error without scheduling a probe (on-demand refresh path).
+            async with self._sf() as s:
+                server = await self._get_server(s, server_id)
+                server.last_error_code = None
+                server.last_error_at = None
+                await s.commit()
         server = await self._load_server(server_id)
         return await self._enriched_view(server, names)
+
+    async def refresh_oauth_access_token(
+        self, server_id: uuid.UUID
+    ) -> bool | tuple[bool, int | None]:
+        """Try ``refresh_token`` grant.
+
+        Returns ``True`` / ``(True, expires_in)`` on success, ``False`` / ``(False, None)`` on failure.
+        Callers that only need a bool may treat a truthy result as success
+        (``bool((True, 60))`` is True). Prefer unpacking the tuple when expires_in matters.
+        """
+        async with self._sf() as s:
+            server = await self._get_server(s, server_id)
+            if server.kind != "remote":
+                return False, None
+            try:
+                cfg = validate_oauth_config(server.oauth)
+            except OAuthError:
+                return False, None
+            if cfg is None:
+                return False, None
+            client_id = cfg.get("client_id")
+            if not isinstance(client_id, str) or not client_id:
+                return False, None
+            row = (
+                await s.execute(
+                    select(VaultEntry).where(
+                        VaultEntry.server_id == server_id,
+                        VaultEntry.name == OAUTH_REFRESH_TOKEN_NAME,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return False, None
+            try:
+                refresh = self.vault.open(
+                    bytes(row.ciphertext),
+                    vault_entry_id=str(row.id),
+                    key_version=row.key_version,
+                ).decode()
+            except (VaultError, UnicodeDecodeError):
+                return False, None
+            method = cfg.get("token_endpoint_auth_method") or "none"
+            secret: str | None = None
+            if method != "none":
+                secret_row = (
+                    await s.execute(
+                        select(VaultEntry).where(
+                            VaultEntry.server_id == server_id,
+                            VaultEntry.name == OAUTH_CLIENT_SECRET_NAME,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if secret_row is not None:
+                    try:
+                        secret = self.vault.open(
+                            bytes(secret_row.ciphertext),
+                            vault_entry_id=str(secret_row.id),
+                            key_version=secret_row.key_version,
+                        ).decode()
+                    except (VaultError, UnicodeDecodeError):
+                        return False, None
+            token_url = cfg["token_url"]
+            resource = cfg.get("resource")
+        try:
+            bundle = await refresh_access_token(
+                token_url=token_url,
+                client_id=client_id,
+                refresh_token=refresh,
+                client_secret=secret,
+                resource=resource if isinstance(resource, str) else None,
+            )
+        except OAuthError as e:
+            log.warning("oauth refresh failed server=%s code=%s msg=%s", server_id, e.code, e.message)
+            return False, None
+        await self.store_oauth_tokens(
+            server_id, bundle, actor="oauth-refresh", action="server.oauth_refresh", reprobe=False
+        )
+        return True, bundle.expires_in
 
     async def read_oauth_client_secret(self, server_id: uuid.UUID) -> str | None:
         async with self._sf() as s:
@@ -1674,6 +1788,15 @@ class Registry:
             )
             row.key_version = version
         server.vault_version = int(server.vault_version or 0) + 1
+
+    async def _delete_vault(self, s: AsyncSession, server_id: uuid.UUID, name: str) -> None:
+        row = (
+            await s.execute(
+                select(VaultEntry).where(VaultEntry.server_id == server_id, VaultEntry.name == name)
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            await s.delete(row)
 
     @staticmethod
     async def _get_server(s: AsyncSession, server_id: uuid.UUID) -> Server:

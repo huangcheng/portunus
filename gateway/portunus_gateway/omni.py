@@ -31,9 +31,11 @@ Invariants
   ``{"error": {"code": <spec §6.4 code>, "message": ...}}``.
 * When an upstream result has no ``structuredContent`` but ``content[0].text`` is JSON, it is
   promoted so remote and stdio results share one shape.
-* Limits: 60 tool calls/min/key (``rate_limited``), 8 concurrent invokes/key (``rate_limited``),
-  invoke timeout default 60s (an agent may only shorten it). A timed-out or cancelled call retires
-  its child (it may be wedged mid-call).
+* Limits: 60 ``portunus_invoke_tool`` calls/min/key (``rate_limited``; discovery / schema
+  reads are free), 8 concurrent invokes/key (``rate_limited``), invoke timeout default 60s
+  (an agent may only shorten it). A timed-out or cancelled call retires its child (it may be
+  wedged mid-call). ``rate_limited`` includes ``retry_after_s`` in ``error.data`` and
+  ``_meta.io.portunus.gateway``.
 """
 
 from __future__ import annotations
@@ -157,8 +159,9 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
             "schema_hash": {
                 **_STR,
                 "description": (
-                    "Optional pin from portunus_get_tool_schema / discover_tools. When omitted, "
-                    "drift is not checked; when set, a changed schema returns schema_drift."
+                    "Optional pin from portunus_get_tool_schema / discover_tools. When set, a "
+                    "changed schema returns schema_drift. When omitted, the invoke still runs "
+                    "and _meta marks schema_unpinned=true (soft-warn; pin is not required)."
                 ),
             },
             "timeout_s": {
@@ -751,13 +754,20 @@ class Omni:
     def inflight(self, key_id: str) -> int:
         return self._inflight.get(key_id, 0)
 
-    def _rate_limit(self, key_id: str) -> None:
+    def _rate_limit_invoke(self, key_id: str) -> None:
+        """Charge one invoke against the per-key sliding window (discovery is free)."""
         now = self._clock()
         window = self._calls.setdefault(key_id, deque())
         while window and window[0] <= now - 60.0:
             window.popleft()
         if len(window) >= self.rate_per_min:
-            raise PortunusError("rate_limited", f"over {self.rate_per_min} calls per minute")
+            oldest = window[0] if window else now
+            retry_after_s = max(1, int(60.0 - (now - oldest)) + 1)
+            raise PortunusError(
+                "rate_limited",
+                f"over {self.rate_per_min} invokes per minute",
+                data={"retry_after_s": retry_after_s},
+            )
         window.append(now)
 
     async def dispatch(
@@ -792,7 +802,10 @@ class Omni:
                             raise PortunusError("unsupported", f"unknown tool {name!r}")
                         self._check_key(key_id)
                         _validate(_SCHEMAS[name], args, what="arguments")
-                        self._rate_limit(key_id)
+                        # Discovery / schema reads are cheap and cacheable; only invokes
+                        # burn the 60/min budget (F7).
+                        if name == "portunus_invoke_tool":
+                            self._rate_limit_invoke(key_id)
                         handler = {
                             "portunus_discover_servers": self._discover_servers,
                             "portunus_discover_tools": self._discover_tools,
@@ -802,7 +815,11 @@ class Omni:
                         result = await handler(key_id, args)
                     except PortunusError as e:
                         tel.set_span_error(span, e.code)
-                        result = error_result(e.code, e.message)
+                        result = error_result(e.code, e.message, data=e.data)
+                        if e.code == "rate_limited" and isinstance(e.data, dict):
+                            retry = e.data.get("retry_after_s")
+                            if isinstance(retry, int):
+                                invoke_attrs["retry_after_s"] = retry
                     except RegistryError as e:
                         code = e.code if e.code in ERROR_CODES else "spawn_failed"
                         tel.set_span_error(span, code)
@@ -820,6 +837,8 @@ class Omni:
                         "queue_ms",
                         "init_ms",
                         "upstream_ms",
+                        "retry_after_s",
+                        "schema_unpinned",
                     ):
                         if key in invoke_attrs:
                             portunus[key] = invoke_attrs[key]
@@ -1048,7 +1067,7 @@ class Omni:
             "description": tool.description,
             "input_schema": effective_schema(tool),
             "schema_hash": tool.schema_hash,
-            # Review #30: real pin value is the hash; including it on invoke is optional.
+            # Soft-warn policy: pin is optional; unpinned invokes set _meta.schema_unpinned.
             "schema_pin": tool.schema_hash,
             "schema_pin_required": False,
         }
@@ -1064,6 +1083,11 @@ class Omni:
         pin = args.get("schema_hash")
         if pin is not None and pin != tool.schema_hash:
             raise PortunusError("schema_drift", "tool schema changed since schema_hash")
+        # Soft-warn (option B): unpinned invokes are allowed; surface observability in _meta.
+        if pin is None:
+            bag = _invoke_attrs.get()
+            if bag is not None:
+                bag["schema_unpinned"] = True
         arguments = args.get("arguments", {})
         _validate(effective_schema(tool), arguments, what="tool arguments")
         timeout_s = self.invoke_timeout_s
@@ -1076,7 +1100,11 @@ class Omni:
         max_bytes = int(args.get("max_bytes", MAX_RESULT_BYTES))
         truncate = bool(args.get("truncate", False))
         if self.inflight(key_id) >= self.max_concurrent:
-            raise PortunusError("rate_limited", f"over {self.max_concurrent} concurrent invokes")
+            raise PortunusError(
+                "rate_limited",
+                f"over {self.max_concurrent} concurrent invokes",
+                data={"retry_after_s": 1},
+            )
         self._inflight[key_id] = self.inflight(key_id) + 1
         try:
             try:

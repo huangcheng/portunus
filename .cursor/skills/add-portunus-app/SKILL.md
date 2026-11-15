@@ -1,4 +1,4 @@
----
+Temporal.io---
 name: add-portunus-app
 description: >-
   Add a Portunus Apps catalog service (oauth, http, webdav, stdio, or
@@ -30,7 +30,7 @@ Copy nearest peer:
 - WebDAV → `nutstore` / `koofr`
 - API key HTTP → `packages/portunus_skill_bridge/manifests/weread.example.yaml`
 - Device QR CLI → `guangyapan.example.yaml`
-- Authorize-link CLI → `quark.example.yaml`
+- Authorize-link CLI → (removed: Quark rejected non-vendor agent envs; prefer OAuth remotes)
 
 ## Skill-bridge path (most common)
 

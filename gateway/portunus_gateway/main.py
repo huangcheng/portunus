@@ -282,6 +282,7 @@ def create_gateway_app() -> FastAPI:
         slots=slots,
         remote=remote,
     )
+    remote.bind_refresh(registry.refresh_oauth_access_token)
     omni = Omni(
         session_factory=async_session,
         registry=registry,
@@ -335,6 +336,12 @@ def create_gateway_app() -> FastAPI:
         pool.start()
         stop = asyncio.Event()
         retention_task = asyncio.create_task(retention_loop(stop), name="portunus-retention")
+        try:
+            from portunus_worker.client import ensure_fleet_skills_schedule
+
+            await ensure_fleet_skills_schedule()
+        except Exception:  # noqa: BLE001 — Temporal optional
+            log.debug("temporal fleet schedule skipped", exc_info=True)
         try:
             async with inner_lifespan(a):
                 yield

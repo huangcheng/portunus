@@ -1,0 +1,72 @@
+# Overlay: Temporal control plane + portunus-worker.
+# Usage (with main stack env already loaded):
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.temporal.yml --profile temporal up -d
+#
+# Production (vultr) typically merges these services into /opt/stacks/portunus compose.
+# Set TEMPORAL_HOST=temporal:7233 on the gateway service so OAuth callback can start workflows.
+
+services:
+  temporal-postgres:
+    profiles: [temporal]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal_pgdata:/var/lib/postgresql/data
+
+  temporal:
+    profiles: [temporal]
+    image: temporalio/auto-setup:1.25.2
+    restart: unless-stopped
+    depends_on: [temporal-postgres]
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-postgres
+    ports:
+      - "127.0.0.1:7233:7233"
+
+  temporal-ui:
+    profiles: [temporal]
+    image: temporalio/ui:2.31.2
+    restart: unless-stopped
+    depends_on: [temporal]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "127.0.0.1:8088:8080"
+
+  portunus-worker:
+    image: portunus:local
+    profiles: [temporal]
+    command: ["portunus-worker"]
+    restart: unless-stopped
+    user: "10001:10001"
+    depends_on: [temporal]
+    environment:
+      PORTUNUS_DEV: ${PORTUNUS_DEV:-1}
+      PORTUNUS_SECRETS_KEY: ${PORTUNUS_SECRETS_KEY}
+      PORTUNUS_PEPPER_FILE: /run/secrets/pepper
+      PORTUNUS_TOKEN_FILE: /run/secrets/runner_token
+      PORTUNUS_SOCKET: /run/portunus/runner.sock
+      PORTUNUS_POLICY: /etc/portunus/runner-policy.json
+      PORTUNUS_DATABASE_URL: ${PORTUNUS_DATABASE_URL}
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-portunus-control}
+      PORTUNUS_FLEET_HOSTS: ${PORTUNUS_FLEET_HOSTS:-}
+      PORTUNUS_REPO_ROOT: /opt/stacks/portunus
+    volumes:
+      - run:/run/portunus
+      - data:/var/lib/portunus
+      - ./deploy/runner-policy.json:/etc/portunus/runner-policy.json:ro
+      - ./deploy:/opt/stacks/portunus/deploy:ro
+    secrets: [pepper, runner_token]
+
+volumes:
+  temporal_pgdata:

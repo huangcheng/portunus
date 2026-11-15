@@ -1,7 +1,8 @@
 """Operator-driven OAuth 2.1 authorization-code + PKCE for remote MCP servers (spec §6.3).
 
-Paste-token is handled by the registry (vault ``Authorization`` header). This module only
-covers the browser redirect: start → authorize URL, callback → token exchange → vault.
+Paste-token is handled by the registry (vault ``Authorization`` header). This module covers
+the browser redirect (start → authorize URL, callback → token exchange → vault) and the
+``refresh_token`` grant used when a short-lived access token expires.
 """
 
 from __future__ import annotations
@@ -19,7 +20,17 @@ import httpx
 
 OAUTH_STATE_TTL_S = 600
 OAUTH_CLIENT_SECRET_NAME = "portunus.oauth_client_secret"
+OAUTH_REFRESH_TOKEN_NAME = "portunus.oauth_refresh_token"
 AUTH_HEADER_NAME = "Authorization"
+
+
+@dataclass(frozen=True)
+class TokenBundle:
+    """Access token (as Authorization header value) plus optional refresh material."""
+
+    authorization: str
+    refresh_token: str | None = None
+    expires_in: int | None = None
 
 
 class OAuthError(Exception):
@@ -316,14 +327,38 @@ def _token_error_message(resp: httpx.Response) -> str:
     return f"token endpoint rejected the code (HTTP {resp.status_code})"
 
 
+def _parse_token_response(body: Any) -> TokenBundle:
+    if not isinstance(body, dict):
+        raise OAuthError(502, "upstream_crash", "token endpoint returned non-object JSON")
+    token = body.get("access_token")
+    if not isinstance(token, str) or not token:
+        raise OAuthError(502, "upstream_crash", "token endpoint omitted access_token")
+    token_type = str(body.get("token_type") or "Bearer").strip() or "Bearer"
+    refresh = body.get("refresh_token")
+    refresh_token = refresh if isinstance(refresh, str) and refresh.strip() else None
+    expires_raw = body.get("expires_in")
+    expires_in: int | None = None
+    if isinstance(expires_raw, bool):
+        expires_in = None
+    elif isinstance(expires_raw, int) and expires_raw > 0:
+        expires_in = expires_raw
+    elif isinstance(expires_raw, float) and expires_raw > 0:
+        expires_in = int(expires_raw)
+    return TokenBundle(
+        authorization=f"{token_type} {token}",
+        refresh_token=refresh_token,
+        expires_in=expires_in,
+    )
+
+
 async def exchange_code(
     pending: OAuthPending,
     code: str,
     *,
     client_secret: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
-) -> str:
-    """Exchange ``code`` for an access token; returns a ready ``Authorization`` header value."""
+) -> TokenBundle:
+    """Exchange ``code`` for tokens; returns Authorization + optional refresh/expiry."""
     if not isinstance(code, str) or not code or "\x00" in code:
         raise OAuthError(400, "invalid_oauth", "missing authorization code")
     data = {
@@ -354,8 +389,51 @@ async def exchange_code(
         body = resp.json()
     except ValueError:
         raise OAuthError(502, "upstream_crash", "token endpoint returned non-JSON") from None
-    token = body.get("access_token")
-    if not isinstance(token, str) or not token:
-        raise OAuthError(502, "upstream_crash", "token endpoint omitted access_token")
-    token_type = str(body.get("token_type") or "Bearer").strip() or "Bearer"
-    return f"{token_type} {token}"
+    return _parse_token_response(body)
+
+
+async def refresh_access_token(
+    *,
+    token_url: str,
+    client_id: str,
+    refresh_token: str,
+    client_secret: str | None = None,
+    resource: str | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> TokenBundle:
+    """OAuth ``refresh_token`` grant → new Authorization (+ rotated refresh when returned)."""
+    if not isinstance(refresh_token, str) or not refresh_token.strip() or "\x00" in refresh_token:
+        raise OAuthError(400, "invalid_oauth", "missing refresh token")
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token.strip(),
+        "client_id": client_id,
+    }
+    if resource:
+        data["resource"] = resource
+    headers = {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}
+    auth: httpx.Auth | None = None
+    if client_secret:
+        auth = httpx.BasicAuth(client_id, client_secret)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, trust_env=False, timeout=httpx.Timeout(30.0)
+        ) as http:
+            resp = await http.post(token_url, data=data, headers=headers, auth=auth)
+    except httpx.HTTPError as e:
+        raise OAuthError(502, "upstream_crash", f"token endpoint failed: {type(e).__name__}") from e
+    if resp.status_code >= 400:
+        raise OAuthError(502, "auth_required", _token_error_message(resp))
+    try:
+        body = resp.json()
+    except ValueError:
+        raise OAuthError(502, "upstream_crash", "token endpoint returned non-JSON") from None
+    bundle = _parse_token_response(body)
+    # Some IdPs omit refresh_token on refresh; keep the prior one.
+    if bundle.refresh_token is None:
+        return TokenBundle(
+            authorization=bundle.authorization,
+            refresh_token=refresh_token.strip(),
+            expires_in=bundle.expires_in,
+        )
+    return bundle

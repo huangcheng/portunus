@@ -43,15 +43,18 @@ COPY packages/portunus_shared packages/portunus_shared
 # gateway/uv.lock pins portunus_skill_bridge as a path dependency; the COPY was
 # missing after fee5547, breaking clean-checkout builds (prod had a local hotfix).
 COPY packages/portunus_skill_bridge packages/portunus_skill_bridge
+COPY packages/portunus_worker packages/portunus_worker
 COPY runner runner
 COPY gateway gateway
+COPY deploy/fleet-skills.sh deploy/fleet-skills.sh
 # Re-declare so this layer sees the index (ARG scope is per-stage otherwise).
 ARG PIP_INDEX
 # uv 0.13 reads UV_DEFAULT_INDEX; keep UV_INDEX_URL as a compat alias.
 ENV UV_DEFAULT_INDEX=${PIP_INDEX} \
     UV_INDEX_URL=${PIP_INDEX}
 RUN cd gateway && uv sync --frozen --no-dev \
-    && uv pip install --python .venv/bin/python -e ../runner
+    && uv pip install --python .venv/bin/python -e ../runner \
+    && uv pip install --python .venv/bin/python -e ../packages/portunus_worker
 COPY --from=dashboard /dashboard/dist dashboard/dist
 
 # Same uid for gateway and runner in compose; production uses separate users (see README).

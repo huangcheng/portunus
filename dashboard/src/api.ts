@@ -223,6 +223,49 @@ export type ToolCallRow = {
   result_bytes: number | null;
 };
 
+export type TemporalStatus = {
+  enabled: boolean;
+  host?: string;
+  namespace?: string;
+  task_queue?: string;
+  error?: string;
+};
+
+export type TemporalWorkflowSummary = {
+  workflow_id: string | null;
+  run_id: string | null;
+  workflow_type: string | null;
+  task_queue: string | null;
+  status: string | null;
+  start_time: string | null;
+  close_time: string | null;
+  execution_time: string | null;
+  history_length: number | null;
+};
+
+export type TemporalWorkflowEvent = {
+  event_id: number | null;
+  event_type: string | null;
+  event_time: string | null;
+};
+
+export type TemporalWorkflowDetail = {
+  enabled: boolean;
+  workflow: TemporalWorkflowSummary;
+  query_status: string | null;
+  events: TemporalWorkflowEvent[];
+  failure?: string | null;
+  error?: string;
+};
+
+export type TemporalWorkflowList = {
+  enabled: boolean;
+  items: TemporalWorkflowSummary[];
+  next_page_token: string | null;
+  query?: string;
+  error?: string;
+};
+
 export const api = {
   apps: () => call<CatalogAppRow[]>("GET", "/apps"),
   createApp: (b: Omit<CatalogAppRow, "id">) => call<CatalogAppRow>("POST", "/apps", b),
@@ -237,7 +280,32 @@ export const api = {
     setCsrf(r.csrf_token);
   },
   status: () =>
-    call<{ ok: boolean; runner_connected: boolean; runners_connected: number }>("GET", "/status"),
+    call<{
+      ok: boolean;
+      runner_connected: boolean;
+      runners_connected: number;
+      temporal?: TemporalStatus;
+    }>("GET", "/status"),
+  temporalStatus: () => call<TemporalStatus>("GET", "/temporal/status"),
+  temporalWorkflows: (q?: { query?: string; page_size?: number }) => {
+    const p = new URLSearchParams();
+    if (q?.query) p.set("query", q.query);
+    if (q?.page_size != null) p.set("page_size", String(q.page_size));
+    const qs = p.toString();
+    return call<TemporalWorkflowList>("GET", `/temporal/workflows${qs ? `?${qs}` : ""}`);
+  },
+  temporalWorkflow: (workflowId: string, q?: { run_id?: string; history_limit?: number }) => {
+    const p = new URLSearchParams();
+    if (q?.run_id) p.set("run_id", q.run_id);
+    if (q?.history_limit != null) p.set("history_limit", String(q.history_limit));
+    const qs = p.toString();
+    return call<TemporalWorkflowDetail>(
+      "GET",
+      `/temporal/workflows/${encodeURIComponent(workflowId)}${qs ? `?${qs}` : ""}`,
+    );
+  },
+  fleetSkillsSync: (hosts?: string[]) =>
+    call<{ workflow_id: string }>("POST", "/fleet/skills-sync", hosts ? { hosts } : {}),
   logout: () => call<void>("POST", "/auth/logout"),
   servers: () => call<Server[]>("GET", "/servers"),
   createServer: (b: CreateServerBody) => call<Server>("POST", "/servers", b),

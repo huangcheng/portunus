@@ -425,11 +425,18 @@ async def _oauth_callback_result(
         secret = None
         if method != "none":
             secret = await registry.read_oauth_client_secret(pending.server_id)
-        authorization = await exchange_code(pending, code, client_secret=secret)
+        bundle = await exchange_code(pending, code, client_secret=secret)
         store.discard(state)
-        await registry.store_authorization_header(
-            pending.server_id, authorization, actor="oauth-callback"
-        )
+        await registry.store_oauth_tokens(pending.server_id, bundle, actor="oauth-callback")
+        # Proactive Temporal refresh workflow (no-op when Temporal is not configured).
+        try:
+            from portunus_worker.client import signal_oauth_tokens_stored
+
+            await signal_oauth_tokens_stored(
+                pending.server_id, expires_in=bundle.expires_in, has_refresh=bool(bundle.refresh_token)
+            )
+        except Exception:  # noqa: BLE001 — Temporal is optional at callback time
+            logger.debug("temporal oauth signal skipped", exc_info=True)
     except (RegistryError, OAuthError) as e:
         logger.warning(
             "oauth callback failed code=%s status=%s msg=%s",
@@ -586,11 +593,118 @@ async def operator_status(
     """Authenticated fleet status (public ``/healthz`` omits runner counts — review #8)."""
     pool = getattr(request.app.state, "runner_pool", None)
     connected = list(pool.connected()) if pool is not None else []
+    temporal: dict[str, Any] = {"enabled": False}
+    try:
+        from portunus_worker.client import temporal_status
+
+        temporal = await temporal_status()
+    except Exception:  # noqa: BLE001
+        temporal = {"enabled": False}
     return {
         "ok": True,
         "runner_connected": bool(connected),
         "runners_connected": len(connected),
+        "temporal": temporal,
     }
+
+
+@router.post("/servers/{server_id}/connect-ensure")
+async def connect_ensure(
+    server_id: uuid.UUID,
+    actor: str = Depends(require_operator),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    """Start Connect/Ensure Temporal workflow (probe → enable → child probe/oauth)."""
+    from .db.session import async_session as _async_session
+
+    async with _async_session() as s:
+        if await s.get(Server, server_id) is None:
+            raise RegistryError(404, "not_found", "server not found")
+    try:
+        from portunus_worker.client import start_connect_ensure
+
+        wid = await start_connect_ensure(server_id)
+    except Exception as e:  # noqa: BLE001
+        raise RegistryError(503, "unsupported", f"temporal unavailable: {e}") from e
+    if wid is None:
+        raise RegistryError(503, "unsupported", "TEMPORAL_HOST is not configured")
+    await _audit(registry, actor, "server.connect_ensure", str(server_id), {"workflow_id": wid})
+    return {"workflow_id": wid}
+
+
+@router.post("/fleet/skills-sync")
+async def fleet_skills_sync(
+    request: Request,
+    actor: str = Depends(require_operator),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    """Kick a fleet skill-tree sync workflow (hosts from body or PORTUNUS_FLEET_HOSTS)."""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    hosts = body.get("hosts") if isinstance(body, dict) else None
+    if hosts is not None and (
+        not isinstance(hosts, list) or not all(isinstance(h, str) and h.strip() for h in hosts)
+    ):
+        raise RegistryError(422, "invalid_request", "hosts must be a list of strings")
+    try:
+        from portunus_worker.client import start_fleet_skills_sync
+
+        wid = await start_fleet_skills_sync(hosts=list(hosts) if hosts else None)
+    except Exception as e:  # noqa: BLE001
+        raise RegistryError(503, "unsupported", f"temporal unavailable: {e}") from e
+    if wid is None:
+        raise RegistryError(503, "unsupported", "TEMPORAL_HOST is not configured")
+    await _audit(registry, actor, "fleet.skills_sync", wid, {"hosts": hosts})
+    return {"workflow_id": wid}
+
+
+@router.get("/temporal/status")
+async def temporal_control_status(actor: str = Depends(require_operator)) -> dict[str, Any]:
+    """Temporal connectivity for the Workflows console."""
+    try:
+        from portunus_worker.client import temporal_status
+
+        return await temporal_status()
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": False, "error": str(e)}
+
+
+@router.get("/temporal/workflows")
+async def temporal_list_workflows(
+    actor: str = Depends(require_operator),
+    query: str = "",
+    page_size: int = 50,
+) -> dict[str, Any]:
+    """List control-plane workflows (Visibility query; defaults to Portunus task queue)."""
+    try:
+        from portunus_worker.client import list_workflows
+
+        return await list_workflows(query=query, page_size=page_size)
+    except Exception as e:  # noqa: BLE001
+        raise RegistryError(503, "unsupported", f"temporal unavailable: {e}") from e
+
+
+@router.get("/temporal/workflows/{workflow_id}")
+async def temporal_describe_workflow(
+    workflow_id: str,
+    actor: str = Depends(require_operator),
+    run_id: str = "",
+    history_limit: int = 80,
+) -> dict[str, Any]:
+    """Describe one workflow and return a truncated history for the drawer."""
+    try:
+        from portunus_worker.client import describe_workflow
+
+        return await describe_workflow(
+            workflow_id,
+            run_id=run_id or None,
+            history_limit=min(max(history_limit, 1), 200),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise RegistryError(503, "unsupported", f"temporal unavailable: {e}") from e
 
 
 @router.get("/fleet")

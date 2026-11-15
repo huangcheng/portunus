@@ -32,9 +32,12 @@ ERROR_CODES: frozenset[str] = frozenset(
 class PortunusError(Exception):
     """Base error carrying a spec §6.4 code."""
 
-    def __init__(self, code: str, message: str = "") -> None:
+    def __init__(
+        self, code: str, message: str = "", *, data: dict | None = None
+    ) -> None:
         if code not in ERROR_CODES:
             raise ValueError(f"unknown error code: {code!r}")
         self.code = code
         self.message = message
+        self.data = data
         super().__init__(f"{code}: {message}" if message else code)

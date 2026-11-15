@@ -20,7 +20,6 @@ export type AppIconId =
   | "ardot"
   | "weread"
   | "guangyapan"
-  | "quark"
   | "weiyun"
   | "pikpak"
   | "generic";
@@ -37,7 +36,6 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "ardot") return "ardot";
   if (slug === "weread") return "weread";
   if (slug === "guangyapan") return "guangyapan";
-  if (slug === "quark" || slug === "quarkclouddrive") return "quark";
   if (slug === "weiyun") return "weiyun";
   if (slug === "pikpak") return "pikpak";
   return "generic";
@@ -54,7 +52,6 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   dida365: "dida365.png",
   weread: "weread.png",
   guangyapan: "guangyapan.svg",
-  quark: "quark.png",
   weiyun: "weiyun.png",
   pikpak: "pikpak.png",
 };
