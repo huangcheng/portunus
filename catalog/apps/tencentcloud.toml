@@ -1,0 +1,22 @@
+slug = "tencentcloud"
+label = "腾讯云开发"
+description = "Tencent CloudBase remote MCP (OAuth) — cloud functions, databases, storage, and hosting for AI agents."
+connection = "oauth"
+egress = "domestic"
+popular = true
+categories = ["Developer Tools"]
+tags = ["tencentcloud", "cloudbase", "oauth", "mcp"]
+sort_order = 12
+
+[spec]
+url = "https://tcb-api.cloud.tencent.com/mcp/v1"
+authorize_url = "https://tcb-api.cloud.tencent.com/mcp/oauth2/authorize"
+token_url = "https://tcb-api.cloud.tencent.com/mcp/oauth2/token"
+registration_endpoint = "https://tcb-api.cloud.tencent.com/mcp/oauth2/register"
+token_endpoint_auth_method = "none"
+resource = "https://tcb-api.cloud.tencent.com/mcp/v1"
+issuer = "https://tcb-api.cloud.tencent.com"
+scopes = ["mcp:full"]
+setup_hints = [
+  "Authorize opens Tencent Cloud login and environment picker. Product MCPs (CVM, COS, …) from [TencentCloudCommunity/mcp-server](https://github.com/TencentCloudCommunity/mcp-server) can be added separately via marketplace SSE or stdio. CloudBase docs: [connection modes](https://docs.cloudbase.net/en/ai/cloudbase-ai-toolkit/connection-modes).",
+]

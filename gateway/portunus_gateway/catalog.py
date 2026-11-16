@@ -52,6 +52,8 @@ OVERSEAS_EGRESS_SLUGS = frozenset(
         "dropbox",
         "pikpak",
         "koofr",
+        "vultr",
+        "vercel",
     }
 )
 DOMESTIC_EGRESS_SLUGS = frozenset(
@@ -67,6 +69,9 @@ DOMESTIC_EGRESS_SLUGS = frozenset(
         "qqmusic",
         "guangyapan",
         "ardot",
+        "aliyun",
+        "tencentcloud",
+        "flyai",
     }
 )
 
@@ -155,6 +160,8 @@ IMA_MANIFEST: dict[str, Any] = _load_packaged_manifest("ima.example.yaml")
 QQMUSIC_MANIFEST: dict[str, Any] = _load_packaged_manifest("qqmusic.example.yaml")
 # Cubox json_cli — wraps official cubox-cli (fixed API Extension token).
 CUBOX_MANIFEST: dict[str, Any] = _load_packaged_manifest("cubox.example.yaml")
+# 飞猪 FlyAI json_cli — wraps @fly-ai/flyai-cli (Fliggy travel search).
+FLYAI_MANIFEST: dict[str, Any] = _load_packaged_manifest("flyai.example.yaml")
 # 光鸭云盘 json_cli — skill tree shipped under third_party/; runners mount/copy it.
 GUANGYAPAN_MANIFEST: dict[str, Any] = _load_packaged_manifest("guangyapan.example.yaml")
 # Default paths on Portunus runners (see deploy). Overridable via Connect env.
@@ -181,6 +188,41 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "resource": "https://ardot.tencent.com/mcp",
             "registration_endpoint": "https://ardot.tencent.com/oauth/register",
             "token_endpoint_auth_method": "none",
+        },
+    },
+    {
+        "slug": "tencentcloud",
+        "label": "腾讯云开发",
+        "name": "腾讯云开发",
+        "description": (
+            "Tencent CloudBase remote MCP (OAuth) — cloud functions, databases, storage, "
+            "and hosting for AI agents."
+        ),
+        "connection": "oauth",
+        "popular": True,
+        "categories": ["Developer Tools"],
+        "tags": ["tencentcloud", "cloudbase", "oauth", "mcp"],
+        "sort_order": 12,
+        "spec": {
+            "url": "https://tcb-api.cloud.tencent.com/mcp/v1",
+            "authorize_url": "https://tcb-api.cloud.tencent.com/mcp/oauth2/authorize",
+            "token_url": "https://tcb-api.cloud.tencent.com/mcp/oauth2/token",
+            "registration_endpoint": "https://tcb-api.cloud.tencent.com/mcp/oauth2/register",
+            "token_endpoint_auth_method": "none",
+            "resource": "https://tcb-api.cloud.tencent.com/mcp/v1",
+            "issuer": "https://tcb-api.cloud.tencent.com",
+            "scopes": ["mcp:full"],
+            "setup_hints": [
+                (
+                    "Authorize opens Tencent Cloud login and environment picker. Product MCPs "
+                    "(CVM, COS, …) from "
+                    "[TencentCloudCommunity/mcp-server]"
+                    "(https://github.com/TencentCloudCommunity/mcp-server) "
+                    "can be added separately via marketplace SSE or stdio. CloudBase docs: "
+                    "[connection modes]"
+                    "(https://docs.cloudbase.net/en/ai/cloudbase-ai-toolkit/connection-modes)."
+                ),
+            ],
         },
     },
     {
@@ -251,6 +293,99 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "[cloudflare/skills](https://github.com/cloudflare/skills) stay in the IDE; "
                     "this app is remote MCP at mcp.cloudflare.com. Setup: "
                     "[agent-setup/prompt.md](https://developers.cloudflare.com/agent-setup/prompt.md)."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "aliyun",
+        "label": "阿里云",
+        "name": "阿里云",
+        "description": (
+            "Alibaba Cloud OpenAPI MCP (Core) via OAuth — tens of thousands of OpenAPIs "
+            "over Streamable HTTP."
+        ),
+        "connection": "oauth",
+        "popular": True,
+        "categories": ["Developer Tools"],
+        "tags": ["aliyun", "alibaba", "oauth", "mcp", "openapi"],
+        "sort_order": 17,
+        "spec": {
+            "url": "https://openapi-mcp.cn-hangzhou.aliyuncs.com/mcp",
+            "authorize_url": "https://signin.aliyun.com/oauth2/v1/auth",
+            "token_url": "https://oauth.aliyun.com/v1/token",
+            "registration_endpoint": "https://openapi-mcp.cn-hangzhou.aliyuncs.com/register",
+            "token_endpoint_auth_method": "none",
+            "resource": "https://openapi-mcp.cn-hangzhou.aliyuncs.com/mcp",
+            "issuer": "https://openapi-mcp.cn-hangzhou.aliyuncs.com",
+            "scopes": ["openid", "/acs/mcp-server"],
+            "setup_hints": [
+                (
+                    "Install and assign the official OpenAPI MCP Server OAuth application in "
+                    "[RAM → OAuth Applications](https://ram.console.aliyun.com/application/oauth). "
+                    "Console: [api.aliyun.com/mcp](https://api.aliyun.com/mcp). Docs: "
+                    "[alibabacloud-api-mcp-server]"
+                    "(https://github.com/aliyun/alibabacloud-api-mcp-server)."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "vultr",
+        "label": "Vultr",
+        "name": "Vultr",
+        "description": (
+            "Vultr hosted MCP (read-only infrastructure, billing, and account tools) via OAuth."
+        ),
+        "connection": "oauth",
+        "popular": True,
+        "categories": ["Developer Tools"],
+        "tags": ["vultr", "oauth", "mcp", "cloud"],
+        "sort_order": 18,
+        "spec": {
+            "url": "https://mcp.vultr.com/mcp",
+            "authorize_url": "https://mcp.vultr.com/authorize",
+            "token_url": "https://mcp.vultr.com/token",
+            "registration_endpoint": "https://mcp.vultr.com/register",
+            "token_endpoint_auth_method": "none",
+            "resource": "https://mcp.vultr.com/mcp",
+            "issuer": "https://mcp.vultr.com/",
+            "scopes": [],
+            "setup_hints": [
+                (
+                    "Org admin must enable MCP and attach the Use MCP policy. Docs: "
+                    "[Vultr MCP overview]"
+                    "(https://docs.vultr.com/reference/mcp-server/overview)."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "vercel",
+        "label": "Vercel",
+        "name": "Vercel",
+        "description": (
+            "Vercel official remote MCP (projects, deployments, docs, analytics) via OAuth."
+        ),
+        "connection": "oauth",
+        "popular": True,
+        "categories": ["Developer Tools"],
+        "tags": ["vercel", "oauth", "mcp", "deploy"],
+        "sort_order": 19,
+        "spec": {
+            "url": "https://mcp.vercel.com",
+            "authorize_url": "https://vercel.com/oauth/authorize",
+            "token_url": "https://vercel.com/api/login/oauth/token",
+            "registration_endpoint": "https://vercel.com/api/login/oauth/register",
+            "token_endpoint_auth_method": "none",
+            "resource": "https://mcp.vercel.com/",
+            "issuer": "https://vercel.com",
+            "scopes": ["openid"],
+            "setup_hints": [
+                (
+                    "Vercel may require an approved MCP client or CIMD client_id. Docs: "
+                    "[vercel.com/docs/agent-resources/vercel-mcp]"
+                    "(https://vercel.com/docs/agent-resources/vercel-mcp)."
                 ),
             ],
         },
@@ -566,6 +701,32 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "Docs: "
                     "[github.com/tencentmusic/qqmusic-skills]"
                     "(https://github.com/tencentmusic/qqmusic-skills)."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "flyai",
+        "label": "飞猪 FlyAI",
+        "name": "飞猪 FlyAI",
+        "description": (
+            "Fliggy travel search (flights, hotels, trains, POIs, Marriott) via skill-bridge "
+            "wrapping @fly-ai/flyai-cli."
+        ),
+        "connection": "skill_bridge",
+        "popular": True,
+        "categories": ["Travel"],
+        "tags": ["flyai", "fliggy", "travel", "json_cli"],
+        "sort_order": 77,
+        "spec": {
+            "manifest": FLYAI_MANIFEST,
+            "secrets": [],
+            "setup_hints": [
+                (
+                    "Works without a key (CLI default). To use your own key later, set "
+                    "FLYAI_API_KEY on the server env. Skill: "
+                    "[alibaba-flyai/flyai-skill]"
+                    "(https://github.com/alibaba-flyai/flyai-skill)."
                 ),
             ],
         },

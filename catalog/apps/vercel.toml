@@ -1,0 +1,22 @@
+slug = "vercel"
+label = "Vercel"
+description = "Vercel official remote MCP (projects, deployments, docs, analytics) via OAuth."
+connection = "oauth"
+egress = "overseas"
+popular = true
+categories = ["Developer Tools"]
+tags = ["vercel", "oauth", "mcp", "deploy"]
+sort_order = 19
+
+[spec]
+url = "https://mcp.vercel.com"
+authorize_url = "https://vercel.com/oauth/authorize"
+token_url = "https://vercel.com/api/login/oauth/token"
+registration_endpoint = "https://vercel.com/api/login/oauth/register"
+token_endpoint_auth_method = "none"
+resource = "https://mcp.vercel.com/"
+issuer = "https://vercel.com"
+scopes = ["openid"]
+setup_hints = [
+  "Vercel may require an approved MCP client or CIMD client_id. Docs: [vercel.com/docs/agent-resources/vercel-mcp](https://vercel.com/docs/agent-resources/vercel-mcp).",
+]

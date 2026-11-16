@@ -1,0 +1,211 @@
+# 飞猪 FlyAI — wraps @fly-ai/flyai-cli (Fliggy travel search).
+# Works without a key (CLI ships a default); optional FLYAI_API_KEY via Connect vault.
+# Do not expose config/login as MCP tools.
+
+name: flyai
+version: "1.0.16"
+backend: json_cli
+
+auth:
+  type: none
+  connect_hint: "Optional: paste a FlyAI API key for enhanced results (FLYAI_API_KEY). Leave blank to use the CLI default. Docs: https://github.com/alibaba-flyai/flyai-skill"
+
+cli:
+  command: ["npx", "-y", "@fly-ai/flyai-cli@1.0.16"]
+  identity: {}
+  run_wrapper: raw
+
+tools:
+  - name: keyword_search
+    description: Natural-language keyword search across hotels, flights, tickets, tours, visas, and more
+    cli: ["keyword-search"]
+    input:
+      query:
+        type: string
+        required: true
+        description: Search query (e.g. Hangzhou 3-day trip)
+
+  - name: ai_search
+    description: Semantic travel search that understands complex natural-language intent
+    cli: ["ai-search"]
+    input:
+      query:
+        type: string
+        required: true
+        description: Full natural-language travel query
+
+  - name: search_flight
+    description: Structured flight search with filters and sorting
+    cli: ["search-flight"]
+    input:
+      origin:
+        type: string
+        required: true
+        description: Departure city or airport
+      destination:
+        type: string
+        description: Arrival city or airport
+      dep_date:
+        type: string
+        description: Departure date YYYY-MM-DD
+      dep_date_start:
+        type: string
+        description: Departure date range start
+      dep_date_end:
+        type: string
+        description: Departure date range end
+      back_date:
+        type: string
+        description: Return date YYYY-MM-DD
+      journey_type:
+        type: integer
+        description: "1=direct, 2=connecting"
+      seat_class_name:
+        type: string
+        description: Cabin class name
+      transport_no:
+        type: string
+        description: Flight number(s), comma-separated
+      transfer_city:
+        type: string
+        description: Layover city
+      dep_hour_start:
+        type: integer
+        description: Departure hour range start (24h)
+      dep_hour_end:
+        type: integer
+        description: Departure hour range end (24h)
+      max_price:
+        type: integer
+        description: Price ceiling (CNY)
+      sort_type:
+        type: integer
+        description: "1 price desc · 2 recommended · 3 price asc · 4 duration asc · 5 duration desc · 6 depart early · 7 depart late · 8 direct first"
+
+  - name: search_train
+    description: Structured train ticket search with filters and sorting
+    cli: ["search-train"]
+    input:
+      origin:
+        type: string
+        required: true
+        description: Departure city or station
+      destination:
+        type: string
+        description: Destination city or station
+      dep_date:
+        type: string
+        description: Departure date YYYY-MM-DD
+      journey_type:
+        type: integer
+        description: "1=direct, 2=transit"
+      seat_class_name:
+        type: string
+        description: Seat class (second class, first class, …)
+      max_price:
+        type: integer
+        description: Price ceiling (CNY)
+      sort_type:
+        type: integer
+        description: Sort code 1–8 (same as search_flight)
+
+  - name: search_hotel
+    description: Hotel search by destination with star, bed, price, and POI filters
+    cli: ["search-hotel"]
+    input:
+      dest_name:
+        type: string
+        required: true
+        description: Destination (country/province/city/district)
+      key_words:
+        type: string
+        description: Search keywords
+      poi_name:
+        type: string
+        description: Nearby attraction name
+      hotel_types:
+        type: string
+        description: 酒店 / 民宿 / 客栈
+      sort:
+        type: string
+        description: distance_asc · rate_desc · price_asc · price_desc · no_rank
+      check_in_date:
+        type: string
+        description: Check-in date YYYY-MM-DD
+      check_out_date:
+        type: string
+        description: Check-out date YYYY-MM-DD
+      hotel_stars:
+        type: string
+        description: Star rating 1–5, comma-separated
+      hotel_bed_types:
+        type: string
+        description: 大床房 / 双床房 / 多床房
+      max_price:
+        type: integer
+        description: Max price per night (CNY)
+
+  - name: search_poi
+    description: Attraction and POI search by city, category, or level
+    cli: ["search-poi"]
+    input:
+      city_name:
+        type: string
+        required: true
+        description: City name
+      keyword:
+        type: string
+        description: Attraction name keyword
+      poi_level:
+        type: integer
+        description: Attraction level 1–5
+      category:
+        type: string
+        description: Category (自然风光, 历史古迹, …)
+
+  - name: search_marriott_hotel
+    description: Marriott Group hotel search by destination
+    cli: ["search-marriott-hotel"]
+    input:
+      dest_name:
+        type: string
+        required: true
+        description: Destination
+      key_words:
+        type: string
+        description: Hotel name or brand keywords
+      poi_name:
+        type: string
+        description: Nearby attraction
+      hotel_bed_types:
+        type: string
+        description: Bed type(s)
+      max_price:
+        type: integer
+        description: Max price per night (CNY)
+      sort:
+        type: string
+        description: distance_asc · rate_desc · price_asc · price_desc · no_rank
+      check_in_date:
+        type: string
+        description: Check-in date YYYY-MM-DD
+      check_out_date:
+        type: string
+        description: Check-out date YYYY-MM-DD
+
+  - name: search_marriott_package
+    description: Marriott Group hotel package and bundled deal search
+    cli: ["search-marriott-package"]
+    input:
+      keyword:
+        type: string
+        description: Province, city, brand, hotel name, or selling point
+      hotel_name:
+        type: string
+        description: Hotel name
+      province_or_city:
+        type: string
+        description: Province or city
+      sort_type:
+        type: string
+        description: price_asc · price_desc

@@ -1,0 +1,25 @@
+slug = "aliyun"
+label = "阿里云"
+description = "Alibaba Cloud OpenAPI MCP (Core) via OAuth — tens of thousands of OpenAPIs over Streamable HTTP."
+connection = "oauth"
+egress = "domestic"
+popular = true
+categories = ["Developer Tools"]
+tags = ["aliyun", "alibaba", "oauth", "mcp", "openapi"]
+sort_order = 17
+
+[spec]
+url = "https://openapi-mcp.cn-hangzhou.aliyuncs.com/mcp"
+authorize_url = "https://signin.aliyun.com/oauth2/v1/auth"
+token_url = "https://oauth.aliyun.com/v1/token"
+registration_endpoint = "https://openapi-mcp.cn-hangzhou.aliyuncs.com/register"
+token_endpoint_auth_method = "none"
+resource = "https://openapi-mcp.cn-hangzhou.aliyuncs.com/mcp"
+issuer = "https://openapi-mcp.cn-hangzhou.aliyuncs.com"
+scopes = [
+  "openid",
+  "/acs/mcp-server",
+]
+setup_hints = [
+  "Install and assign the official OpenAPI MCP Server OAuth application in [RAM → OAuth Applications](https://ram.console.aliyun.com/application/oauth). Console: [api.aliyun.com/mcp](https://api.aliyun.com/mcp). Docs: [alibabacloud-api-mcp-server](https://github.com/aliyun/alibabacloud-api-mcp-server).",
+]

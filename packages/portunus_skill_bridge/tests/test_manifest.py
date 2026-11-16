@@ -9,6 +9,7 @@ WEREAD = ROOT / "manifests" / "weread.example.yaml"
 GUANG = ROOT / "manifests" / "guangyapan.example.yaml"
 QUARK = ROOT / "manifests" / "quark.example.yaml"
 CUBOX = ROOT / "manifests" / "cubox.example.yaml"
+FLYAI = ROOT / "manifests" / "flyai.example.yaml"
 IMA = ROOT / "manifests" / "ima.example.yaml"
 QQMUSIC = ROOT / "manifests" / "qqmusic.example.yaml"
 
@@ -61,6 +62,26 @@ def test_load_cubox_example():
     folder = next(t for t in m.tools if t.name == "folder_list")
     assert folder.cli == ["folder", "list"]
     assert {t.name for t in m.tools} >= {"folder_list", "card_list", "card_rag", "save"}
+
+
+def test_load_flyai_example():
+    m = load_manifest(FLYAI)
+    assert m.backend == "json_cli"
+    assert m.auth.type == "none"
+    assert m.cli is not None
+    assert m.cli.run_wrapper == "raw"
+    assert m.cli.command[:2] == ["npx", "-y"]
+    assert "@fly-ai/flyai-cli" in m.cli.command[2]
+    flight = next(t for t in m.tools if t.name == "search_flight")
+    assert flight.cli == ["search-flight"]
+    assert flight.input["origin"].required is True
+    assert {t.name for t in m.tools} >= {
+        "keyword_search",
+        "ai_search",
+        "search_flight",
+        "search_hotel",
+        "search_poi",
+    }
 
 
 def test_load_ima_example():

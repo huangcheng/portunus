@@ -1,0 +1,16 @@
+slug = "flyai"
+label = "飞猪 FlyAI"
+description = "Fliggy travel search (flights, hotels, trains, POIs, Marriott) via skill-bridge wrapping @fly-ai/flyai-cli."
+connection = "skill_bridge"
+egress = "domestic"
+popular = true
+categories = ["Travel"]
+tags = ["flyai", "fliggy", "travel", "json_cli"]
+sort_order = 77
+
+[spec]
+manifest = "flyai.example.yaml"
+secrets = []
+setup_hints = [
+  "Works without a key (CLI default). To use your own key later, set FLYAI_API_KEY on the server env. Skill: [alibaba-flyai/flyai-skill](https://github.com/alibaba-flyai/flyai-skill).",
+]

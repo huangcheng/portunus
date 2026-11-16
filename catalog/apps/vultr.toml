@@ -1,0 +1,22 @@
+slug = "vultr"
+label = "Vultr"
+description = "Vultr hosted MCP (read-only infrastructure, billing, and account tools) via OAuth."
+connection = "oauth"
+egress = "overseas"
+popular = true
+categories = ["Developer Tools"]
+tags = ["vultr", "oauth", "mcp", "cloud"]
+sort_order = 18
+
+[spec]
+url = "https://mcp.vultr.com/mcp"
+authorize_url = "https://mcp.vultr.com/authorize"
+token_url = "https://mcp.vultr.com/token"
+registration_endpoint = "https://mcp.vultr.com/register"
+token_endpoint_auth_method = "none"
+resource = "https://mcp.vultr.com/mcp"
+issuer = "https://mcp.vultr.com/"
+scopes = []
+setup_hints = [
+  "Org admin must enable MCP and attach the Use MCP policy. Docs: [Vultr MCP overview](https://docs.vultr.com/reference/mcp-server/overview).",
+]

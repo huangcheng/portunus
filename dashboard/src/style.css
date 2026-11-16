@@ -675,7 +675,7 @@ th.text-right { text-align: right; }
   box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--sidebar-foreground) 16%, transparent);
 }
 .app-brand-image { display: block; width: 30px; height: 30px; object-fit: contain; }
-.app-brand-image.ardot, .app-brand-image.flomo, .app-brand-image.dida365, .app-brand-image.weread, .app-brand-image.guangyapan, .app-brand-image.weiyun, .app-brand-image.raindrop, .app-brand-image.cubox, .app-brand-image.github, .app-brand-image.cloudflare, .app-brand-image.youdaonote, .app-brand-image.ima, .app-brand-image.weknora, .app-brand-image.pikpak, .app-brand-image.yandex, .app-brand-image.drime, .app-brand-image.mega, .app-brand-image.gdrive, .app-brand-image.qqmusic { width: 48px; height: 48px; border-radius: inherit; }
+.app-brand-image.ardot, .app-brand-image.flomo, .app-brand-image.dida365, .app-brand-image.weread, .app-brand-image.guangyapan, .app-brand-image.weiyun, .app-brand-image.raindrop, .app-brand-image.cubox, .app-brand-image.github, .app-brand-image.cloudflare, .app-brand-image.aliyun, .app-brand-image.vultr, .app-brand-image.vercel, .app-brand-image.tencentcloud, .app-brand-image.flyai, .app-brand-image.youdaonote, .app-brand-image.ima, .app-brand-image.weknora, .app-brand-image.pikpak, .app-brand-image.yandex, .app-brand-image.drime, .app-brand-image.mega, .app-brand-image.gdrive, .app-brand-image.qqmusic { width: 48px; height: 48px; border-radius: inherit; }
 .app-brand-image.koofr { width: 32px; height: 32px; border-radius: 8px; }
 .app-brand-image.dropbox { width: 32px; height: 27px; }
 .app-brand-image.box { width: 28px; height: 28px; }
