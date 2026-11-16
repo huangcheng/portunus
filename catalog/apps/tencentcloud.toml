@@ -1,22 +1,29 @@
 slug = "tencentcloud"
-label = "腾讯云开发"
-description = "Tencent CloudBase remote MCP (OAuth) — cloud functions, databases, storage, and hosting for AI agents."
-connection = "oauth"
+label = "腾讯云"
+description = "Tencent Cloud CVM management MCP (instances, VPC, security groups, monitoring) via SecretId/SecretKey."
+connection = "stdio"
 egress = "domestic"
 popular = true
 categories = ["Developer Tools"]
-tags = ["tencentcloud", "cloudbase", "oauth", "mcp"]
+tags = ["tencentcloud", "cvm", "stdio", "mcp"]
 sort_order = 12
 
 [spec]
-url = "https://tcb-api.cloud.tencent.com/mcp/v1"
-authorize_url = "https://tcb-api.cloud.tencent.com/mcp/oauth2/authorize"
-token_url = "https://tcb-api.cloud.tencent.com/mcp/oauth2/token"
-registration_endpoint = "https://tcb-api.cloud.tencent.com/mcp/oauth2/register"
-token_endpoint_auth_method = "none"
-resource = "https://tcb-api.cloud.tencent.com/mcp/v1"
-issuer = "https://tcb-api.cloud.tencent.com"
-scopes = ["mcp:full"]
+command = "uvx"
+args = ["mcp-server-cvm==0.1.12"]
 setup_hints = [
-  "Authorize opens Tencent Cloud login and environment picker. Product MCPs (CVM, COS, …) from [TencentCloudCommunity/mcp-server](https://github.com/TencentCloudCommunity/mcp-server) can be added separately via marketplace SSE or stdio. CloudBase docs: [connection modes](https://docs.cloudbase.net/en/ai/cloudbase-ai-toolkit/connection-modes).",
+  "Create API keys in [CAM → API Keys](https://console.cloud.tencent.com/cam/capi). Package: [mcp-server-cvm](https://github.com/TencentCloudCommunity/mcp-server/tree/main/src/mcp-server-cvm). Default region is ap-guangzhou (override via TENCENTCLOUD_REGION after Connect if needed).",
 ]
+
+[[spec.env]]
+name = "TENCENTCLOUD_SECRET_ID"
+label = "SecretId"
+secret = true
+
+[[spec.env]]
+name = "TENCENTCLOUD_SECRET_KEY"
+label = "SecretKey"
+secret = true
+
+[spec.env_defaults]
+TENCENTCLOUD_REGION = "ap-guangzhou"

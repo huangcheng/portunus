@@ -10,7 +10,9 @@ sort_order = 77
 
 [spec]
 manifest = "flyai.example.yaml"
-secrets = []
+secrets = [
+  { name = "FLYAI_API_KEY", label = "FlyAI API token", secret = true },
+]
 setup_hints = [
-  "Connect to enable; the CLI works with its built-in default credentials. Skill: [alibaba-flyai/flyai-skill](https://github.com/alibaba-flyai/flyai-skill).",
+  "Paste your FlyAI API token at Connect. Skill: [alibaba-flyai/flyai-skill](https://github.com/alibaba-flyai/flyai-skill).",
 ]

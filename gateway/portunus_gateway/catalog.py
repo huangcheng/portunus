@@ -192,35 +192,41 @@ DEFAULT_APPS: list[dict[str, Any]] = [
     },
     {
         "slug": "tencentcloud",
-        "label": "腾讯云开发",
-        "name": "腾讯云开发",
+        "label": "腾讯云",
+        "name": "腾讯云",
         "description": (
-            "Tencent CloudBase remote MCP (OAuth) — cloud functions, databases, storage, "
-            "and hosting for AI agents."
+            "Tencent Cloud CVM management MCP (instances, VPC, security groups, monitoring) "
+            "via SecretId/SecretKey."
         ),
-        "connection": "oauth",
+        "connection": "stdio",
         "popular": True,
         "categories": ["Developer Tools"],
-        "tags": ["tencentcloud", "cloudbase", "oauth", "mcp"],
+        "tags": ["tencentcloud", "cvm", "stdio", "mcp"],
         "sort_order": 12,
         "spec": {
-            "url": "https://tcb-api.cloud.tencent.com/mcp/v1",
-            "authorize_url": "https://tcb-api.cloud.tencent.com/mcp/oauth2/authorize",
-            "token_url": "https://tcb-api.cloud.tencent.com/mcp/oauth2/token",
-            "registration_endpoint": "https://tcb-api.cloud.tencent.com/mcp/oauth2/register",
-            "token_endpoint_auth_method": "none",
-            "resource": "https://tcb-api.cloud.tencent.com/mcp/v1",
-            "issuer": "https://tcb-api.cloud.tencent.com",
-            "scopes": ["mcp:full"],
+            "command": "uvx",
+            "args": ["mcp-server-cvm==0.1.12"],
+            "env": [
+                {
+                    "name": "TENCENTCLOUD_SECRET_ID",
+                    "label": "SecretId",
+                    "secret": True,
+                },
+                {
+                    "name": "TENCENTCLOUD_SECRET_KEY",
+                    "label": "SecretKey",
+                    "secret": True,
+                },
+            ],
+            "env_defaults": {"TENCENTCLOUD_REGION": "ap-guangzhou"},
             "setup_hints": [
                 (
-                    "Authorize opens Tencent Cloud login and environment picker. Product MCPs "
-                    "(CVM, COS, …) from "
-                    "[TencentCloudCommunity/mcp-server]"
-                    "(https://github.com/TencentCloudCommunity/mcp-server) "
-                    "can be added separately via marketplace SSE or stdio. CloudBase docs: "
-                    "[connection modes]"
-                    "(https://docs.cloudbase.net/en/ai/cloudbase-ai-toolkit/connection-modes)."
+                    "Create API keys in "
+                    "[CAM → API Keys](https://console.cloud.tencent.com/cam/capi). "
+                    "Package: "
+                    "[mcp-server-cvm]"
+                    "(https://github.com/TencentCloudCommunity/mcp-server/tree/main/src/mcp-server-cvm). "
+                    "Default region is ap-guangzhou."
                 ),
             ],
         },
@@ -302,27 +308,34 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "label": "阿里云",
         "name": "阿里云",
         "description": (
-            "Alibaba Cloud OpenAPI MCP (Core) via OAuth — tens of thousands of OpenAPIs "
-            "over Streamable HTTP."
+            "Alibaba Cloud OpenAPI MCP via local mcp-proxy — paste AccessKey ID and Secret "
+            "at Connect (no OAuth)."
         ),
-        "connection": "oauth",
+        "connection": "stdio",
         "popular": True,
         "categories": ["Developer Tools"],
-        "tags": ["aliyun", "alibaba", "oauth", "mcp", "openapi"],
+        "tags": ["aliyun", "alibaba", "stdio", "mcp", "openapi"],
         "sort_order": 17,
         "spec": {
-            "url": "https://openapi-mcp.cn-hangzhou.aliyuncs.com/mcp",
-            "authorize_url": "https://signin.aliyun.com/oauth2/v1/auth",
-            "token_url": "https://oauth.aliyun.com/v1/token",
-            "registration_endpoint": "https://openapi-mcp.cn-hangzhou.aliyuncs.com/register",
-            "token_endpoint_auth_method": "none",
-            "resource": "https://openapi-mcp.cn-hangzhou.aliyuncs.com/mcp",
-            "scopes": ["openid", "/acs/mcp-server"],
+            "command": "uvx",
+            "args": ["alibabacloud.mcp-proxy==0.2.17"],
+            "env": [
+                {
+                    "name": "ALIBABA_CLOUD_ACCESS_KEY_ID",
+                    "label": "AccessKey ID",
+                    "secret": True,
+                },
+                {
+                    "name": "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+                    "label": "AccessKey Secret",
+                    "secret": True,
+                },
+            ],
             "setup_hints": [
                 (
-                    "Install and assign the official OpenAPI MCP Server OAuth application in "
-                    "[RAM → OAuth Applications](https://ram.console.aliyun.com/application/oauth). "
-                    "Console: [api.aliyun.com/mcp](https://api.aliyun.com/mcp). Docs: "
+                    "Create an AccessKey for a RAM user with "
+                    "AliyunOpenAPIMCPServerStaticCredentialAccess "
+                    "(or ram:GenerateAccessToken + openapiexplorer:*). Docs: "
                     "[alibabacloud-api-mcp-server]"
                     "(https://github.com/aliyun/alibabacloud-api-mcp-server)."
                 ),
@@ -719,11 +732,17 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "sort_order": 77,
         "spec": {
             "manifest": FLYAI_MANIFEST,
-            "secrets": [],
+            "secrets": [
+                {
+                    "name": "FLYAI_API_KEY",
+                    "label": "FlyAI API token",
+                    "secret": True,
+                },
+            ],
             "setup_hints": [
                 (
-                    "Connect to enable; the CLI works with its built-in default credentials. "
-                    "Skill: [alibaba-flyai/flyai-skill]"
+                    "Paste your FlyAI API token at Connect. Skill: "
+                    "[alibaba-flyai/flyai-skill]"
                     "(https://github.com/alibaba-flyai/flyai-skill)."
                 ),
             ],
@@ -1363,13 +1382,16 @@ class CatalogStore:
             if dirty:
                 await s.commit()
 
-        # Idempotent connector migration for the rclone switchover: box/onedrive rows
-        # seeded with the earlier oauth / ms-365 shapes would keep serving the old
-        # connectors forever (CatalogStore.update cannot change a row's connection).
-        # Refresh to the seed spec when the stored shape no longer matches, and bump
-        # linked stdio children so they respawn (same mechanism as skill_bridge).
+        # Idempotent connector migration: catalog rows still on a retired shape
+        # (oauth / ms-365) while the seed is stdio. CatalogStore.update cannot
+        # change connection, so rewrite here and bump linked servers to respawn.
         async with self._sf() as s:
-            seed_by_slug = {a["slug"]: a for a in DEFAULT_APPS if a["slug"] in ("box", "onedrive")}
+            seed_by_slug = {
+                a["slug"]: a
+                for a in DEFAULT_APPS
+                if a.get("connection") == "stdio"
+                and a["slug"] in ("box", "onedrive", "aliyun", "tencentcloud")
+            }
             rows = (
                 await s.execute(select(CatalogApp).where(CatalogApp.slug.in_(list(seed_by_slug))))
             ).scalars().all()
@@ -1378,33 +1400,29 @@ class CatalogStore:
                 seed = seed_by_slug[row.slug]
                 # Narrow: only migrate rows still on a retired connector shape.
                 # The ms-365 marker lives in spec.args (command was bare `npx`);
-                # the oauth box row is caught by the connection check. Operator
-                # stdio specs without that marker are left alone.
+                # oauth seeds (box / aliyun / tencentcloud) are caught by connection.
                 stale = row.connection == "oauth" or "ms-365-mcp-server" in str(
                     row.spec.get("args") or ""
                 )
                 if not stale:
                     continue
+                seed_spec = seed["spec"]
+                seed_command = str(seed_spec.get("command") or "")
+                seed_args = list(seed_spec.get("args") or [])
                 row.connection = "stdio"
+                row.label = seed["label"]
+                row.name = seed["name"]
                 row.description = seed["description"]
                 row.tags = _normalize_labels(seed.get("tags"), field="tags")
-                row.spec = validate_spec("stdio", seed["spec"])
-                # Server rows copied command/args at create time; catalog specs do
-                # not overlay for stdio. Rewrite both shapes:
-                #   stdio + old argv (ms-365 npx) -> the shim command;
-                #   remote (old Box oauth)        -> a stdio row on the shim. Its
-                # stale Authorization header stays in the vault but is unused; the
-                # connector reads RCLONE_REMOTE_CONFIG, which appears in vault only
-                # after the operator pastes the rclone config in the manage panel
-                # (until then the server fails closed at start, never silently).
+                row.spec = validate_spec("stdio", seed_spec)
                 linked = (
                     await s.execute(select(Server).where(Server.slug == row.slug))
                 ).scalars().all()
                 for srv in linked:
                     # Targeted cleanup: drop only entries belonging to the retired
-                    # connectors (OneDrive MS365_* env; the Box remote's Bearer
-                    # header + dotted OAuth client secret). A blanket NOT IN
-                    # (seed env) delete would silently discard user env entries.
+                    # connectors (OneDrive MS365_* env; remote Bearer / OAuth client
+                    # secret). A blanket NOT IN (seed env) delete would silently
+                    # discard user env entries.
                     retired = {"Authorization", "portunus.oauth_client_secret"}
                     retired |= {f"MS365_MCP_{k}" for k in (
                         "TENANT_ID", "USE_KEYTAR", "TOKEN_CACHE_PATH",
@@ -1421,19 +1439,22 @@ class CatalogStore:
                     for entry in stale_env:
                         await s.delete(entry)
                     if srv.kind == "stdio":
-                        srv.command = seed["spec"]["command"]
-                        srv.args = []
+                        srv.command = seed_command
+                        srv.args = list(seed_args)
                     elif srv.kind == "remote":
                         srv.kind = "stdio"
-                        srv.command = seed["spec"]["command"]
-                        srv.args = []
+                        srv.command = seed_command
+                        srv.args = list(seed_args)
                         srv.url = None
                         srv.oauth = None
+                        srv.has_oauth_refresh = False
+                        srv.token_expires_at = None
+                        srv.enabled = False
                     srv.vault_version = int(srv.vault_version or 0) + 1
                 migrated += 1
             if migrated:
                 await s.commit()
-                log.info("rclone migration: refreshed %d catalog row(s)", migrated)
+                log.info("stdio seed migration: refreshed %d catalog row(s)", migrated)
 
         # gdrive: rclone stdio → official Drive MCP oauth (drivemcp.googleapis.com).
         async with self._sf() as s:
@@ -1505,14 +1526,15 @@ class CatalogStore:
         async with self._sf() as s:
             for raw in DEFAULT_APPS:
                 connection = raw.get("connection")
-                is_rclone_stdio = (
+                # Insert missing packaged stdio seeds (rclone shim + pinned uvx/npx).
+                is_packaged_stdio = (
                     connection == "stdio"
                     and isinstance(raw.get("spec"), dict)
-                    and raw["spec"].get("command") == RCLONE_SHIM
+                    and raw["spec"].get("command") in (RCLONE_SHIM, "uvx", "npx")
                 )
                 if (
                     connection not in ("skill_bridge", "http", "oauth")
-                    and not is_rclone_stdio
+                    and not is_packaged_stdio
                 ):
                     continue
                 spec = validate_spec(raw["connection"], raw["spec"])
@@ -1551,10 +1573,22 @@ class CatalogStore:
                 seed_defaults = spec.get("env_defaults") or {}
                 live_defaults = (row.spec or {}).get("env_defaults") or {}
                 defaults_changed = seed_defaults != live_defaults
+                seed_secret_names = {
+                    s.get("name")
+                    for s in (spec.get("secrets") or [])
+                    if isinstance(s, dict) and s.get("name")
+                }
+                live_secret_names = {
+                    s.get("name")
+                    for s in ((row.spec or {}).get("secrets") or [])
+                    if isinstance(s, dict) and s.get("name")
+                }
+                secrets_changed = bool(seed_secret_names - live_secret_names)
                 spec_changed = (
                     (seed_names and seed_names != live_names)
                     or auth_changed
                     or defaults_changed
+                    or secrets_changed
                 )
                 if spec_changed:
                     live = dict(row.spec or {})

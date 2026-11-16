@@ -57,8 +57,8 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "aliyun" || slug === "alibaba" || slug === "alibabacloud") return "aliyun";
   if (slug === "vultr") return "vultr";
   if (slug === "vercel") return "vercel";
-  if (slug === "tencentcloud" || slug === "cloudbase" || slug === "tcb") return "tencentcloud";
-  if (slug === "flyai" || slug === "fliggy") return "flyai";
+  if (slug === "tencentcloud") return "tencentcloud";
+  if (slug === "flyai" || slug === "fliggy" || slug === "feizhu") return "flyai";
   if (slug === "youdaonote" || slug === "youdao") return "youdaonote";
   if (slug === "ima") return "ima";
   if (slug === "weknora") return "weknora";

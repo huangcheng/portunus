@@ -8,7 +8,7 @@ backend: json_cli
 
 auth:
   type: none
-  connect_hint: "No API key required — Connect enables the Fliggy travel CLI. Docs: https://github.com/alibaba-flyai/flyai-skill"
+  connect_hint: "Paste your FlyAI API token (FLYAI_API_KEY). Docs: https://github.com/alibaba-flyai/flyai-skill"
 
 cli:
   command: ["npx", "-y", "@fly-ai/flyai-cli@1.0.16"]

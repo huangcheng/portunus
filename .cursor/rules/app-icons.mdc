@@ -1,0 +1,30 @@
+---
+description: Catalog app brand icons — official marks only, else initials
+globs: dashboard/src/icons/apps.tsx,dashboard/public/icons/apps/**,dashboard/src/style.css,.cursor/skills/add-portunus-app/**
+alwaysApply: false
+---
+
+# App catalog icons
+
+Source of truth: `DESIGN.md` → Iconography + `AppBrandMark` in `dashboard/src/icons/apps.tsx`.
+
+## Do
+
+- Prefer a **real** vendor mark in `dashboard/public/icons/apps/<slug>.{png|svg}` (full-bleed square tile, logo fills the tile).
+- Wire `AppIconId`, `appIconIdForSlug`, and `OFFICIAL_ICON_FILES` only when that file exists.
+- Add `.app-brand-image.<slug>` to the **48×48** list in `dashboard/src/style.css`.
+- Dark glyphs on transparent SVG: embed a light rounded rect in the asset (see `github.svg` / `vercel.svg`), not a one-off CSS hack unless matching an existing pattern like `.app-card-mark.dropbox`.
+
+## Don't
+
+- Do **not** invent or AI-draw placeholder logos (colored rect + fake path).
+- Do **not** list a slug in `OFFICIAL_ICON_FILES` without a redistributable asset.
+- Do **not** use the wrong brand's Simple Icon (e.g. QQ mark for 腾讯云).
+
+## No asset yet
+
+Omit from `OFFICIAL_ICON_FILES`. `AppBrandMark` falls back to the **initial-letter** mark (first Latin/CJK grapheme + slug/label-hashed hue). That is correct — not a bug to "fix" with a synthetic logo.
+
+## Good sources
+
+Official brand kits, vendor favicon/CDN assets you may redistribute, or Simple Icons **only** when the slug matches the real product. Tile Simple Icons onto a 48×48 rounded rect with the brand color when needed for legibility.
