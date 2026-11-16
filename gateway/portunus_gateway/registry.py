@@ -944,6 +944,14 @@ class Registry:
     async def _catalog_has_slug(self, slug: str) -> bool:
         if self._static_catalog_has_slug(slug):
             return True
+        # TOML is authoritative in mode B: stale catalog_apps rows are not catalog apps.
+        try:
+            from .toml_catalog import catalog_mode, get_loaded
+
+            if get_loaded() is not None and catalog_mode() == "B":
+                return False
+        except Exception:  # noqa: BLE001
+            pass
         key = slug.casefold()
         async with self._sf() as s:
             hit = (
@@ -956,6 +964,13 @@ class Registry:
         static = self._recipe_url_from_operator_static(recipe_slug)
         if static is not None:
             return static
+        try:
+            from .toml_catalog import catalog_mode, get_loaded
+
+            if get_loaded() is not None and catalog_mode() == "B":
+                return False
+        except Exception:  # noqa: BLE001
+            pass
         key = recipe_slug.casefold()
         async with self._sf() as s:
             row = (

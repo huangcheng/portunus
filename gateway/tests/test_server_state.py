@@ -363,6 +363,7 @@ async def test_skill_bridge_requires_session(registry):
         args=[],
         env={},
         actor="test",
+        recipe_slug="quark",
     )  # binary_allowlist covers true
     sid = uuid.UUID(view["id"])
     await registry.record_outcome(sid, None, is_probe=True)
