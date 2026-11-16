@@ -2,6 +2,7 @@ slug = "box"
 label = "Box"
 description = "Box files via rclone (paste your `rclone config show box` output at Connect; authorize first with `rclone authorize \"box\"`)."
 connection = "stdio"
+egress = "overseas"
 popular = true
 categories = ["Storage"]
 tags = ["box", "files", "storage", "rclone"]

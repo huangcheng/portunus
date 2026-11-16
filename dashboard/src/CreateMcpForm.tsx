@@ -1,6 +1,12 @@
 import { useCallback, useState, type FormEvent } from "react";
 import { api } from "./api";
 import { JsonObjectEditor, parseJsonStringMap } from "./JsonObjectEditor";
+import {
+  NPX_ARGS_DEFAULT,
+  normalizeStdioArgs,
+  stdioArgsHint,
+  validateStdioArgs,
+} from "./stdioArgv";
 
 /** Create a custom remote/stdio MCP endpoint (Apps “Add custom MCP”). */
 export function CreateMcpForm({ onCreated, onCancel }: { onCreated: () => void; onCancel: () => void }) {
@@ -8,12 +14,11 @@ export function CreateMcpForm({ onCreated, onCancel }: { onCreated: () => void; 
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [command, setCommand] = useState("npx");
-  const [args, setArgs] = useState("");
+  const [args, setArgs] = useState(NPX_ARGS_DEFAULT);
   const [url, setUrl] = useState("");
   const [env, setEnv] = useState("");
   const [headersJson, setHeadersJson] = useState('{\n  "Authorization": "Bearer "\n}');
   const [headersOk, setHeadersOk] = useState(true);
-  const [regions, setRegions] = useState("");
   const [authMode, setAuthMode] = useState<"none" | "token" | "oauth">("token");
   const [oauthAuthorize, setOauthAuthorize] = useState("");
   const [oauthToken, setOauthToken] = useState("");
@@ -23,6 +28,14 @@ export function CreateMcpForm({ onCreated, onCancel }: { onCreated: () => void; 
   const [error, setError] = useState("");
 
   const onHeadersValidity = useCallback((ok: boolean) => setHeadersOk(ok), []);
+  const argsHint = kind === "stdio" ? stdioArgsHint(command) : null;
+
+  function selectKind(next: "stdio" | "remote") {
+    setKind(next);
+    if (next === "stdio" && !args.trim() && command.trim().toLowerCase() === "npx") {
+      setArgs(NPX_ARGS_DEFAULT);
+    }
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -38,17 +51,22 @@ export function CreateMcpForm({ onCreated, onCancel }: { onCreated: () => void; 
       } else if (authMode === "token") {
         Object.assign(envMap, parseJsonStringMap(headersJson));
       }
-      const preferred_regions = regions
-        .split(/[,\s]+/)
-        .map((r) => r.trim())
-        .filter(Boolean);
+      // Routing affinity comes from catalog egress defaults (or manage-drawer choices).
+      const preferred_regions: string[] = [];
       if (kind === "stdio") {
+        const rawArgs = args.split(/\s+/).filter(Boolean);
+        const normalized = normalizeStdioArgs(command, rawArgs);
+        if (normalized.join(" ") !== rawArgs.join(" ")) {
+          setArgs(normalized.join(" ") + (normalized.length ? " " : ""));
+        }
+        const argvError = validateStdioArgs(command, normalized);
+        if (argvError) throw new Error(argvError);
         await api.createServer({
           name,
           slug,
           kind: "stdio",
           command,
-          args: args.split(/\s+/).filter(Boolean),
+          args: normalized,
           env: envMap,
           preferred_regions,
         });
@@ -90,10 +108,10 @@ export function CreateMcpForm({ onCreated, onCancel }: { onCreated: () => void; 
           <p>Identify the MCP and choose its transport.</p>
         </div>
         <div className="segment" role="tablist" aria-label="MCP kind">
-          <button type="button" aria-selected={kind === "remote"} onClick={() => setKind("remote")}>
+          <button type="button" aria-selected={kind === "remote"} onClick={() => selectKind("remote")}>
             Remote HTTP
           </button>
-          <button type="button" aria-selected={kind === "stdio"} onClick={() => setKind("stdio")}>
+          <button type="button" aria-selected={kind === "stdio"} onClick={() => selectKind("stdio")}>
             Stdio
           </button>
         </div>
@@ -108,20 +126,23 @@ export function CreateMcpForm({ onCreated, onCancel }: { onCreated: () => void; 
           </label>
         </div>
         {kind === "stdio" ? (
-          <div className="row">
-            <label className="field command-field">
-              Command
-              <input value={command} onChange={(e) => setCommand(e.target.value)} required />
-            </label>
-            <label className="field grow">
-              Args
-              <input
-                placeholder="--ignore-scripts pkg@1.2.3"
-                value={args}
-                onChange={(e) => setArgs(e.target.value)}
-              />
-            </label>
-          </div>
+          <>
+            <div className="row">
+              <label className="field command-field">
+                Command
+                <input value={command} onChange={(e) => setCommand(e.target.value)} required />
+              </label>
+              <label className="field grow">
+                Args
+                <input
+                  placeholder="-y --ignore-scripts pkg@1.2.3"
+                  value={args}
+                  onChange={(e) => setArgs(e.target.value)}
+                />
+              </label>
+            </div>
+            {argsHint ? <p className="provider-hint">{argsHint}</p> : null}
+          </>
         ) : (
           <label className="field">
             MCP URL
@@ -217,21 +238,7 @@ export function CreateMcpForm({ onCreated, onCancel }: { onCreated: () => void; 
         )}
       </section>
 
-      <section className="form-section" aria-labelledby="custom-mcp-routing">
-        <div className="form-section-heading">
-          <h3 id="custom-mcp-routing">Routing</h3>
-          <p>Optionally prefer runners in specific regions.</p>
-        </div>
-        <label className="field">
-          Preferred regions
-          <input
-            placeholder="Optional soft affinity"
-            value={regions}
-            onChange={(e) => setRegions(e.target.value)}
-          />
-        </label>
-        <p className="provider-hint">Starts paused. After creation, open it and Probe to go live.</p>
-      </section>
+      <p className="provider-hint">Starts paused. After creation, open it and Probe to go live.</p>
 
       <div className="form-actions">
         <button type="button" className="ghost" onClick={onCancel}>

@@ -2,6 +2,7 @@ slug = "onedrive"
 label = "OneDrive"
 description = "OneDrive files via rclone (paste your `rclone config show onedrive` output at Connect; tokens stay encrypted in the gateway vault)."
 connection = "stdio"
+egress = "overseas"
 popular = true
 categories = ["Storage"]
 tags = ["onedrive", "microsoft", "files", "rclone"]

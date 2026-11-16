@@ -2,6 +2,7 @@ slug = "koofr"
 label = "Koofr"
 description = "Koofr cloud storage over WebDAV (app password)."
 connection = "webdav"
+egress = "overseas"
 popular = false
 categories = ["Storage"]
 tags = ["webdav", "files", "storage"]

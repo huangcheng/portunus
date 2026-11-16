@@ -2,6 +2,7 @@ slug = "dida365"
 label = "滴答清单"
 description = "TickTick / 滴答清单 tasks via remote MCP."
 connection = "http"
+egress = "domestic"
 popular = false
 categories = ["Productivity"]
 tags = ["tasks", "todo", "http"]

@@ -2,6 +2,7 @@ slug = "flomo"
 label = "flomo"
 description = "flomo memos via remote MCP."
 connection = "http"
+egress = "domestic"
 popular = false
 categories = ["Productivity"]
 tags = ["notes", "memos", "http"]

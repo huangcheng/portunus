@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { api, type OAuthBody, type Server, type Tool } from "./api";
 import { CatalogConfigPage } from "./CatalogConfigPage";
+import { EnvFields } from "./EnvFields";
 import { parseEnvRows } from "./envRows";
 import { CreateMcpForm } from "./CreateMcpForm";
 import { GatewayOverview } from "./GatewayOverview";
@@ -30,6 +31,18 @@ import {
   type StdioApp,
   type WebDavApp,
 } from "./providers";
+import { SetupHints } from "./SetupHints";
+import {
+  ROUTING_CHOICES,
+  choiceToRegions,
+  regionsToChoice,
+  type RoutingChoice,
+} from "./routingPreference";
+import {
+  normalizeStdioArgs,
+  stdioArgsHint,
+  validateStdioArgs,
+} from "./stdioArgv";
 
 type Tab = "all" | "connected";
 
@@ -866,53 +879,7 @@ function OAuthManagePanel({
             .
           </p>
         )}
-        {app.slug === "github" ? (
-          <p className="provider-hint">
-            Create a GitHub{" "}
-            <a
-              href="https://github.com/settings/developers"
-              target="_blank"
-              rel="noreferrer"
-            >
-              OAuth App
-            </a>{" "}
-            or{" "}
-            <a
-              href="https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/about-creating-github-apps"
-              target="_blank"
-              rel="noreferrer"
-            >
-              GitHub App
-            </a>{" "}
-            (remote MCP has no DCR). Set the callback to the Redirect URI below. Docs:{" "}
-            <a
-              href="https://docs.github.com/en/copilot/how-tos/copilot-in-your-ide/customize-copilot/extend-copilot-with-tools-and-context/set-up-the-github-mcp-server"
-              target="_blank"
-              rel="noreferrer"
-            >
-              GitHub MCP setup
-            </a>
-            .
-          </p>
-        ) : null}
-        {app.slug === "cloudflare" ? (
-          <p className="provider-hint">
-            Authorize opens Cloudflare OAuth (account + API scopes). Agent skills from{" "}
-            <a href="https://github.com/cloudflare/skills" target="_blank" rel="noreferrer">
-              cloudflare/skills
-            </a>{" "}
-            stay in the IDE; this Portunus app is the remote MCP at{" "}
-            <code>mcp.cloudflare.com</code>. Setup source:{" "}
-            <a
-              href="https://developers.cloudflare.com/agent-setup/prompt.md"
-              target="_blank"
-              rel="noreferrer"
-            >
-              agent-setup/prompt.md
-            </a>
-            .
-          </p>
-        ) : null}
+        <SetupHints hints={specStringList(app.spec, "setup_hints")} />
         <p className="provider-hint">
           Redirect URI: <code>{`${window.location.origin}/api/oauth/callback`}</code>
         </p>
@@ -978,9 +945,10 @@ function OAuthManagePanel({
   );
 }
 
-function skillBridgeSecretDefs(app: SkillBridgeApp): { name: string; label: string; secret: boolean }[] {
+function skillBridgeSecretDefs(app: SkillBridgeApp) {
   // Shared with CatalogConfigForm via parseEnvRows (bare strings + {name,label,secret}).
-  return parseEnvRows(app.spec.secrets).map(({ name, label, secret }) => ({ name, label, secret }));
+  // Multiline is suppressed for skill_bridge until the gateway preserves it.
+  return parseEnvRows(app.spec.secrets).map((row) => ({ ...row, multiline: false }));
 }
 
 function skillBridgeEnvDefaults(app: SkillBridgeApp): Record<string, string> {
@@ -1314,55 +1282,13 @@ function SkillBridgeManagePanel({
               ? `${oauthOpts?.connectHint || "Open the authorize link and confirm in the vendor app."} Login stays on the runner — agents never see codes.`
               : "API secrets stay in the Portunus vault. The tool manifest lives in the catalog and updates without rebuilding — connected servers respawn on save."}
         </p>
-        {app.slug === "cubox" ? (
-          <p className="provider-hint">
-            Enable API Extension and paste the full save URL (or bare token) from{" "}
-            <a href="https://cubox.pro/web/settings/extensions" target="_blank" rel="noreferrer">
-              cubox.pro
-            </a>{" "}
-            or{" "}
-            <a href="https://cubox.cc/web/settings/extensions" target="_blank" rel="noreferrer">
-              cubox.cc
-            </a>
-            . A URL like <code>https://cubox.pro/c/api/save/…</code> is split into{" "}
-            <code>CUBOX_TOKEN</code> + <code>CUBOX_SERVER</code> automatically. Docs:{" "}
-            <a href="https://help.cubox.pro/ai/agents/" target="_blank" rel="noreferrer">
-              help.cubox.pro/ai/agents
-            </a>
-            .
-          </p>
-        ) : null}
-        {app.slug === "ima" ? (
-          <p className="provider-hint">
-            Create Client ID + API Key at{" "}
-            <a href="https://ima.qq.com/agent-interface" target="_blank" rel="noreferrer">
-              ima.qq.com/agent-interface
-            </a>
-            . Official skill package:{" "}
-            <a
-              href="https://app-dl.ima.qq.com/skills/ima-skills-1.1.10.zip"
-              target="_blank"
-              rel="noreferrer"
-            >
-              ima-skills-1.1.10.zip
-            </a>
-            . Portunus bridges notes + knowledge-base OpenAPI (URL import included; local file→COS
-            upload stays in the vendor skill scripts).
-          </p>
-        ) : null}
-        {secretDefs.map((def) => (
-          <label className="field" key={def.name}>
-            {def.label} {active ? "(leave blank to keep)" : ""}
-            <input
-              type={def.secret ? "password" : "text"}
-              value={values[def.name] || ""}
-              onChange={(e) => setValues((prev) => ({ ...prev, [def.name]: e.target.value }))}
-              required={!active}
-              autoComplete="off"
-              placeholder={active && def.secret ? "••••••••" : undefined}
-            />
-          </label>
-        ))}
+        <SetupHints hints={specStringList(app.spec, "setup_hints")} />
+        <EnvFields
+          defs={secretDefs}
+          values={values}
+          onChange={(name, value) => setValues((prev) => ({ ...prev, [name]: value }))}
+          active={active}
+        />
 
         {qrPng && (
           <div className="skill-auth-qr">
@@ -1587,6 +1513,7 @@ function WebDavManagePanel({
     >
       <form className="stack drawer-section" onSubmit={save}>
         <p className="provider-hint">Use an app password, not your account login.</p>
+        <SetupHints hints={specStringList(app.spec, "setup_hints")} />
         <label className="field">
           Root URL
           <input value={rootUrl} readOnly autoComplete="off" />
@@ -1756,49 +1683,6 @@ function StdioManagePanel({
     }
   }
 
-  function renderEnvField(def: ReturnType<typeof stdioEnvDefs>[number]) {
-    if (def.multiline) {
-      // Mask-by-default applies only to an existing stored value: a fresh Connect
-      // must present an editable paste box.
-      if (active && def.secret && !revealed[def.name]) {
-        return (
-          <div className="multiline-secret">
-            <input type="password" value="••••••••••••" readOnly tabIndex={-1} />
-            <button
-              type="button"
-              className="ghost sm"
-              onClick={() => setRevealed((prev) => ({ ...prev, [def.name]: true }))}
-            >
-              Edit config
-            </button>
-          </div>
-        );
-      }
-      return (
-        <textarea
-          aria-label={def.label}
-          rows={7}
-          value={values[def.name] || ""}
-          onChange={(e) => setValues((prev) => ({ ...prev, [def.name]: e.target.value }))}
-          required={!active}
-          autoComplete="off"
-          spellCheck={false}
-          placeholder={active ? undefined : "Paste the multi-line configuration value"}
-        />
-      );
-    }
-    return (
-      <input
-        type={def.secret ? "password" : "text"}
-        value={values[def.name] || ""}
-        onChange={(e) => setValues((prev) => ({ ...prev, [def.name]: e.target.value }))}
-        required={!active}
-        autoComplete="off"
-        placeholder={active && def.secret ? "••••••••" : undefined}
-      />
-    );
-  }
-
   return (
     <DrawerShell
       title={app.label}
@@ -1812,45 +1696,16 @@ function StdioManagePanel({
       <form className="stack drawer-section" onSubmit={save}>
         <p className="provider-hint">
           Stdio MCP: <code>{[command, ...args].join(" ")}</code>
-          {app.slug === "pikpak" ? (
-            <>
-              <br />
-              Create a PAT in PikPak → Settings → Access & Integrations → Personal Access Tokens (
-              <a
-                href="https://mypikpak.com/en-US/help-center/connected_apps/personal_access_tokens"
-                target="_blank"
-                rel="noreferrer"
-              >
-                guide
-              </a>
-              ).
-            </>
-          ) : null}
-          {app.slug === "mega" ? (
-            <>
-              <br />
-              Paste the full output of <code>rclone config show mega</code> (obscured{" "}
-              <code>pass</code> is fine). Docs:{" "}
-              <a href="https://rclone.org/mega/" target="_blank" rel="noreferrer">
-                rclone.org/mega
-              </a>
-              .
-            </>
-          ) : null}
         </p>
-        {secretDefs.map((def) =>
-          def.multiline ? (
-            <div className="field" key={def.name}>
-              {def.label} {active ? "(leave blank to keep)" : ""}
-              {renderEnvField(def)}
-            </div>
-          ) : (
-            <label className="field" key={def.name}>
-              {def.label} {active ? "(leave blank to keep)" : ""}
-              {renderEnvField(def)}
-            </label>
-          ),
-        )}
+        <SetupHints hints={specStringList(app.spec, "setup_hints")} />
+        <EnvFields
+          defs={secretDefs}
+          values={values}
+          onChange={(name, value) => setValues((prev) => ({ ...prev, [name]: value }))}
+          active={active}
+          revealed={revealed}
+          onReveal={(name) => setRevealed((prev) => ({ ...prev, [name]: true }))}
+        />
         <div className="apps-actions">
           <button className="primary sm" type="submit" disabled={busy}>
             {current ? "Save" : "Connect"}
@@ -2007,52 +1862,7 @@ function HttpManagePanel({
             ) : null}
           </p>
         )}
-        {app.slug === "weknora" ? (
-          <p className="provider-hint">
-            In WeKnora: 设置 → 发布集成 → MCP Server. Copy the endpoint URL and Bearer token (
-            <code>mcp_…</code>). Docs:{" "}
-            <a href="https://github.com/Tencent/WeKnora" target="_blank" rel="noreferrer">
-              github.com/Tencent/WeKnora
-            </a>
-            .
-          </p>
-        ) : null}
-        {app.slug === "weiyun" ? (
-          <p className="provider-hint">
-            Get a token at{" "}
-            <a href="https://www.weiyun.com/act/openclaw" target="_blank" rel="noreferrer">
-              weiyun.com/act/openclaw
-            </a>
-            .
-          </p>
-        ) : null}
-        {app.slug === "raindrop" ? (
-          <p className="provider-hint">
-            Paste a Raindrop API access token (Bearer). Docs:{" "}
-            <a href="https://developer.raindrop.io/mcp/mcp" target="_blank" rel="noreferrer">
-              developer.raindrop.io/mcp
-            </a>
-            . MCP is Pro-beta.
-          </p>
-        ) : null}
-        {app.slug === "youdaonote" ? (
-          <p className="provider-hint">
-            Paste the API Key from the{" "}
-            <a href="https://mopen.163.com" target="_blank" rel="noreferrer">
-              NetEase MCP console
-            </a>{" "}
-            (phone-bound Youdao Note account). Same key as{" "}
-            <code>YOUDAONOTE_API_KEY</code> / <code>youdaonote config set apiKey</code>. Guides:{" "}
-            <a href="https://note.youdao.com/help-center/cli-guide.html" target="_blank" rel="noreferrer">
-              CLI
-            </a>
-            ,{" "}
-            <a href="https://note.youdao.com/help-center/skill-guide.html" target="_blank" rel="noreferrer">
-              Skills
-            </a>
-            .
-          </p>
-        ) : null}
+        <SetupHints hints={specStringList(app.spec, "setup_hints")} />
         {urlFromOperator ? (
           <label className="field">
             MCP endpoint URL
@@ -2111,10 +1921,22 @@ function GenericManagePanel({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [current, setCurrent] = useState<Server | null>(server);
+  const [name, setName] = useState(server.name);
+  const [slug, setSlug] = useState(server.slug);
+  const [command, setCommand] = useState(server.command || "npx");
+  const [args, setArgs] = useState((server.args ?? []).join(" "));
+  const [url, setUrl] = useState(server.url || "");
   const [token, setToken] = useState("");
+  const custom = !server.recipe_slug;
+  const argsHint = server.kind === "stdio" ? stdioArgsHint(command) : null;
 
   useEffect(() => {
     setCurrent(server);
+    setName(server.name);
+    setSlug(server.slug);
+    setCommand(server.command || "npx");
+    setArgs((server.args ?? []).join(" "));
+    setUrl(server.url || "");
     setToken("");
     setError("");
     setNotice("");
@@ -2122,10 +1944,51 @@ function GenericManagePanel({
 
   if (!current) return null;
 
-  const endpoint =
-    current.kind === "stdio"
-      ? [current.command, ...(current.args ?? [])].join(" ")
-      : (current.url ?? "");
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    if (!current) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const patch: Parameters<typeof api.updateServer>[1] = {
+        name: name.trim(),
+      };
+      if (custom) {
+        patch.slug = slug.trim();
+      }
+      if (current.kind === "stdio" && custom) {
+        const rawArgs = args.split(/\s+/).filter(Boolean);
+        const normalized = normalizeStdioArgs(command.trim(), rawArgs);
+        if (normalized.join(" ") !== rawArgs.join(" ")) {
+          setArgs(normalized.join(" "));
+        }
+        const argvError = validateStdioArgs(command.trim(), normalized);
+        if (argvError) throw new Error(argvError);
+        patch.command = command.trim();
+        patch.args = normalized;
+      }
+      if (current.kind === "remote") {
+        const nextUrl = url.trim();
+        if (nextUrl && nextUrl !== (current.url || "")) {
+          patch.url = nextUrl;
+        }
+      }
+      const updated = await api.updateServer(current.id, patch);
+      setCurrent(updated);
+      setName(updated.name);
+      setSlug(updated.slug);
+      setCommand(updated.command || "npx");
+      setArgs((updated.args ?? []).join(" "));
+      setUrl(updated.url || "");
+      setNotice("Saved.");
+      await onChanged();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function pasteToken(e: FormEvent) {
     e.preventDefault();
@@ -2158,51 +2021,106 @@ function GenericManagePanel({
       active={current.has_auth || current.env_names.length > 0}
       configured={current.has_auth || current.env_names.length > 0}
     >
-      <div className="stack drawer-section">
-        {current.kind === "remote" && (
-          <form className="stack" onSubmit={pasteToken}>
-            <label className="field">
-              Bearer token {current.has_auth ? "(replace)" : ""}
-              <input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                autoComplete="off"
-                placeholder={current.has_auth ? "••••••••" : "Paste token"}
-              />
-            </label>
-            <div className="apps-actions">
-              <button className="outline sm" type="submit" disabled={busy || !token.trim()}>
-                Save token
-              </button>
+      <form className="stack drawer-section" onSubmit={save}>
+        <p className="provider-hint">
+          {custom
+            ? "Custom MCP — edit identity and endpoint, then Probe to refresh tools."
+            : "Catalog MCP — name is editable; slug and argv stay bound to the recipe."}
+        </p>
+        <div className="form-grid">
+          <label className="field">
+            Name
+            <input value={name} onChange={(e) => setName(e.target.value)} required />
+          </label>
+          <label className="field">
+            Slug
+            <input
+              value={slug}
+              onChange={(e) => setSlug(e.target.value)}
+              required
+              readOnly={!custom}
+              disabled={!custom}
+            />
+          </label>
+        </div>
+        {current.kind === "stdio" ? (
+          <>
+            <div className="row">
+              <label className="field command-field">
+                Command
+                <input
+                  value={command}
+                  onChange={(e) => setCommand(e.target.value)}
+                  required
+                  readOnly={!custom}
+                  disabled={!custom}
+                />
+              </label>
+              <label className="field grow">
+                Args
+                <input
+                  value={args}
+                  onChange={(e) => setArgs(e.target.value)}
+                  placeholder="-y --ignore-scripts pkg@1.2.3"
+                  readOnly={!custom}
+                  disabled={!custom}
+                />
+              </label>
             </div>
-          </form>
+            {custom && argsHint ? <p className="provider-hint">{argsHint}</p> : null}
+          </>
+        ) : (
+          <label className="field">
+            MCP URL
+            <input
+              type="url"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              required
+              autoComplete="off"
+            />
+          </label>
         )}
+        <div className="apps-actions">
+          <button className="primary sm" type="submit" disabled={busy}>
+            Save
+          </button>
+        </div>
+      </form>
 
-        <details className="apps-tech" open={current.kind === "stdio"}>
-          <summary>Endpoint details</summary>
+      {current.kind === "remote" && (
+        <form className="stack drawer-section" onSubmit={pasteToken}>
+          <label className="field">
+            Bearer token {current.has_auth ? "(replace)" : ""}
+            <input
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              autoComplete="off"
+              placeholder={current.has_auth ? "••••••••" : "Paste token"}
+            />
+          </label>
+          <div className="apps-actions">
+            <button className="outline sm" type="submit" disabled={busy || !token.trim()}>
+              Save token
+            </button>
+          </div>
+        </form>
+      )}
+
+      {current.env_names.length > 0 && (
+        <details className="apps-tech drawer-section">
+          <summary>Vault</summary>
           <div className="provider-meta">
             <div>
-              <span className="muted">Kind</span>
-              <code>{current.kind}</code>
+              <span className="muted">Names</span>
+              <code>{current.env_names.join(", ")}</code>
             </div>
-            <div>
-              <span className="muted">Slug</span>
-              <code>{current.slug}</code>
-            </div>
-            <div>
-              <span className="muted">Endpoint</span>
-              <code>{endpoint}</code>
-            </div>
-            {current.env_names.length > 0 && (
-              <div>
-                <span className="muted">Vault</span>
-                <code>{current.env_names.join(", ")}</code>
-              </div>
-            )}
           </div>
         </details>
+      )}
 
+      <div className="drawer-section">
         <ServerLifecycle
           current={current}
           busy={busy}
@@ -2212,7 +2130,6 @@ function GenericManagePanel({
           setCurrent={setCurrent}
           onChanged={onChanged}
         />
-
         {notice && <div className="notice success">{notice}</div>}
         {error && <div className="notice error">{error}</div>}
       </div>
@@ -2575,6 +2492,8 @@ function ServerLifecycle({
 }) {
   if (!current) return null;
 
+  const routing = regionsToChoice(current.preferred_regions);
+
   async function probe() {
     setError("");
     setNotice("");
@@ -2615,11 +2534,54 @@ function ServerLifecycle({
     }
   }
 
+  async function setRouting(choice: RoutingChoice) {
+    if (choice === routing) return;
+    setError("");
+    setNotice("");
+    setBusy(true);
+    try {
+      const updated = await api.updateServer(current!.id, {
+        preferred_regions: choiceToRegions(choice),
+      });
+      setCurrent(updated);
+      setNotice(
+        choice === "any"
+          ? "Routing: any healthy runner."
+          : `Routing: prefer ${choice} runners.`,
+      );
+      await onChanged();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="drawer-lifecycle">
       {!current.enabled && (
         <p className="provider-hint">Paused apps are invisible to agents. Probe to go live, or resume.</p>
       )}
+      <div className="stack">
+        <p className="provider-hint">Runner preference</p>
+        <div className="segment" role="tablist" aria-label="Runner preference">
+          {ROUTING_CHOICES.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              aria-selected={routing === c.id}
+              disabled={busy}
+              onClick={() => void setRouting(c.id)}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
+        <p className="provider-hint">
+          Soft affinity among healthy sites. Tag runners with{" "}
+          <code>PORTUNUS_REGIONS</code> including <code>domestic</code> or <code>overseas</code>.
+        </p>
+      </div>
       <div className="apps-actions">
         <button type="button" className="outline sm" disabled={busy} onClick={() => void probe()}>
           Probe

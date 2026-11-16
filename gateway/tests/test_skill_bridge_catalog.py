@@ -218,9 +218,11 @@ def test_rclone_drive_seeds_shape():
         assert entry["secret"] is True
 
 
-def test_overseas_preferred_regions_for_rclone_slugs():
+def test_egress_preferred_regions_for_catalog_slugs():
     from portunus_gateway.catalog import (
+        DOMESTIC_PREFERRED_REGIONS,
         OVERSEAS_PREFERRED_REGIONS,
+        egress_for_slug,
         preferred_regions_for_slug,
     )
 
@@ -233,11 +235,17 @@ def test_overseas_preferred_regions_for_rclone_slugs():
         "raindrop",
         "github",
         "cloudflare",
+        "dropbox",
+        "pikpak",
         "Yandex",
     ):
         assert preferred_regions_for_slug(slug) == OVERSEAS_PREFERRED_REGIONS
-    assert preferred_regions_for_slug("guangyapan") == []
-    assert preferred_regions_for_slug("cubox") == []
+        assert egress_for_slug(slug) == "overseas"
+    for slug in ("nutstore", "weiyun", "guangyapan", "cubox", "ardot"):
+        assert preferred_regions_for_slug(slug) == DOMESTIC_PREFERRED_REGIONS
+        assert egress_for_slug(slug) == "domestic"
+    assert preferred_regions_for_slug("weknora") == []
+    assert egress_for_slug("weknora") == "any"
     assert preferred_regions_for_slug("") == []
 
 
@@ -307,7 +315,7 @@ def test_youdaonote_http_seed_shape():
     assert spec["url"] == "https://open.mail.163.com/api/ynote/mcp/sse"
     assert spec["auth_header"] == "x-api-key"
     assert spec["token_prefix"] == ""
-    assert preferred_regions_for_slug("youdaonote") == []
+    assert preferred_regions_for_slug("youdaonote") == ["domestic"]
 
 
 def test_validate_ima_skill_bridge_spec():

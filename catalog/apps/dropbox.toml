@@ -2,6 +2,7 @@ slug = "dropbox"
 label = "Dropbox"
 description = "Files, sharing, and file requests via Dropbox MCP."
 connection = "oauth"
+egress = "overseas"
 popular = true
 categories = ["Storage"]
 tags = ["oauth", "files", "storage"]

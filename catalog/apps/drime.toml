@@ -2,6 +2,7 @@ slug = "drime"
 label = "Drime"
 description = "Drime Cloud files via rclone (create an API token in Drime Settings → Developers, configure a `drime` remote, then paste `rclone config show drime` at Connect). Requires rclone ≥ 1.73."
 connection = "stdio"
+egress = "overseas"
 popular = true
 categories = ["Storage"]
 tags = ["drime", "files", "storage", "rclone"]

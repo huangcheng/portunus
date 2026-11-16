@@ -2,6 +2,7 @@ slug = "weknora"
 label = "WeKnora"
 description = "Tencent WeKnora self-hosted knowledge MCP. Paste your /mcp/<endpoint_id> URL and Bearer endpoint token (settings → 发布集成 → MCP Server)."
 connection = "http"
+egress = "any"
 popular = true
 categories = ["Productivity"]
 tags = ["weknora", "tencent", "knowledge", "rag", "http"]
@@ -9,3 +10,6 @@ sort_order = 54
 
 [spec]
 url_from_operator = true
+setup_hints = [
+  "In WeKnora: 设置 → 发布集成 → MCP Server. Copy the endpoint URL and Bearer token (mcp_…). Docs: [github.com/Tencent/WeKnora](https://github.com/Tencent/WeKnora).",
+]

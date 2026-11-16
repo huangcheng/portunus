@@ -2,6 +2,7 @@ slug = "yandex"
 label = "Yandex Disk"
 description = "Yandex Disk files via rclone (paste your `rclone config show yandex` output at Connect; authorize first with `rclone authorize \"yandex\"`)."
 connection = "stdio"
+egress = "overseas"
 popular = true
 categories = ["Storage"]
 tags = ["yandex", "disk", "files", "rclone"]

@@ -2,6 +2,7 @@ slug = "nutstore"
 label = "Nutstore"
 description = "坚果云 files over WebDAV (app password)."
 connection = "webdav"
+egress = "domestic"
 popular = true
 categories = ["Storage"]
 tags = ["webdav", "files", "storage"]

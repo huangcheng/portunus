@@ -2,6 +2,7 @@ slug = "youdaonote"
 label = "有道云笔记"
 description = "Youdao Note via remote MCP (x-api-key). Same API Key as youdaonote CLI / Skills."
 connection = "http"
+egress = "domestic"
 popular = true
 categories = ["Productivity"]
 tags = ["youdaonote", "notes", "http", "netease"]
@@ -11,3 +12,6 @@ sort_order = 53
 url = "https://open.mail.163.com/api/ynote/mcp/sse"
 auth_header = "x-api-key"
 token_prefix = ""
+setup_hints = [
+  "Paste the API Key from the [NetEase MCP console](https://mopen.163.com) (phone-bound Youdao Note account). Guides: [CLI](https://note.youdao.com/help-center/cli-guide.html), [Skills](https://note.youdao.com/help-center/skill-guide.html).",
+]

@@ -18,7 +18,7 @@ from pydantic import ValidationError
 from yaml import YAMLError
 
 from .db.models import CATALOG_CONNECTIONS
-from .catalog import validate_spec
+from .catalog import EGRESS_ANY, normalize_egress, validate_spec
 from .registry import RegistryError
 
 SLUG_RE = re.compile(r"^[a-z0-9-]{1,64}$")
@@ -64,6 +64,8 @@ class Recipe:
     artifacts: list[Artifact] = field(default_factory=list)
     enabled: bool = True
     disable_reasons: list[str] = field(default_factory=list)
+    # Soft runner affinity: any | overseas | domestic (PORTUNUS_REGIONS tags).
+    egress: str = "any"
 
     @property
     def needs_egress(self) -> bool:
@@ -292,6 +294,10 @@ def parse_recipe(path: Path, *, manifest_root: Path | None = None) -> Recipe:
     sort_order = data.get("sort_order", 0)
     if not isinstance(sort_order, int) or isinstance(sort_order, bool):
         raise CatalogVerifyError("sort_order must be an integer")
+    try:
+        egress = normalize_egress(data.get("egress", EGRESS_ANY))
+    except RegistryError as e:
+        raise CatalogVerifyError(str(e.message if hasattr(e, "message") else e)) from e
 
     spec_raw = data.get("spec")
     if not isinstance(spec_raw, dict):
@@ -323,6 +329,10 @@ def parse_recipe(path: Path, *, manifest_root: Path | None = None) -> Recipe:
         }
         if env_defaults:
             spec_for_validate["env_defaults"] = env_defaults
+        # Presentation-only; must survive the skill_bridge rebuild (validate_spec
+        # whitelists keys — omitting here silently drops TOML setup_hints).
+        if "setup_hints" in spec_raw:
+            spec_for_validate["setup_hints"] = spec_raw["setup_hints"]
     elif connection in ("oauth", "http", "webdav", "stdio"):
         # secrets as names are not part of validate_spec for these; strip env_defaults
         # into a side channel after validation.
@@ -400,6 +410,7 @@ def parse_recipe(path: Path, *, manifest_root: Path | None = None) -> Recipe:
         sort_order=sort_order,
         spec=spec,
         artifacts=artifacts,
+        egress=egress,
     )
 
 
@@ -546,6 +557,7 @@ def recipe_public_view(recipe: Recipe, *, catalog_mode: str = "A", id: str | Non
         "sort_order": recipe.sort_order,
         "spec": dict(recipe.spec),
         "catalog_mode": catalog_mode,
+        "egress": recipe.egress,
         "needs_egress": recipe.needs_egress,
         "arch_set": sorted(recipe.arch_set()),
         "artifact_count": len(recipe.artifacts),

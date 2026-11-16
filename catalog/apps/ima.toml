@@ -2,6 +2,7 @@ slug = "ima"
 label = "IMA"
 description = "Tencent IMA notes and knowledge base via OpenAPI (Client ID + API Key)."
 connection = "skill_bridge"
+egress = "domestic"
 popular = true
 categories = ["Productivity"]
 tags = ["ima", "notes", "knowledge", "http_rpc"]
@@ -9,7 +10,9 @@ sort_order = 74
 
 [spec]
 manifest = "ima.example.yaml"
-
+setup_hints = [
+  "Create Client ID + API Key at [ima.qq.com/agent-interface](https://ima.qq.com/agent-interface).",
+]
 [[spec.secrets]]
 name = "IMA_OPENAPI_CLIENTID"
 label = "IMA Client ID"

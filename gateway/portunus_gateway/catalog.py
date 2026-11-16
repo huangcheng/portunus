@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -28,25 +28,112 @@ WEBDAV_MCP_PACKAGE = "webdav-mcp-server@1.0.4"
 RCLONE_SHIM = "/var/lib/portunus/skills/rclone-shim/shim"
 WEBDAV_MCP_ARGS = ["-y", "--ignore-scripts", WEBDAV_MCP_PACKAGE]
 
-# Soft affinity for rclone vendors that often need unrestricted egress.
-# Portable tag only — each deploy labels its own runners via PORTUNUS_REGIONS
-# (e.g. include ``overseas`` on sites that can reach those vendors). SiteHealth
-# still fails over on network errors among healthy sites.
-OVERSEAS_PREFERRED_REGIONS = ["overseas"]
+# Soft affinity for catalog Connect when the operator leaves preferred_regions empty.
+# Portable tags only — each deploy labels runners via PORTUNUS_REGIONS
+# (e.g. ``overseas`` / ``domestic``). SiteHealth still fails over on network errors.
+EGRESS_ANY = "any"
+EGRESS_OVERSEAS = "overseas"
+EGRESS_DOMESTIC = "domestic"
+EGRESS_CHOICES = frozenset({EGRESS_ANY, EGRESS_OVERSEAS, EGRESS_DOMESTIC})
+OVERSEAS_PREFERRED_REGIONS = [EGRESS_OVERSEAS]
+DOMESTIC_PREFERRED_REGIONS = [EGRESS_DOMESTIC]
+# Legacy alias kept for tests / callers that still import the frozenset.
 OVERSEAS_EGRESS_SLUGS = frozenset(
-    {"yandex", "drime", "box", "onedrive", "mega", "raindrop", "github", "cloudflare"}
+    {
+        "yandex",
+        "drime",
+        "box",
+        "onedrive",
+        "mega",
+        "raindrop",
+        "github",
+        "cloudflare",
+        "dropbox",
+        "pikpak",
+        "koofr",
+    }
 )
+DOMESTIC_EGRESS_SLUGS = frozenset(
+    {
+        "nutstore",
+        "weiyun",
+        "flomo",
+        "dida365",
+        "youdaonote",
+        "weread",
+        "cubox",
+        "ima",
+        "guangyapan",
+        "ardot",
+    }
+)
+
+
+def preferred_regions_for_egress(egress: str | None) -> list[str]:
+    """Map catalog ``egress`` to server preferred_regions (soft affinity tags)."""
+    e = (egress or EGRESS_ANY).strip().casefold()
+    if e == EGRESS_OVERSEAS:
+        return list(OVERSEAS_PREFERRED_REGIONS)
+    if e == EGRESS_DOMESTIC:
+        return list(DOMESTIC_PREFERRED_REGIONS)
+    return []
+
+
+def normalize_egress(raw: Any) -> str:
+    if raw is None or raw == "":
+        return EGRESS_ANY
+    if not isinstance(raw, str) or raw.strip().casefold() not in EGRESS_CHOICES:
+        raise RegistryError(
+            422,
+            "invalid_request",
+            f"egress must be one of {sorted(EGRESS_CHOICES)}",
+        )
+    return raw.strip().casefold()
+
+
+def egress_for_slug(slug: str) -> str:
+    """Resolve catalog egress for a slug (loaded TOML → DEFAULT_APPS → legacy sets)."""
+    key = (slug or "").casefold()
+    if not key:
+        return EGRESS_ANY
+    try:
+        from .toml_catalog import get_loaded
+
+        loaded = get_loaded()
+    except Exception:  # noqa: BLE001 — catalog optional at import time
+        loaded = None
+    if loaded is not None:
+        for recipe in loaded.recipes:
+            if recipe.slug.casefold() == key and recipe.enabled:
+                return normalize_egress(getattr(recipe, "egress", EGRESS_ANY))
+    for app in DEFAULT_APPS:
+        if str(app.get("slug", "")).casefold() == key:
+            if "egress" in app:
+                return normalize_egress(app.get("egress"))
+            break
+    if key in OVERSEAS_EGRESS_SLUGS:
+        return EGRESS_OVERSEAS
+    if key in DOMESTIC_EGRESS_SLUGS:
+        return EGRESS_DOMESTIC
+    return EGRESS_ANY
 
 
 def preferred_regions_for_slug(slug: str) -> list[str]:
     """Default preferred_regions for catalog/connect when the operator left them empty."""
-    if (slug or "").casefold() in OVERSEAS_EGRESS_SLUGS:
-        return list(OVERSEAS_PREFERRED_REGIONS)
-    return []
+    return preferred_regions_for_egress(egress_for_slug(slug))
 
 # Stdio spawn for DB-backed skill manifests (injected as PORTUNUS_MANIFEST at start).
 SKILL_BRIDGE_COMMAND = "python"
 SKILL_BRIDGE_ARGS = ["-m", "portunus_skill_bridge", "--manifest-env", SKILL_BRIDGE_MANIFEST_ENV]
+
+
+def _default_egress_for_slug(slug: str) -> str:
+    key = (slug or "").casefold()
+    if key in OVERSEAS_EGRESS_SLUGS:
+        return EGRESS_OVERSEAS
+    if key in DOMESTIC_EGRESS_SLUGS:
+        return EGRESS_DOMESTIC
+    return EGRESS_ANY
 
 
 def _skill_bridge_root() -> Path:
@@ -121,6 +208,15 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                 "read:packages",
                 "read:project",
             ],
+            "setup_hints": [
+                (
+                    "Create a GitHub [OAuth App](https://github.com/settings/developers) or "
+                    "[GitHub App](https://docs.github.com/en/apps/creating-github-apps/"
+                    "about-creating-github-apps/about-creating-github-apps) (no DCR). "
+                    "Set the callback to the Redirect URI below. "
+                    "[MCP setup docs](https://github.com/github/github-mcp-server)."
+                ),
+            ],
         },
     },
     {
@@ -145,6 +241,14 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "resource": "https://mcp.cloudflare.com/mcp",
             "issuer": "https://mcp.cloudflare.com",
             "scopes": ["user:read", "account:read", "offline_access"],
+            "setup_hints": [
+                (
+                    "Authorize opens Cloudflare OAuth. Agent skills from "
+                    "[cloudflare/skills](https://github.com/cloudflare/skills) stay in the IDE; "
+                    "this app is remote MCP at mcp.cloudflare.com. Setup: "
+                    "[agent-setup/prompt.md](https://developers.cloudflare.com/agent-setup/prompt.md)."
+                ),
+            ],
         },
     },
     {
@@ -247,6 +351,9 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "url": "https://www.weiyun.com/api/v3/mcpserver",
             "auth_header": "WyHeader",
             "token_prefix": "mcp_token=",
+            "setup_hints": [
+                "Get a token at [weiyun.com/act/openclaw](https://www.weiyun.com/act/openclaw).",
+            ],
         },
     },
     {
@@ -259,7 +366,16 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "categories": ["Productivity"],
         "tags": ["raindrop", "bookmarks", "http"],
         "sort_order": 52,
-        "spec": {"url": "https://api.raindrop.io/rest/v2/ai/mcp"},
+        "spec": {
+            "url": "https://api.raindrop.io/rest/v2/ai/mcp",
+            "setup_hints": [
+                (
+                    "Paste a Raindrop API access token (Bearer). Docs: "
+                    "[developer.raindrop.io/mcp](https://developer.raindrop.io/mcp/mcp). "
+                    "MCP is Pro-beta."
+                ),
+            ],
+        },
     },
     {
         "slug": "youdaonote",
@@ -277,6 +393,15 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "url": "https://open.mail.163.com/api/ynote/mcp/sse",
             "auth_header": "x-api-key",
             "token_prefix": "",
+            "setup_hints": [
+                (
+                    "Paste the API Key from the "
+                    "[NetEase MCP console](https://mopen.163.com) "
+                    "(phone-bound Youdao Note account). Guides: "
+                    "[CLI](https://note.youdao.com/help-center/cli-guide.html), "
+                    "[Skills](https://note.youdao.com/help-center/skill-guide.html)."
+                ),
+            ],
         },
     },
     {
@@ -294,6 +419,13 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "sort_order": 54,
         "spec": {
             "url_from_operator": True,
+            "setup_hints": [
+                (
+                    "In WeKnora: 设置 → 发布集成 → MCP Server. Copy the endpoint URL and "
+                    "Bearer token (mcp_…). Docs: "
+                    "[github.com/Tencent/WeKnora](https://github.com/Tencent/WeKnora)."
+                ),
+            ],
         },
     },
     {
@@ -335,6 +467,14 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "env_defaults": {
                 "CUBOX_SERVER": "cubox.pro",
             },
+            "setup_hints": [
+                (
+                    "Enable API Extension and paste the save URL or token from "
+                    "[cubox.pro](https://cubox.pro/web/settings/extensions) or "
+                    "[cubox.cc](https://cubox.cc/web/settings/extensions). Docs: "
+                    "[help.cubox.pro/ai/agents](https://help.cubox.pro/ai/agents/)."
+                ),
+            ],
         },
     },
     {
@@ -363,6 +503,12 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "label": "IMA API Key",
                     "secret": True,
                 },
+            ],
+            "setup_hints": [
+                (
+                    "Create Client ID + API Key at "
+                    "[ima.qq.com/agent-interface](https://ima.qq.com/agent-interface)."
+                ),
             ],
         },
     },
@@ -529,6 +675,12 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "multiline": True,
                 },
             ],
+            "setup_hints": [
+                (
+                    "Paste the full output of rclone config show mega (obscured pass is fine). "
+                    "Docs: [rclone.org/mega](https://rclone.org/mega/)."
+                ),
+            ],
         },
     },
     {
@@ -558,6 +710,9 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         },
     },
 ]
+
+for _app in DEFAULT_APPS:
+    _app.setdefault("egress", _default_egress_for_slug(str(_app.get("slug", ""))))
 
 
 def _normalize_labels(raw: Any, *, field: str, limit: int = 16) -> list[str]:
@@ -613,6 +768,69 @@ def _require_https(spec: dict[str, Any], key: str) -> str:
     return val
 
 
+# Connect drawer presentation: optional per-app prose in [spec]. Caps mirror
+# _normalize_labels style. Link targets inside [label](url) must be https://.
+SETUP_HINTS_MAX = 8
+SETUP_HINTS_MAX_CHARS = 400
+SETUP_HINTS_MAX_TOTAL = 2048
+_SETUP_HINT_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+
+
+def _normalize_setup_hints(spec: dict[str, Any]) -> list[str] | None:
+    """Return normalized hints, or None when the key is absent (omit from out)."""
+    if "setup_hints" not in spec:
+        return None
+    raw = spec.get("setup_hints")
+    if not isinstance(raw, list):
+        raise RegistryError(422, "invalid_request", "spec.setup_hints must be a list of strings")
+    if len(raw) > SETUP_HINTS_MAX:
+        raise RegistryError(
+            422, "invalid_request", f"spec.setup_hints supports at most {SETUP_HINTS_MAX} entries"
+        )
+    out: list[str] = []
+    total = 0
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise RegistryError(
+                422, "invalid_request", "spec.setup_hints must be a list of non-empty strings"
+            )
+        if any(ord(ch) < 32 and ch not in "\t\n" for ch in item):
+            raise RegistryError(
+                422, "invalid_request", "spec.setup_hints entries must not contain control characters"
+            )
+        text = item.strip()
+        if len(text) > SETUP_HINTS_MAX_CHARS:
+            raise RegistryError(
+                422,
+                "invalid_request",
+                f"spec.setup_hints entries must be ≤{SETUP_HINTS_MAX_CHARS} chars",
+            )
+        for match in _SETUP_HINT_LINK_RE.finditer(text):
+            href = match.group(2).strip()
+            if not href.startswith("https://"):
+                raise RegistryError(
+                    422,
+                    "invalid_request",
+                    "spec.setup_hints link targets must be https:// URLs",
+                )
+        total += len(text)
+        if total > SETUP_HINTS_MAX_TOTAL:
+            raise RegistryError(
+                422,
+                "invalid_request",
+                f"spec.setup_hints total size must be ≤{SETUP_HINTS_MAX_TOTAL} bytes",
+            )
+        out.append(text)
+    return out
+
+
+def _with_setup_hints(out: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    hints = _normalize_setup_hints(spec)
+    if hints is not None:
+        out["setup_hints"] = hints
+    return out
+
+
 def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
     if connection not in CATALOG_CONNECTIONS:
         raise RegistryError(400, "unsupported", f"connection {connection!r} is not supported")
@@ -645,20 +863,20 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
             if method not in ("none", "client_secret_basic", "client_secret_post"):
                 raise RegistryError(422, "invalid_request", "invalid token_endpoint_auth_method")
             out["token_endpoint_auth_method"] = method
-        return out
+        return _with_setup_hints(out, spec)
     if connection == "http":
         # Self-hosted MCP (e.g. WeKnora): operator pastes endpoint URL at Connect.
         url_from_operator = bool(spec.get("url_from_operator"))
         out: dict[str, Any] = {}
         if url_from_operator:
             out["url_from_operator"] = True
-            hint = spec.get("url")
-            if hint is not None and hint != "":
-                if not isinstance(hint, str) or not hint.strip():
+            url_hint = spec.get("url")
+            if url_hint is not None and url_hint != "":
+                if not isinstance(url_hint, str) or not url_hint.strip():
                     raise RegistryError(
                         422, "invalid_request", "spec.url must be a non-empty string when set"
                     )
-                out["url"] = hint.strip()
+                out["url"] = url_hint.strip()
         else:
             out["url"] = _require_str(spec, "url")
         # Optional custom request header for Connect (e.g. Weiyun WyHeader).
@@ -674,7 +892,7 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
                 raise RegistryError(422, "invalid_request", "spec.token_prefix must be a string")
             else:
                 out["token_prefix"] = prefix
-        return out
+        return _with_setup_hints(out, spec)
     if connection == "webdav":
         raw_args = spec.get("args") or WEBDAV_MCP_ARGS
         if not isinstance(raw_args, list) or not all(isinstance(a, str) for a in raw_args):
@@ -685,7 +903,7 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
             "package": str(spec.get("package") or WEBDAV_MCP_PACKAGE),
             "args": list(raw_args),
         }
-        return out
+        return _with_setup_hints(out, spec)
     if connection == "skill_bridge":
         return _validate_skill_bridge_spec(spec)
     # stdio
@@ -725,7 +943,7 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
                 )
             env_defaults[k.strip()] = v
         out["env_defaults"] = env_defaults
-    return out
+    return _with_setup_hints(out, spec)
 
 
 def _validate_skill_bridge_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -784,13 +1002,16 @@ def _validate_skill_bridge_spec(spec: dict[str, Any]) -> dict[str, Any]:
     args = spec.get("args") or SKILL_BRIDGE_ARGS
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         raise RegistryError(422, "invalid_request", "spec.args must be a string list")
-    return {
-        "manifest": manifest.model_dump(mode="json"),
-        "secrets": secrets_out,
-        "env_defaults": env_out,
-        "command": str(spec.get("command") or SKILL_BRIDGE_COMMAND),
-        "args": list(args),
-    }
+    return _with_setup_hints(
+        {
+            "manifest": manifest.model_dump(mode="json"),
+            "secrets": secrets_out,
+            "env_defaults": env_out,
+            "command": str(spec.get("command") or SKILL_BRIDGE_COMMAND),
+            "args": list(args),
+        },
+        spec,
+    )
 
 
 def _merge_skill_bridge_seed(live: dict[str, Any], seed: dict[str, Any]) -> dict[str, Any]:
@@ -804,6 +1025,9 @@ def _merge_skill_bridge_seed(live: dict[str, Any], seed: dict[str, Any]) -> dict
     seed_manifest = seed.get("manifest")
     if isinstance(seed_manifest, dict):
         merged["manifest"] = seed_manifest
+    # Presentation-only: fill from seed when the live row never had hints.
+    if "setup_hints" not in merged and "setup_hints" in seed:
+        merged["setup_hints"] = seed["setup_hints"]
 
     secrets: list[dict[str, Any]] = []
     seen: set[Any] = set()
@@ -865,7 +1089,7 @@ class CatalogStore:
                 await s.commit()
                 inserted = len(DEFAULT_APPS)
 
-        # Idempotent taxonomy sync for deploys that already have the seed rows.
+        # Idempotent taxonomy + setup_hints sync for deploys that already have seed rows.
         by_slug = {a["slug"]: a for a in DEFAULT_APPS}
         async with self._sf() as s:
             rows = (await s.execute(select(CatalogApp))).scalars().all()
@@ -880,6 +1104,25 @@ class CatalogStore:
                 if not list(row.tags or []) and seed.get("tags"):
                     row.tags = _normalize_labels(seed.get("tags"), field="tags")
                     dirty = True
+                seed_spec = seed.get("spec") if isinstance(seed.get("spec"), dict) else {}
+                seed_hints = seed_spec.get("setup_hints") if isinstance(seed_spec, dict) else None
+                live_spec = dict(row.spec or {})
+                if (
+                    isinstance(seed_hints, list)
+                    and seed_hints
+                    and "setup_hints" not in live_spec
+                ):
+                    try:
+                        row.spec = validate_spec(
+                            row.connection, {**live_spec, "setup_hints": seed_hints}
+                        )
+                        dirty = True
+                    except RegistryError:
+                        log.warning(
+                            "setup_hints backfill skipped for %s (invalid seed)",
+                            row.slug,
+                            exc_info=True,
+                        )
             if dirty:
                 await s.commit()
 
@@ -1032,14 +1275,13 @@ class CatalogStore:
             if added or refreshed:
                 await s.commit()
 
-        # Backfill / normalize portable overseas preferred_regions on linked servers
+        # Backfill / normalize portable preferred_regions on linked servers
         # (empty, or legacy host-specific overseas-* tags from private fleets).
         regions_fixed = 0
+        affinity_slugs = sorted(OVERSEAS_EGRESS_SLUGS | DOMESTIC_EGRESS_SLUGS)
         async with self._sf() as s:
             linked = (
-                await s.execute(
-                    select(Server).where(Server.slug.in_(sorted(OVERSEAS_EGRESS_SLUGS)))
-                )
+                await s.execute(select(Server).where(Server.slug.in_(affinity_slugs)))
             ).scalars().all()
             for srv in linked:
                 hint = preferred_regions_for_slug(srv.slug)
@@ -1054,7 +1296,7 @@ class CatalogStore:
             if regions_fixed:
                 await s.commit()
                 log.info(
-                    "overseas preferred_regions backfill: %d server(s)", regions_fixed
+                    "egress preferred_regions backfill: %d server(s)", regions_fixed
                 )
 
         return inserted + added + refreshed

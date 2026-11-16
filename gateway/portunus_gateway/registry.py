@@ -292,6 +292,8 @@ def server_view(
         "has_skill_session": any(n == "SKILL_SESSION" for n in env_names),
         "preferred_regions": list(server.preferred_regions or []),
         "preferred_site_id": server.preferred_site_id,
+        # Null = custom MCP; set = catalog Connect (slug/command frozen to the recipe).
+        "recipe_slug": server.recipe_slug,
         "vault_version": server.vault_version,
         "env_names": public_names,  # names only, never values
         "created_at": server.created_at.isoformat() if server.created_at else None,
@@ -988,6 +990,10 @@ class Registry:
         server_id: uuid.UUID,
         *,
         actor: str,
+        name: str | None = None,
+        slug: str | None = None,
+        command: str | None = None,
+        args: list[str] | None = None,
         preferred_regions: list[str] | None = None,
         oauth: dict[str, Any] | None = None,
         oauth_client_secret: str | None = None,
@@ -995,7 +1001,11 @@ class Registry:
         url: str | None = None,
     ) -> dict[str, Any]:
         if (
-            preferred_regions is None
+            name is None
+            and slug is None
+            and command is None
+            and args is None
+            and preferred_regions is None
             and oauth is None
             and oauth_client_secret is None
             and env is None
@@ -1010,23 +1020,69 @@ class Registry:
         if oauth_client_secret is not None:
             if not isinstance(oauth_client_secret, str) or "\x00" in oauth_client_secret:
                 raise RegistryError(422, "invalid_oauth", "invalid oauth_client_secret")
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            raise RegistryError(422, "invalid_request", "name must be a non-empty string")
         remote_url = validate_remote_url(url) if url is not None else None
         secrets: dict[str, str] | None = None
         if env is not None:
             # Decided after we know server.kind (stdio env vs remote headers).
             secrets = dict(env)
-        creds_changed = bool(secrets) or bool(oauth_client_secret) or remote_url is not None
+        needs_reprobe = bool(secrets) or bool(oauth_client_secret) or remote_url is not None
         async with self._sf() as s:
             server = await self._get_server(s, server_id)
+            custom = server.recipe_slug is None
             if (oauth is not None or oauth_client_secret is not None) and server.kind != "remote":
                 raise RegistryError(422, "invalid_request", "stdio servers do not take oauth")
             if remote_url is not None and server.kind != "remote":
                 raise RegistryError(422, "invalid_request", "stdio servers do not take url")
+            if (command is not None or args is not None) and server.kind != "stdio":
+                raise RegistryError(422, "invalid_request", "remote servers do not take command/args")
+            if (command is not None or args is not None) and not custom:
+                raise RegistryError(
+                    422, "invalid_request", "catalog servers freeze command/args to the recipe"
+                )
+            if slug is not None and not custom:
+                raise RegistryError(
+                    422, "invalid_request", "catalog servers freeze slug to the recipe"
+                )
             if secrets is not None:
                 secrets = (
                     validate_env(secrets) if server.kind == "stdio" else validate_headers(secrets)
                 )
             audit: dict[str, Any] = {}
+            if name is not None:
+                server.name = name.strip()
+                audit["name"] = True
+            if slug is not None:
+                new_slug = slug.casefold()
+                if new_slug != server.slug:
+                    taken = (
+                        await s.execute(
+                            select(Server.id).where(
+                                Server.slug == new_slug, Server.id != server_id
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if taken is not None:
+                        raise RegistryError(409, "conflict", "slug already in use")
+                    catalog_hit = (
+                        await s.execute(
+                            select(CatalogApp.id).where(CatalogApp.slug == new_slug)
+                        )
+                    ).scalar_one_or_none()
+                    if catalog_hit is not None:
+                        raise RegistryError(400, "reserved_slug", "slug is reserved by the catalog")
+                    audit["slug"] = {"from": server.slug, "to": new_slug}
+                    server.slug = new_slug
+            next_command = server.command if command is None else command
+            next_args = list(server.args or []) if args is None else list(args)
+            if command is not None or args is not None:
+                self._validate_argv(next_command, next_args)
+                if next_command != server.command or next_args != list(server.args or []):
+                    server.command = next_command
+                    server.args = next_args
+                    audit["argv"] = True
+                    needs_reprobe = True
             if regions is not None:
                 server.preferred_regions = regions
                 audit["preferred_regions"] = regions
@@ -1045,9 +1101,13 @@ class Registry:
                     await self._upsert_vault(s, server, key, value)
                 audit["env"] = sorted(secrets)
             s.add(self._audit(actor, "server.update", server_id, audit or None))
-            await s.commit()
+            try:
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                raise RegistryError(409, "conflict", "slug already in use") from None
             names = await self._env_names(s, server_id)
-        if creds_changed:
+        if needs_reprobe:
             await self.clear_error_and_reprobe(server_id, actor)
         server = await self._load_server(server_id)
         return await self._enriched_view(server, names)

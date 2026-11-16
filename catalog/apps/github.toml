@@ -2,6 +2,7 @@ slug = "github"
 label = "GitHub"
 description = "GitHub remote MCP (api.githubcopilot.com). OAuth via your GitHub OAuth App or GitHub App — paste Client ID/secret at Connect (no DCR)."
 connection = "oauth"
+egress = "overseas"
 popular = true
 categories = ["Developer Tools"]
 tags = ["github", "oauth", "mcp", "repos"]
@@ -22,4 +23,7 @@ scopes = [
   "notifications",
   "read:packages",
   "read:project",
+]
+setup_hints = [
+  "Create a GitHub [OAuth App](https://github.com/settings/developers) or [GitHub App](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/about-creating-github-apps) (no DCR). Set the callback to the Redirect URI below. [MCP setup docs](https://github.com/github/github-mcp-server).",
 ]

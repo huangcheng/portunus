@@ -193,8 +193,68 @@ async def test_update_unknown_server_404_and_unknown_field_422(http):
     r = await http.patch(f"/api/servers/{uuid.uuid4()}", json={"preferred_regions": []})
     assert r.status_code == 404
     sid = await _mk(http)
-    r = await http.patch(f"/api/servers/{sid}", json={"command": "npx"})
+    r = await http.patch(f"/api/servers/{sid}", json={"not_a_field": True})
     assert r.status_code == 422
+
+
+async def test_update_custom_name_slug_and_argv(http):
+    sid = await _mk(http, slug="edit-me")
+    r = await http.patch(
+        f"/api/servers/{sid}",
+        json={
+            "name": "Renamed",
+            "slug": "renamed-mcp",
+            "command": "npx",
+            "args": ["-y", "--ignore-scripts", "demo@2.0.0"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "Renamed"
+    assert body["slug"] == "renamed-mcp"
+    assert body["args"] == ["-y", "--ignore-scripts", "demo@2.0.0"]
+    assert body["recipe_slug"] is None
+
+
+async def test_update_slug_conflict_409(http):
+    await _mk(http, slug="taken")
+    sid = await _mk(http, slug="other")
+    r = await http.patch(f"/api/servers/{sid}", json={"slug": "taken"})
+    assert r.status_code == 409
+    assert r.json()["code"] == "conflict"
+
+
+async def test_update_rejects_bad_npx_argv(http):
+    sid = await _mk(http)
+    r = await http.patch(
+        f"/api/servers/{sid}",
+        json={"args": ["@z_ai/mcp-server@latest"]},
+    )
+    assert r.status_code == 422
+    assert r.json()["code"] == "spawn_rejected"
+
+
+async def test_update_catalog_server_rejects_slug_and_argv(http, db):
+    """Catalog Connect freezes slug/command; PATCH must not rewrite the recipe binding."""
+    sid = await _mk(http, slug="catalogish")
+    async with async_session() as s:
+        server = (
+            await s.execute(select(Server).where(Server.id == uuid.UUID(sid)))
+        ).scalar_one()
+        server.recipe_slug = "catalogish"
+        await s.commit()
+    bad_slug = await http.patch(f"/api/servers/{sid}", json={"slug": "nope"})
+    assert bad_slug.status_code == 422
+    bad_argv = await http.patch(
+        f"/api/servers/{sid}",
+        json={"args": ["-y", "--ignore-scripts", "demo@9.9.9"]},
+    )
+    assert bad_argv.status_code == 422
+    # Name remains editable.
+    ok = await http.patch(f"/api/servers/{sid}", json={"name": "Still catalog"})
+    assert ok.status_code == 200
+    assert ok.json()["name"] == "Still catalog"
+    assert ok.json()["slug"] == "catalogish"
 
 
 # ---- probe ----------------------------------------------------------------------------

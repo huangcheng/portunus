@@ -2,6 +2,7 @@ slug = "ardot"
 label = "Ardot"
 description = "Tencent Design Ardot — read/write design files via remote MCP."
 connection = "oauth"
+egress = "domestic"
 popular = true
 categories = ["Design"]
 tags = ["oauth", "mcp", "design"]

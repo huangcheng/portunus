@@ -94,6 +94,7 @@ PORTUNUS_URL=http://localhost:8080 PORTUNUS_OPERATOR_PASSWORD=... E2E_COMMAND=/a
 3. **Keys:** mint an agent key (shown once), grant it servers.
 4. Point the agent at `http://HOST:8080/mcp` with `Authorization: Bearer pm-...`. The agent sees:
    `portunus_discover_servers`, `portunus_discover_tools`, `portunus_get_tool_schema`, `portunus_invoke_tool`.
+5. Domain agent skill (public): `GET /SKILL.md` — e.g. `https://portunus.wuhan.dev/SKILL.md`.
 
 ### Agent / client notes
 
@@ -152,10 +153,12 @@ A server's `preferred_regions` is a soft preference among *healthy* sites. On ne
 stops placing new children on bad sites, and retries another site in the same probe when possible.
 Success clears the mark; marks expire after 15 minutes. A child stays on the site that started it until then.
 
-**Convention:** catalog seeds that need open egress (e.g. Yandex/Drime/Box/OneDrive rclone) default to
-`preferred_regions=["overseas"]`. Tag the matching runners with `PORTUNUS_REGIONS=...,overseas` (or set
-per-server regions yourself). No vendor or host names are hardcoded — your labels, your fleet.
-`scripts/e2e_two_runners.sh` exercises local failover. Design: `docs/superpowers/specs/2026-11-09-portunus-fleet-design.md`.
+**Convention:** each catalog recipe has `egress = "any" | "overseas" | "domestic"`. Connect
+defaults empty `preferred_regions` from that (`overseas` → `["overseas"]`, `domestic` →
+`["domestic"]`). Tag runners with `PORTUNUS_REGIONS` accordingly (e.g. CN hosts
+`…,domestic`, HK/US `…,overseas`). The manage drawer offers Any / Domestic / Overseas
+choices — no free-text region field. `scripts/e2e_two_runners.sh` exercises local failover.
+Design: `docs/superpowers/specs/2026-11-09-portunus-fleet-design.md`.
 
 ### Remote runner links (TLS)
 

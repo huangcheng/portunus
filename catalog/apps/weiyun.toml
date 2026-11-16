@@ -2,6 +2,7 @@ slug = "weiyun"
 label = "微云"
 description = "Tencent Weiyun drive via remote MCP (WyHeader token)."
 connection = "http"
+egress = "domestic"
 popular = true
 categories = ["Storage"]
 tags = ["weiyun", "tencent", "drive", "http"]
@@ -11,3 +12,6 @@ sort_order = 55
 url = "https://www.weiyun.com/api/v3/mcpserver"
 auth_header = "WyHeader"
 token_prefix = "mcp_token="
+setup_hints = [
+  "Get a token at [weiyun.com/act/openclaw](https://www.weiyun.com/act/openclaw).",
+]

@@ -401,7 +401,7 @@ def create_gateway_app() -> FastAPI:
 
     dist = Path(os.environ.get("PORTUNUS_DASHBOARD_DIR") or default_dashboard_dir())
     if (dist / "index.html").is_file():
-        # Last: /api, /mcp and /healthz match first.
+        # Last: /api, /mcp, /SKILL.md and /healthz match first.
         app.mount("/", StaticFiles(directory=dist, html=True), name="dashboard")
     else:
         log.warning("dashboard not built (%s); serving API only", dist)

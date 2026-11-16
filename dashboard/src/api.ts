@@ -144,6 +144,11 @@ export type OAuthBody = {
 };
 
 export type UpdateServerBody = {
+  name?: string;
+  /** Custom servers only (recipe_slug null). */
+  slug?: string;
+  command?: string;
+  args?: string[];
   preferred_regions?: string[];
   oauth?: OAuthBody | null;
   oauth_client_secret?: string | null;
@@ -168,6 +173,8 @@ export type Server = {
   has_auth: boolean;
   has_skill_session?: boolean;
   preferred_regions: string[];
+  /** Set when connected from the catalog; null for custom MCPs. */
+  recipe_slug?: string | null;
   env_names: string[];
   status?: ServerStatus;
   tool_count?: number | null;

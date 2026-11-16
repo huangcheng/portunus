@@ -42,6 +42,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["portunus_gateway"]
+# Agent skill served at GET /SKILL.md (must ship with the wheel).
+force-include = { "portunus_gateway/static/SKILL.md" = "portunus_gateway/static/SKILL.md" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -2,6 +2,7 @@ slug = "weread"
 label = "微信读书"
 description = "WeRead search, shelf, and notes via skill-bridge (API key)."
 connection = "skill_bridge"
+egress = "domestic"
 popular = true
 categories = ["Reading"]
 tags = ["weread", "books", "http_rpc"]

@@ -139,6 +139,19 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
     setSpec((prev) => ({ ...prev, ...partial }));
   }
 
+  function setupHintsFromSpec(): string[] | undefined {
+    if (!("setup_hints" in spec)) return undefined;
+    const raw = spec.setup_hints;
+    if (!Array.isArray(raw)) return [];
+    return raw.map(String).map((s) => s.trim()).filter(Boolean);
+  }
+
+  function withSetupHints(out: Record<string, unknown>): Record<string, unknown> {
+    const hints = setupHintsFromSpec();
+    if (hints !== undefined) out.setup_hints = hints;
+    return out;
+  }
+
   function buildSpec(): Record<string, unknown> {
     if (connection === "oauth") {
       const scopeList = Array.isArray(spec.scopes)
@@ -163,16 +176,23 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
       if (issuer) out.issuer = issuer;
       const method = String(spec.token_endpoint_auth_method ?? "").trim();
       if (method) out.token_endpoint_auth_method = method;
-      return out;
+      return withSetupHints(out);
     }
     if (connection === "http") {
-      const out: Record<string, unknown> = { url: String(spec.url ?? "").trim() };
+      const out: Record<string, unknown> = {};
+      if (spec.url_from_operator === true) {
+        out.url_from_operator = true;
+        const url = String(spec.url ?? "").trim();
+        if (url) out.url = url;
+      } else {
+        out.url = String(spec.url ?? "").trim();
+      }
       const authHeader = String(spec.auth_header ?? "").trim();
       if (authHeader) {
         out.auth_header = authHeader;
         out.token_prefix = String(spec.token_prefix ?? "");
       }
-      return out;
+      return withSetupHints(out);
     }
     if (connection === "webdav") {
       const argsRaw = spec.args;
@@ -181,12 +201,12 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
         : String(argsRaw ?? "")
             .split(/\s+/)
             .filter(Boolean);
-      return {
+      return withSetupHints({
         root_url: String(spec.root_url ?? "").trim(),
         root_path: String(spec.root_path ?? "/").trim() || "/",
         package: String(spec.package ?? WEBDAV_MCP_PACKAGE).trim() || WEBDAV_MCP_PACKAGE,
         args: args.length ? args : [...WEBDAV_MCP_ARGS],
-      };
+      });
     }
     if (connection === "stdio") {
       const argsRaw = spec.args;
@@ -195,11 +215,11 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
         : String(argsRaw ?? "")
             .split(/\s+/)
             .filter(Boolean);
-      return {
+      return withSetupHints({
         command: String(spec.command ?? "").trim(),
         args,
         env: parseEnvRows(spec.env).filter((r) => r.name.trim()),
-      };
+      });
     }
     const trimmed = manifestJson.trim();
     if (!trimmed) throw new Error("spec.manifest is required");
@@ -213,13 +233,13 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
       : String(argsRaw ?? "")
           .split(/\s+/)
           .filter(Boolean);
-    return {
+    return withSetupHints({
       manifest,
       secrets: parseEnvRows(spec.secrets).filter((r) => r.name.trim()),
       env_defaults: parseEnvDefaults(envDefaults),
       command: String(spec.command ?? "python").trim() || "python",
       args: args.length ? args : ["-m", "portunus_skill_bridge"],
-    };
+    });
   }
 
   async function submit(e: FormEvent) {
@@ -639,6 +659,27 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
             </div>
           </div>
         )}
+
+        <label className="field">
+          Setup hints (one per line; optional <code>[label](https://…)</code> links)
+          <textarea
+            rows={3}
+            value={
+              Array.isArray(spec.setup_hints)
+                ? (spec.setup_hints as unknown[]).map(String).join("\n")
+                : ""
+            }
+            onChange={(e) =>
+              patchSpec({
+                setup_hints: e.target.value
+                  .split("\n")
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+              })
+            }
+            placeholder="Paste the API key from the [vendor console](https://example.com)."
+          />
+        </label>
       </section>
 
       <div className="form-actions">

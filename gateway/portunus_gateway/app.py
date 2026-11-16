@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
 from .omni import Omni
@@ -21,12 +22,29 @@ from .operator_auth import OperatorAuth
 from .protected_resource import protected_resource_document
 from .registry import Registry
 
+_SKILL_MD = Path(__file__).resolve().parent / "static" / "SKILL.md"
+
 
 def build_app(*, registry: Registry, omni: Omni, auth: OperatorAuth | None = None) -> FastAPI:
     app = create_app(registry, auth=auth)
     app.state.omni = omni
     # A Route (not a Mount) so ``POST /mcp`` matches without a trailing-slash redirect.
     app.router.routes.append(Route("/mcp", endpoint=omni.asgi))
+
+    # Domain agent skill — registered before the SPA StaticFiles mount in main.py.
+    @app.get("/SKILL.md", include_in_schema=False)
+    async def agent_skill_md() -> Response:
+        """Public agent instructions for connecting to this Portunus gateway."""
+        if not _SKILL_MD.is_file():
+            return JSONResponse(
+                status_code=404,
+                content={"code": "not_found", "message": "SKILL.md is not packaged"},
+            )
+        return PlainTextResponse(
+            _SKILL_MD.read_text(encoding="utf-8"),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
 
     # RFC 9728 §3.1: resource ``<origin>/mcp`` is also discovered at the path-suffixed URI.
     # response_model=None: the union return is not a Pydantic field, and stacking

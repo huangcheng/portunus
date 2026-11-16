@@ -135,6 +135,12 @@ class CreateServer(BaseModel):
 class UpdateServer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    # Custom servers only (recipe_slug IS NULL); catalog Connect freezes slug = recipe.
+    slug: str | None = Field(default=None, pattern=SLUG_PATTERN)
+    # Stdio argv — custom servers only; revalidated against the closed grammar.
+    command: str | None = Field(default=None, max_length=1024)
+    args: list[str] | None = Field(default=None, max_length=64)
     preferred_regions: list[str] | None = None
     oauth: dict[str, Any] | None = None
     oauth_client_secret: str | None = Field(default=None, max_length=4096)
@@ -304,6 +310,10 @@ async def update_server(
     return await registry.update_server(
         server_id,
         actor=actor,
+        name=body.name,
+        slug=body.slug,
+        command=body.command,
+        args=body.args,
         preferred_regions=body.preferred_regions,
         oauth=body.oauth,
         oauth_client_secret=body.oauth_client_secret,

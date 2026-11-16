@@ -2,6 +2,7 @@ slug = "cubox"
 label = "Cubox"
 description = "Cubox library via skill-bridge (official cubox-cli; paste API Extension token)."
 connection = "skill_bridge"
+egress = "domestic"
 popular = true
 categories = ["Reading"]
 tags = ["cubox", "bookmarks", "json_cli"]
@@ -10,6 +11,8 @@ sort_order = 72
 [spec]
 manifest = "cubox.example.yaml"
 secrets = ["CUBOX_TOKEN"]
-
+setup_hints = [
+  "Enable API Extension and paste the save URL or token from [cubox.pro](https://cubox.pro/web/settings/extensions) or [cubox.cc](https://cubox.cc/web/settings/extensions). Docs: [help.cubox.pro/ai/agents](https://help.cubox.pro/ai/agents/).",
+]
 [spec.env_defaults]
 CUBOX_SERVER = "cubox.pro"

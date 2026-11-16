@@ -2,6 +2,7 @@ slug = "pikpak"
 label = "PikPak"
 description = "PikPak cloud drive via the official remote MCP (OAuth 2.1 + PKCE)."
 connection = "oauth"
+egress = "overseas"
 popular = true
 categories = ["Storage"]
 tags = ["pikpak", "drive", "mcp", "oauth"]

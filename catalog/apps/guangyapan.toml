@@ -2,6 +2,7 @@ slug = "guangyapan"
 label = "光鸭云盘"
 description = "Guangyapan Drive via skill-bridge (device_qr login; agents get drive tools only)."
 connection = "skill_bridge"
+egress = "domestic"
 popular = true
 categories = ["Storage"]
 tags = ["guangyapan", "drive", "json_cli"]
