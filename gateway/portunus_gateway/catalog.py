@@ -622,6 +622,7 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "token_url": "https://oauth2.googleapis.com/token",
             "token_endpoint_auth_method": "client_secret_post",
             "resource": "https://drivemcp.googleapis.com/mcp/v1",
+            "issuer": "https://accounts.google.com",
             "scopes": [
                 "https://www.googleapis.com/auth/drive.readonly",
                 "https://www.googleapis.com/auth/drive.file",
