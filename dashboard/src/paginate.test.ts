@@ -51,7 +51,8 @@ describe("paginate", () => {
 
   it("floors fractional pages and sanitizes invalid pageSize", () => {
     assert.equal(paginate(items, 1.9, 12).safePage, 1);
-    assert.deepEqual(paginate(items, 2, 0).pageItems, items.slice(0, 1));
+    // Invalid pageSize collapses to 1, so page 2 is the second item.
+    assert.deepEqual(paginate(items, 2, 0).pageItems, [2]);
     assert.equal(paginate(items, 2, Number.NaN).pageCount, items.length);
     assert.equal(paginate(items, 2, -5).pageCount, items.length);
   });

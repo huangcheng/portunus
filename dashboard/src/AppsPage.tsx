@@ -290,7 +290,7 @@ export function AppsPage() {
 
   function goGalleryPage(next: number) {
     const page = Math.min(galleryPageCount, Math.max(1, next));
-    if (page === galleryPage) return;
+    if (page === safeGalleryPage) return;
     setGalleryPage(page);
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     allAppsSectionRef.current?.scrollIntoView({
