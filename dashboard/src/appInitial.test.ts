@@ -6,6 +6,7 @@ describe("appInitial", () => {
   it("uppercases a Latin first letter", () => {
     assert.equal(appInitial("github"), "G");
     assert.equal(appInitial("  Dropbox"), "D");
+    assert.equal(appInitial("émile"), "É");
   });
 
   it("keeps a Chinese first character", () => {

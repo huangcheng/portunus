@@ -99,9 +99,8 @@ export function AppBrandMark({
   // to its icon id and returns "generic" otherwise — identical to the old chain.
   const kind: AppIconId = appIconIdForSlug(id);
   const file = OFFICIAL_ICON_FILES[kind];
-  const seed = label?.trim() || id;
-  const hue = appInitialHue(seed);
-  const initial = appInitial(seed);
+  const hue = appInitialHue(id.trim() || label);
+  const initial = appInitial(label?.trim() || id);
   return (
     <div
       className={`app-card-mark ${kind}${file ? " is-official" : " is-initial"}${className ? ` ${className}` : ""}`}

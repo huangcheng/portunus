@@ -16,7 +16,9 @@ export function appInitial(label: string | undefined | null, fallback = "?"): st
   }
   ch ??= Array.from(s)[0];
   if (!ch) return fallback;
-  return /^[a-z]$/i.test(ch) ? ch.toUpperCase() : ch;
+  const upper = ch.toUpperCase();
+  // Prefer uppercase when it stays a single grapheme (CJK is a no-op; skip ß→SS etc.).
+  return upper.length === ch.length ? upper : ch;
 }
 
 /** Stable 0–359 hue from a seed (slug/label) so the same app keeps its color. */
