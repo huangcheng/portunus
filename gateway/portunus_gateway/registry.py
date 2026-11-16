@@ -152,6 +152,8 @@ def validate_schema_override(schema: Any) -> dict[str, Any]:
     from jsonschema import SchemaError
     from jsonschema.validators import validator_for
 
+    from .schema_guard import assert_local_schema_refs
+
     if not isinstance(schema, dict):
         raise RegistryError(422, "invalid_request", "schema must be a JSON object")
     # Bound size so a pasted dump cannot blow the DB / response.
@@ -164,6 +166,10 @@ def validate_schema_override(schema: Any) -> dict[str, Any]:
         raise RegistryError(
             422, "invalid_schema", "schema override root type must be object"
         )
+    try:
+        assert_local_schema_refs(schema, what="schema override")
+    except ValueError as e:
+        raise RegistryError(422, "invalid_schema", str(e)) from None
     try:
         validator_for(schema).check_schema(schema)
     except SchemaError as e:
@@ -348,6 +354,12 @@ def _normalize_tools(raw: Any) -> list[dict[str, Any]]:
             schema = {"type": "object"}
         if not isinstance(schema, dict):
             raise bad("inputSchema is not an object")
+        from .schema_guard import assert_local_schema_refs
+
+        try:
+            assert_local_schema_refs(schema, what=f"tool {name!r} inputSchema")
+        except ValueError as e:
+            raise bad(str(e)) from None
         annotations = item.get("annotations")
         if annotations is not None and not isinstance(annotations, dict):
             raise bad("annotations is not an object")
@@ -1382,9 +1394,14 @@ class Registry:
         from .db.models import CatalogApp
 
         row = (
-            await s.execute(select(CatalogApp).where(CatalogApp.slug == slug.casefold()))
+            await s.execute(
+                select(CatalogApp).where(
+                    CatalogApp.slug == slug.casefold(),
+                    CatalogApp.connection == "skill_bridge",
+                )
+            )
         ).scalar_one_or_none()
-        if row is None or row.connection != "skill_bridge":
+        if row is None:
             return env
         manifest = (row.spec or {}).get("manifest")
         if not isinstance(manifest, dict):
@@ -1818,7 +1835,7 @@ class Registry:
         return await self._commit_probe(server_id, actor, incoming, audit_extra)
 
     async def set_bearer_token(self, server_id: uuid.UUID, token: str, actor: str) -> dict[str, Any]:
-        """Paste-token: store ``Authorization`` in the vault (step-up required at the API)."""
+        """Paste-token: store ``Authorization`` in the vault (operator session required)."""
         if not isinstance(token, str) or not token.strip() or "\x00" in token:
             raise RegistryError(422, "invalid_request", "token required")
         token = token.strip()

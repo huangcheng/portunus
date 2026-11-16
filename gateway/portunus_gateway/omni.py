@@ -656,14 +656,24 @@ def _validate(schema: dict[str, Any], value: Any, *, what: str) -> None:
         code = "invalid_gateway_arguments"
     else:
         code = "schema_mismatch"
+    from .schema_guard import EMPTY_REGISTRY, assert_local_schema_refs
+
     try:
+        assert_local_schema_refs(schema, what=what)
         cls = validator_for(schema)
         cls.check_schema(schema)
-        cls(schema).validate(value)
+        # Empty registry: never fetch http/https/file $ref (SSRF / local file read).
+        cls(schema, registry=EMPTY_REGISTRY).validate(value)
     except ValidationError as e:
         raise PortunusError(code, f"{what}: {_first_error(e)}") from None
     except SchemaError:
         raise PortunusError(code, f"{what}: stored schema is not valid") from None
+    except ValueError as e:
+        # Off-document $ref refused by assert_local_schema_refs.
+        raise PortunusError(code, str(e) or f"{what}: schema could not be evaluated") from None
+    except Exception:
+        # RecursionError / Unresolvable / anything else — typed code, no schema leak.
+        raise PortunusError(code, f"{what}: schema could not be evaluated") from None
 
 
 class Omni:

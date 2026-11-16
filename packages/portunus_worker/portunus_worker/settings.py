@@ -46,3 +46,12 @@ def probe_interval_s() -> int:
 def fleet_hosts() -> list[str]:
     raw = os.environ.get("PORTUNUS_FLEET_HOSTS", "")
     return [h for h in raw.split() if h.strip()]
+
+
+def fleet_providers_interval_s() -> int:
+    """How often the durable fleet-providers-update loop runs (default: 1 day)."""
+    raw = os.environ.get("PORTUNUS_FLEET_PROVIDERS_INTERVAL_S", "86400")
+    try:
+        return max(60, int(raw))
+    except ValueError:
+        return 86400

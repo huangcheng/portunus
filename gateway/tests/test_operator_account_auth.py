@@ -113,11 +113,21 @@ async def test_login_issues_totp_challenge_then_accepts_code(db, monkeypatch):
     async with _client(_auth_no_env()) as c:
         assert (await _setup(c)).status_code == 200
         csrf = {"X-CSRF-Token": (await c.get("/api/auth/session")).json()["csrf_token"]}
-        enabled = await c.post("/api/auth/totp/enable", headers=csrf)
+
+        async def _step(password: str = ACCOUNT_PASSWORD) -> dict[str, str]:
+            r = await c.post("/api/auth/step-up", json={"password": password}, headers=csrf)
+            assert r.status_code == 200, r.text
+            return {**csrf, "X-Step-Up-Token": r.json()["step_up_token"]}
+
+        enabled = await c.post("/api/auth/totp/enable", headers=await _step())
         assert enabled.status_code == 200, enabled.text
         secret = enabled.json()["secret"]
         code = pyotp.TOTP(secret).now()
-        confirmed = await c.post("/api/auth/totp/confirm", json={"secret": secret, "code": code}, headers=csrf)
+        confirmed = await c.post(
+            "/api/auth/totp/confirm",
+            json={"secret": secret, "code": code},
+            headers=await _step(),
+        )
         assert confirmed.status_code == 200, confirmed.text
         assert len(confirmed.json()["codes"]) == 10
         recovery = confirmed.json()["codes"][0]

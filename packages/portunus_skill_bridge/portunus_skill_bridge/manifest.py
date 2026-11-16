@@ -65,6 +65,14 @@ class ToolSpec(BaseModel):
     cli: str | list[str] | None = None
     input: dict[str, FieldSpec] = Field(default_factory=dict)
 
+    @field_validator("cli")
+    @classmethod
+    def _closed_tool_cli(cls, v: str | list[str] | None) -> str | list[str] | None:
+        from .cli_guard import validate_cli_argv_tail
+
+        validate_cli_argv_tail(v, where="tool.cli")
+        return v
+
     @field_validator("input")
     @classmethod
     def _input_field_names(cls, v: dict[str, FieldSpec]) -> dict[str, FieldSpec]:
@@ -274,6 +282,14 @@ class CliSpec(BaseModel):
     identity: CliIdentity = Field(default_factory=CliIdentity)
     # "run_operation" wraps one MCP tool call as CLI `run` with a single operation
     run_wrapper: Literal["run_operation", "raw"] = "run_operation"
+
+    @field_validator("command")
+    @classmethod
+    def _closed_cli_command(cls, command: list[str]) -> list[str]:
+        from .cli_guard import validate_cli_command
+
+        validate_cli_command(command)
+        return command
 
 
 class Manifest(BaseModel):

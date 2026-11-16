@@ -544,6 +544,7 @@ function RecoverySection({
 
 function PasskeySection({ passkeys, onDone }: { passkeys: PasskeyInfo[]; onDone: () => void }) {
   const [name, setName] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -554,9 +555,14 @@ function PasskeySection({ passkeys, onDone }: { passkeys: PasskeyInfo[]; onDone:
       setError("Name this passkey first.");
       return;
     }
+    if (!password) {
+      setError("Confirm your operator password first.");
+      return;
+    }
     setBusy(true);
     try {
-      const opts = await api.passkeyRegisterOptions();
+      // Password already collected — keep WebAuthn create() inside the click activation window.
+      const opts = await api.passkeyRegisterOptions(password);
       const cred = (await navigator.credentials.create({
         publicKey: {
           challenge: b64urlToBuffer(opts.challenge),
@@ -573,15 +579,19 @@ function PasskeySection({ passkeys, onDone }: { passkeys: PasskeyInfo[]; onDone:
       })) as PublicKeyCredential | null;
       if (!cred) throw new Error("Passkey creation was cancelled");
       const response = cred.response as AuthenticatorAttestationResponse;
-      await api.passkeyRegister({
-        name: name.trim(),
-        challenge: opts.challenge,
-        response: {
-          clientDataJSON: bufferToB64url(response.clientDataJSON),
-          attestationObject: bufferToB64url(response.attestationObject),
+      await api.passkeyRegister(
+        {
+          name: name.trim(),
+          challenge: opts.challenge,
+          response: {
+            clientDataJSON: bufferToB64url(response.clientDataJSON),
+            attestationObject: bufferToB64url(response.attestationObject),
+          },
         },
-      });
+        password,
+      );
       setName("");
+      setPassword("");
       onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Registration failed");
@@ -615,7 +625,17 @@ function PasskeySection({ passkeys, onDone }: { passkeys: PasskeyInfo[]; onDone:
             Name a new passkey
             <input value={name} onChange={(e) => setName(e.target.value)} maxLength={64} placeholder="This laptop" />
           </label>
-          <button className="primary sm" type="submit" disabled={busy}>
+          <label className="field grow">
+            Operator password
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </label>
+          <button className="primary sm" type="submit" disabled={busy || !password}>
             {busy ? "Waiting…" : "Register"}
           </button>
         </form>

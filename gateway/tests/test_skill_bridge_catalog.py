@@ -206,7 +206,7 @@ def test_rclone_drive_seeds_shape():
     """Box/OneDrive/Yandex/Drime/MEGA ship as rclone-shim stdio apps with a multiline config paste."""
     from portunus_gateway.catalog import DEFAULT_APPS, RCLONE_SHIM, validate_spec
 
-    for slug in ("box", "onedrive", "gdrive", "yandex", "drime", "mega"):
+    for slug in ("box", "onedrive", "yandex", "drime", "mega"):
         raw = next(a for a in DEFAULT_APPS if a["slug"] == slug)
         assert raw["connection"] == "stdio"
         spec = validate_spec("stdio", raw["spec"])
@@ -216,6 +216,22 @@ def test_rclone_drive_seeds_shape():
         assert entry["name"] == "RCLONE_REMOTE_CONFIG"
         assert entry["multiline"] is True
         assert entry["secret"] is True
+
+
+def test_gdrive_oauth_drive_mcp_seed_shape():
+    from portunus_gateway.catalog import DEFAULT_APPS, preferred_regions_for_slug, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "gdrive")
+    assert raw["connection"] == "oauth"
+    spec = validate_spec("oauth", raw["spec"])
+    assert spec["url"] == "https://drivemcp.googleapis.com/mcp/v1"
+    assert "access_type=offline" in spec["authorize_url"]
+    assert spec["token_url"] == "https://oauth2.googleapis.com/token"
+    assert spec["token_endpoint_auth_method"] == "client_secret_post"
+    # Google advertises authorization_response_iss_parameter_supported=true.
+    assert spec["issuer"] == "https://accounts.google.com"
+    assert "https://www.googleapis.com/auth/drive.file" in spec["scopes"]
+    assert preferred_regions_for_slug("gdrive") == ["overseas"]
 
 
 def test_egress_preferred_regions_for_catalog_slugs():

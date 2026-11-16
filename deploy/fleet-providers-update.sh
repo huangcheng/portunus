@@ -54,6 +54,12 @@ fi
   echo "   or: PORTUNUS_FLEET_HOSTS=\"runner-a runner-b\" $0" >&2
   exit 2
 }
+for h in "${HOSTS[@]}"; do
+  if [[ "$h" == -* ]]; then
+    echo "unexpected option after hosts: $h (options must precede host names)" >&2
+    exit 2
+  fi
+done
 
 want_rclone=0
 want_skills=0

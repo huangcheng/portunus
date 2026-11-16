@@ -345,7 +345,7 @@ def create_gateway_app() -> FastAPI:
         probe_worker_task: asyncio.Task | None = None
         try:
             from portunus_worker.client import (
-                ensure_fleet_skills_schedule,
+                ensure_fleet_providers_workflow,
                 ensure_oauth_refresh_workflow,
                 ensure_server_probe_workflow,
             )
@@ -368,7 +368,7 @@ def create_gateway_app() -> FastAPI:
                     log.error("embedded Temporal probe worker crashed: %s", exc, exc_info=exc)
 
             probe_worker_task.add_done_callback(_probe_worker_done)
-            await ensure_fleet_skills_schedule()
+            await ensure_fleet_providers_workflow()
             await ensure_oauth_refresh_workflow()
             await ensure_server_probe_workflow()
         except Exception:  # noqa: BLE001 — Temporal optional

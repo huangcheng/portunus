@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -16,7 +16,7 @@ import portunus_skill_bridge
 from portunus_shared import SKILL_BRIDGE_MANIFEST_ENV
 from portunus_skill_bridge.manifest import load_manifest
 
-from .db.models import CATALOG_CONNECTIONS, CatalogApp, Server, VaultEntry
+from .db.models import CATALOG_CONNECTIONS, CatalogApp, Server, Tool, VaultEntry
 from .registry import RegistryError
 
 log = logging.getLogger(__name__)
@@ -604,27 +604,37 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "label": "Google Drive",
         "name": "Google Drive",
         "description": (
-            "Google Drive files via rclone (paste your `rclone config show gdrive` "
-            "output at Connect; authorize first with `rclone authorize \"drive\"`)."
+            "Google Drive via the official remote MCP (drivemcp.googleapis.com). "
+            "Paste OAuth Client ID/secret at Connect (no DCR)."
         ),
-        "connection": "stdio",
+        "connection": "oauth",
         "popular": True,
         "categories": ["Storage"],
-        "tags": ["gdrive", "google", "drive", "files", "rclone"],
+        "tags": ["gdrive", "google", "drive", "mcp", "oauth"],
         "sort_order": 34,
         "spec": {
-            "command": RCLONE_SHIM,
-            "args": [],
-            "env": [
-                {
-                    "name": "RCLONE_REMOTE_CONFIG",
-                    "label": (
-                        "rclone remote config — run `rclone config show gdrive` "
-                        "(authorize first with `rclone authorize \"drive\"`)"
-                    ),
-                    "secret": True,
-                    "multiline": True,
-                },
+            "url": "https://drivemcp.googleapis.com/mcp/v1",
+            # access_type=offline + prompt=consent so Google returns a refresh token.
+            "authorize_url": (
+                "https://accounts.google.com/o/oauth2/v2/auth"
+                "?access_type=offline&prompt=consent"
+            ),
+            "token_url": "https://oauth2.googleapis.com/token",
+            "token_endpoint_auth_method": "client_secret_post",
+            "resource": "https://drivemcp.googleapis.com/mcp/v1",
+            "scopes": [
+                "https://www.googleapis.com/auth/drive.readonly",
+                "https://www.googleapis.com/auth/drive.file",
+            ],
+            "setup_hints": [
+                (
+                    "Enable Drive API + Drive MCP API, create a Web OAuth client, "
+                    "check **Use this client for an AI-powered agent**, and set the "
+                    "redirect URI shown at Connect. Docs: "
+                    "[Drive MCP setup]"
+                    "(https://developers.google.com/workspace/drive/api/guides/"
+                    "configure-mcp-server)."
+                ),
             ],
         },
     },
@@ -1265,6 +1275,67 @@ class CatalogStore:
             if migrated:
                 await s.commit()
                 log.info("rclone migration: refreshed %d catalog row(s)", migrated)
+
+        # gdrive: rclone stdio → official Drive MCP oauth (drivemcp.googleapis.com).
+        async with self._sf() as s:
+            seed = next((a for a in DEFAULT_APPS if a["slug"] == "gdrive"), None)
+            row = (
+                await s.execute(select(CatalogApp).where(CatalogApp.slug == "gdrive"))
+            ).scalar_one_or_none()
+            if (
+                seed is not None
+                and row is not None
+                and seed.get("connection") == "oauth"
+                and isinstance(row.spec, dict)
+                and row.spec.get("command") == RCLONE_SHIM
+            ):
+                row.connection = "oauth"
+                row.description = seed["description"]
+                row.tags = _normalize_labels(seed.get("tags"), field="tags")
+                row.spec = validate_spec("oauth", seed["spec"])
+                linked = (
+                    await s.execute(select(Server).where(Server.slug == "gdrive"))
+                ).scalars().all()
+                for srv in linked:
+                    # Only rewrite the rclone stdio shape; leave custom / already-remote
+                    # gdrive servers alone.
+                    if srv.kind != "stdio" or srv.command != RCLONE_SHIM:
+                        continue
+                    # Drop rclone paste + any prior auth; operator re-Connects with
+                    # Google OAuth Client ID/secret.
+                    stale_env = (
+                        await s.execute(
+                            select(VaultEntry).where(
+                                VaultEntry.server_id == srv.id,
+                                VaultEntry.name.in_(
+                                    sorted(
+                                        {
+                                            "RCLONE_REMOTE_CONFIG",
+                                            "Authorization",
+                                            "portunus.oauth_client_secret",
+                                            "portunus.oauth_refresh_token",
+                                        }
+                                    )
+                                ),
+                            )
+                        )
+                    ).scalars().all()
+                    for entry in stale_env:
+                        await s.delete(entry)
+                    await s.execute(delete(Tool).where(Tool.server_id == srv.id))
+                    srv.kind = "remote"
+                    srv.command = None
+                    srv.args = []
+                    srv.url = seed["spec"]["url"]
+                    srv.oauth = {
+                        k: v for k, v in row.spec.items() if k not in {"url", "setup_hints"}
+                    }
+                    srv.has_oauth_refresh = False
+                    srv.token_expires_at = None
+                    srv.enabled = False
+                    srv.vault_version = int(srv.vault_version or 0) + 1
+                await s.commit()
+                log.info("gdrive migration: switched catalog row to Drive MCP oauth")
 
         # Idempotent: add new skill_bridge seeds (e.g. weread) on existing deploys,
         # and refresh skill_bridge manifests when the packaged seed grows (tool list).

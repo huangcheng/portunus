@@ -157,7 +157,7 @@ export function TemporalPage() {
     setNotice(null);
     try {
       const r = await api.fleetProvidersUpdate();
-      setNotice(`Started providers update · ${r.workflow_id}`);
+      setNotice(`Kicked providers update · ${r.workflow_id}`);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Providers update failed");

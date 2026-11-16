@@ -470,63 +470,73 @@ async def start_fleet_skills_sync(*, hosts: list[str] | None = None) -> str | No
     return wid
 
 
+def fleet_providers_update_id() -> str:
+    from .workflows.fleet_providers import shared_workflow_id
+
+    return shared_workflow_id()
+
+
+async def ensure_fleet_providers_workflow() -> None:
+    """Start the shared fleet-providers-update durable loop (rclone/skills/skill_bridge)."""
+    client = await _client()
+    if client is None:
+        return
+    from .workflows.fleet_providers import FleetProvidersUpdateWorkflow
+
+    wid = fleet_providers_update_id()
+    started = False
+    try:
+        await client.start_workflow(
+            FleetProvidersUpdateWorkflow.run,
+            id=wid,
+            task_queue=temporal_task_queue(),
+        )
+        started = True
+        log.info("started shared FleetProvidersUpdateWorkflow id=%s", wid)
+    except Exception:  # noqa: BLE001 — already running is fine
+        log.debug("fleet providers update already running", exc_info=True)
+    if started:
+        try:
+            await client.get_workflow_handle(wid).signal(
+                FleetProvidersUpdateWorkflow.kick, args=[[], []]
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("fleet providers boot kick skipped", exc_info=True)
+
+    # Retire the old daily Schedule (one-shot starts) now that the loop is durable.
+    try:
+        await client.get_schedule_handle("fleet-providers-update-daily").delete()
+        log.info("deleted legacy Temporal schedule fleet-providers-update-daily")
+    except Exception:  # noqa: BLE001 — missing is fine
+        log.debug("legacy fleet providers schedule delete skipped", exc_info=True)
+
+
+async def ensure_fleet_skills_schedule() -> None:
+    """Back-compat alias: ensure the durable fleet-providers-update workflow."""
+    await ensure_fleet_providers_workflow()
+
+
 async def start_fleet_providers_update(
     *,
     hosts: list[str] | None = None,
     components: list[str] | None = None,
 ) -> str | None:
-    """Kick FleetProvidersUpdateWorkflow (rclone + skill trees/CLIs + skill_bridge)."""
+    """Ensure durable FleetProvidersUpdateWorkflow and kick an immediate wave."""
     client = await _client()
     if client is None:
         return None
     from .workflows.fleet_providers import FleetProvidersUpdateWorkflow
 
-    wid = f"fleet-providers-update:{uuid.uuid4()}"
-    await client.start_workflow(
-        FleetProvidersUpdateWorkflow.run,
-        args=[hosts or [], components or []],
-        id=wid,
-        task_queue=temporal_task_queue(),
-    )
-    return wid
-
-
-async def ensure_fleet_skills_schedule() -> None:
-    """Create a daily Schedule for fleet provider updates (idempotent create).
-
-    Prefers FleetProvidersUpdateWorkflow; keeps the legacy schedule id so existing
-    installs do not accumulate a second daily job. New installs get the broader
-    providers-update schedule under ``fleet-providers-update-daily``.
-    """
-    client = await _client()
-    if client is None:
-        return
-    from datetime import timedelta
-
-    from temporalio.client import (
-        Schedule,
-        ScheduleActionStartWorkflow,
-        ScheduleIntervalSpec,
-        ScheduleSpec,
-    )
-
-    from .workflows.fleet_providers import FleetProvidersUpdateWorkflow
-
-    schedule_id = "fleet-providers-update-daily"
-    action = ScheduleActionStartWorkflow(
-        FleetProvidersUpdateWorkflow.run,
-        args=[[], []],
-        id="fleet-providers-update-scheduled",
-        task_queue=temporal_task_queue(),
-    )
-    spec = ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(days=1))])
+    wid = fleet_providers_update_id()
+    await ensure_fleet_providers_workflow()
     try:
-        await client.create_schedule(schedule_id, Schedule(action=action, spec=spec))
-        log.info("created Temporal schedule %s", schedule_id)
-    except Exception:  # noqa: BLE001 — already exists
-        log.debug("fleet providers schedule create skipped", exc_info=True)
-
-    # Legacy skills-only schedule (pre-providers-update): leave alone if present.
+        await client.get_workflow_handle(wid).signal(
+            FleetProvidersUpdateWorkflow.kick,
+            args=[hosts or [], components or []],
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("fleet providers kick signal skipped", exc_info=True)
+    return wid
 
 
 async def temporal_status() -> dict[str, Any]:

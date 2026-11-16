@@ -1,19 +1,24 @@
 slug = "gdrive"
 label = "Google Drive"
-description = "Google Drive files via rclone (paste your `rclone config show gdrive` output at Connect; authorize first with `rclone authorize \"drive\"`)."
-connection = "stdio"
+description = "Google Drive via the official remote MCP (drivemcp.googleapis.com). Paste OAuth Client ID/secret at Connect (no DCR)."
+connection = "oauth"
 egress = "overseas"
 popular = true
 categories = ["Storage"]
-tags = ["gdrive", "google", "drive", "files", "rclone"]
+tags = ["gdrive", "google", "drive", "mcp", "oauth"]
 sort_order = 34
 
 [spec]
-command = "/var/lib/portunus/skills/rclone-shim/shim"
-args = []
-
-[[spec.env]]
-name = "RCLONE_REMOTE_CONFIG"
-label = "rclone remote config — run `rclone config show gdrive` (authorize first with `rclone authorize \"drive\"`)"
-secret = true
-multiline = true
+url = "https://drivemcp.googleapis.com/mcp/v1"
+# access_type=offline + prompt=consent so Google returns a refresh token.
+authorize_url = "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent"
+token_url = "https://oauth2.googleapis.com/token"
+token_endpoint_auth_method = "client_secret_post"
+resource = "https://drivemcp.googleapis.com/mcp/v1"
+scopes = [
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/drive.file",
+]
+setup_hints = [
+  "Enable Drive API + Drive MCP API, create a Web OAuth client, check **Use this client for an AI-powered agent**, and set the redirect URI shown at Connect. Docs: [Drive MCP setup](https://developers.google.com/workspace/drive/api/guides/configure-mcp-server).",
+]

@@ -89,7 +89,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   ima: "ima.svg",
   weknora: "weknora.png",
   pikpak: "pikpak.png",
-  qqmusic: "qqmusic.svg",
+  qqmusic: "qqmusic.png",
 };
 
 export function AppBrandMark({

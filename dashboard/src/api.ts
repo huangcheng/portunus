@@ -399,9 +399,22 @@ export type PasskeyAssertionOptions = {
 
 export const api = {
   apps: () => call<CatalogAppRow[]>("GET", "/apps"),
-  createApp: (b: Omit<CatalogAppRow, "id">) => call<CatalogAppRow>("POST", "/apps", b),
-  updateApp: (id: string, b: Partial<CatalogAppRow>) =>
-    call<CatalogAppRow>("PATCH", `/apps/${encodeURIComponent(id)}`, b),
+  createApp: async (b: Omit<CatalogAppRow, "id">, password?: string) => {
+    const needsStep =
+      b.connection === "skill_bridge" || b.connection === "stdio" || b.connection === "webdav";
+    const headers = needsStep ? await stepUpHeaders(password) : undefined;
+    return call<CatalogAppRow>("POST", "/apps", b, headers);
+  },
+  updateApp: async (id: string, b: Partial<CatalogAppRow>, password?: string) => {
+    // Server gates step-up on existing connection; client cannot know it here, so only
+    // prompt when the patch clearly targets an executable catalog shape.
+    const conn = b.connection;
+    const needsStep =
+      b.spec != null &&
+      (conn === "skill_bridge" || conn === "stdio" || conn === "webdav");
+    const headers = needsStep ? await stepUpHeaders(password) : undefined;
+    return call<CatalogAppRow>("PATCH", `/apps/${encodeURIComponent(id)}`, b, headers);
+  },
   deleteApp: (id: string) => call<void>("DELETE", `/apps/${encodeURIComponent(id)}`),
   authStatus: () => call<AuthStatus>("GET", "/auth/status"),
   setup: async (body: { username: string; password: string; bootstrap_password?: string }) => {
@@ -443,9 +456,24 @@ export const api = {
     call<{ ok: boolean }>("POST", "/auth/password", { current, next }),
   stepUp: (password: string) =>
     call<{ step_up_token: string }>("POST", "/auth/step-up", { password }),
-  totpEnable: () => call<{ secret: string; provisioning_uri: string }>("POST", "/auth/totp/enable", {}),
-  totpConfirm: (secret: string, code: string) =>
-    call<{ ok: boolean; codes: string[] }>("POST", "/auth/totp/confirm", { secret, code }),
+  totpEnable: async (password?: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<{ secret: string; provisioning_uri: string }>(
+      "POST",
+      "/auth/totp/enable",
+      {},
+      headers,
+    );
+  },
+  totpConfirm: async (secret: string, code: string, password?: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<{ ok: boolean; codes: string[] }>(
+      "POST",
+      "/auth/totp/confirm",
+      { secret, code },
+      headers,
+    );
+  },
   totpQr: (password: string) =>
     call<{ secret: string; provisioning_uri: string }>("POST", "/auth/totp/qr", { password }),
   totpDisable: (password: string) => call<{ ok: boolean }>("POST", "/auth/totp/disable", { password }),
@@ -459,16 +487,37 @@ export const api = {
       headers,
     );
   },
-  passkeyRegisterOptions: () => call<PasskeyCreationOptions>("POST", "/auth/passkey/register/options", {}),
-  passkeyRegister: (body: {
-    name: string;
-    challenge: string;
-    response: { clientDataJSON: string; attestationObject: string };
-    transports?: string[];
-  }) => call<{ ok: boolean; credential_id: string }>("POST", "/auth/passkey/register/verify", body),
+  passkeyRegisterOptions: async (password?: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<PasskeyCreationOptions>("POST", "/auth/passkey/register/options", {}, headers);
+  },
+  passkeyRegister: async (
+    body: {
+      name: string;
+      challenge: string;
+      response: { clientDataJSON: string; attestationObject: string };
+      transports?: string[];
+    },
+    password?: string,
+  ) => {
+    const headers = await stepUpHeaders(password);
+    return call<{ ok: boolean; credential_id: string }>(
+      "POST",
+      "/auth/passkey/register/verify",
+      body,
+      headers,
+    );
+  },
   passkeys: () => call<{ passkeys: PasskeyInfo[] }>("GET", "/auth/passkeys"),
-  deletePasskey: (id: string) =>
-    call<{ ok: boolean; deleted: number }>("DELETE", `/auth/passkeys/${encodeURIComponent(id)}`),
+  deletePasskey: async (id: string, password?: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<{ ok: boolean; deleted: number }>(
+      "DELETE",
+      `/auth/passkeys/${encodeURIComponent(id)}`,
+      undefined,
+      headers,
+    );
+  },
   status: () =>
     call<{
       ok: boolean;
@@ -518,32 +567,16 @@ export const api = {
       ...(opts?.job_id ? { job_id: opts.job_id } : {}),
     }),
   tools: (id: string) => call<Tool[]>("GET", `/servers/${encodeURIComponent(id)}/tools`),
-  setServerEnabled: async (id: string, enabled: boolean, password?: string) => {
-    const headers = await stepUpHeaders(password);
-    return call<Server>(
-      "POST",
-      `/servers/${encodeURIComponent(id)}/enable`,
-      { enabled },
-      headers,
-    );
-  },
-  setToolEnabled: async (id: string, enabled: boolean, password?: string) => {
-    const headers = await stepUpHeaders(password);
-    return call<Tool>("POST", `/tools/${encodeURIComponent(id)}/enable`, { enabled }, headers);
-  },
+  setServerEnabled: (id: string, enabled: boolean) =>
+    call<Server>("POST", `/servers/${encodeURIComponent(id)}/enable`, { enabled }),
+  setToolEnabled: (id: string, enabled: boolean) =>
+    call<Tool>("POST", `/tools/${encodeURIComponent(id)}/enable`, { enabled }),
   setToolSchemaOverride: (id: string, schema: Record<string, unknown>) =>
     call<Tool>("PUT", `/tools/${encodeURIComponent(id)}/schema-override`, { schema }),
   clearToolSchemaOverride: (id: string) =>
     call<Tool>("DELETE", `/tools/${encodeURIComponent(id)}/schema-override`),
-  setBearerToken: async (id: string, token: string, password?: string) => {
-    const headers = await stepUpHeaders(password);
-    return call<Server>(
-      "POST",
-      `/servers/${encodeURIComponent(id)}/auth/token`,
-      { token },
-      headers,
-    );
-  },
+  setBearerToken: (id: string, token: string) =>
+    call<Server>("POST", `/servers/${encodeURIComponent(id)}/auth/token`, { token }),
   oauthStart: (id: string, redirect_uri: string) =>
     call<{ authorize_url: string; state: string }>(
       "POST",

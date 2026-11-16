@@ -15,6 +15,12 @@ SSH_OPTS=(-o ConnectTimeout=10)
 CACHE_DIR="${PORTUNUS_RCLONE_CACHE:-$HERE/rclone-shim}"
 mkdir -p "$CACHE_DIR"
 [[ $# -ge 1 ]] || { echo "usage: $0 [user@]host [...]" >&2; exit 2; }
+for h in "$@"; do
+  if [[ "$h" == -* ]]; then
+    echo "unexpected option after hosts: $h (options must precede host names)" >&2
+    exit 2
+  fi
+done
 [[ -f "$HERE/rclone-shim/shim" ]] || { echo "missing $HERE/rclone-shim/shim" >&2; exit 2; }
 
 CACHE_OK=false

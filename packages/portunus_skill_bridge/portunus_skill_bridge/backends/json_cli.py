@@ -134,14 +134,16 @@ class JsonCliBackend:
         raise RuntimeError(f"unsupported run_wrapper {self.cli.run_wrapper!r}")
 
     def _child_env(self) -> dict[str, str]:
-        """Env for the vendor CLI — match runner ``skill_exec`` HOME pinning.
+        """Scrubbed env for the vendor CLI — never inherit the full runner env.
 
         Guangyapan (and similar device_qr skills) resolve credentials under
         ``$HOME/.…`` *and* ``--agent-profile-dir``. skill_exec always sets
         ``HOME=STATE_DIR``; without that the MCP child invents a fresh agent
         under the process home and returns LOGIN_PENDING despite a good login.
         """
-        env = dict(os.environ)
+        from portunus_skill_bridge.cli_guard import scrubbed_child_env
+
+        env = scrubbed_child_env()
         state = env.get("STATE_DIR", "").strip()
         if state:
             env["HOME"] = _absolute_existing_dir(state, label="STATE_DIR")

@@ -96,9 +96,11 @@ async def require_operator(request: Request) -> str:
 async def require_step_up(request: Request, actor: str = Depends(require_operator)) -> str:
     """Operator session plus a single-use ``X-Step-Up-Token``.
 
-    Design calls for this on enable/disable, ungrant, and vault paste (also key
-    mint/reveal). Registry tests that override ``require_operator`` attach no
-    ``OperatorAuth``; there is no session to bind a token to in that harness.
+    Used for high-impact secret surfaces (key mint/reveal, ungrant, recovery).
+    Connect flows (enable after probe, bearer paste) use the operator session alone
+    so Connect does not re-prompt for the password. Registry tests that override
+    ``require_operator`` attach no ``OperatorAuth``; there is no session to bind a
+    token to in that harness.
     """
     auth = getattr(request.app.state, "auth", None)
     if auth is None:
@@ -219,11 +221,15 @@ def _toml_catalog_mutations_gone() -> None:
 @router.post("/apps", status_code=201)
 async def create_catalog_app(
     body: CreateCatalogApp,
+    request: Request,
     actor: str = Depends(require_operator),
     catalog: CatalogStore = Depends(get_catalog),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     _toml_catalog_mutations_gone()
+    # Specs that carry executable command/package need password step-up.
+    if body.connection in ("skill_bridge", "stdio", "webdav"):
+        actor = await require_step_up(request, actor)
     view = await catalog.create(
         slug=body.slug,
         label=body.label,
@@ -245,11 +251,18 @@ async def create_catalog_app(
 async def update_catalog_app(
     app_id: uuid.UUID,
     body: UpdateCatalogApp,
+    request: Request,
     actor: str = Depends(require_operator),
     catalog: CatalogStore = Depends(get_catalog),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     _toml_catalog_mutations_gone()
+    existing = await catalog.get(app_id)
+    if (
+        existing.get("connection") in ("skill_bridge", "stdio", "webdav")
+        and body.spec is not None
+    ):
+        actor = await require_step_up(request, actor)
     view = await catalog.update(
         app_id,
         actor=actor,
@@ -389,7 +402,7 @@ async def skill_auth_server(
 async def set_server_token(
     server_id: uuid.UUID,
     body: BearerTokenBody,
-    actor: str = Depends(require_step_up),
+    actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     """Paste a bearer token (or full ``Authorization`` value) into the vault."""
@@ -585,7 +598,7 @@ async def oauth_callback_options() -> Response:
 async def enable_server(
     server_id: uuid.UUID,
     body: EnableBody | None = None,
-    actor: str = Depends(require_step_up),
+    actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     return await registry.set_server_enabled(server_id, (body or EnableBody()).enabled, actor)
@@ -595,7 +608,7 @@ async def enable_server(
 async def enable_tool(
     tool_id: uuid.UUID,
     body: EnableBody | None = None,
-    actor: str = Depends(require_step_up),
+    actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     return await registry.set_tool_enabled(tool_id, (body or EnableBody()).enabled, actor)
@@ -1045,7 +1058,7 @@ async def change_password(
 
 
 @router.post("/auth/totp/enable")
-async def totp_enable(request: Request, actor: str = Depends(require_operator)) -> dict[str, Any]:
+async def totp_enable(request: Request, actor: str = Depends(require_step_up)) -> dict[str, Any]:
     acct = await get_account(_auth(request).session_factory)
     if acct is None:
         raise RegistryError(409, "setup_required", "no operator account")
@@ -1057,7 +1070,7 @@ async def totp_enable(request: Request, actor: str = Depends(require_operator)) 
 
 @router.post("/auth/totp/confirm")
 async def totp_confirm(
-    body: TotpConfirmBody, request: Request, actor: str = Depends(require_operator)
+    body: TotpConfirmBody, request: Request, actor: str = Depends(require_step_up)
 ) -> dict[str, Any]:
     auth = _auth(request)
     sf = auth.session_factory
@@ -1144,7 +1157,7 @@ async def recovery_regenerate(
 
 
 @router.post("/auth/passkey/register/options")
-async def passkey_register_options(request: Request, actor: str = Depends(require_operator)) -> dict[str, Any]:
+async def passkey_register_options(request: Request, actor: str = Depends(require_step_up)) -> dict[str, Any]:
     auth = _auth(request)
     acct = await get_account(auth.session_factory)
     if acct is None:
@@ -1169,7 +1182,7 @@ async def passkey_register_options(request: Request, actor: str = Depends(requir
 
 @router.post("/auth/passkey/register/verify")
 async def passkey_register_verify(
-    body: PasskeyRegisterBody, request: Request, actor: str = Depends(require_operator)
+    body: PasskeyRegisterBody, request: Request, actor: str = Depends(require_step_up)
 ) -> dict[str, Any]:
     auth = _auth(request)
     name = body.name.strip()
@@ -1210,7 +1223,7 @@ async def passkeys_list(request: Request, actor: str = Depends(require_operator)
 
 @router.delete("/auth/passkeys/{credential_id}")
 async def passkey_delete(
-    credential_id: str, request: Request, actor: str = Depends(require_operator)
+    credential_id: str, request: Request, actor: str = Depends(require_step_up)
 ) -> dict[str, Any]:
     auth = _auth(request)
     deleted = await delete_passkey(auth.session_factory, credential_id)
