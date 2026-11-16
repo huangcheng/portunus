@@ -1438,6 +1438,7 @@ class CatalogStore:
                     ).scalars().all()
                     for entry in stale_env:
                         await s.delete(entry)
+                    prev = (srv.kind, srv.command, list(srv.args or []))
                     if srv.kind == "stdio":
                         srv.command = seed_command
                         srv.args = list(seed_args)
@@ -1450,8 +1451,9 @@ class CatalogStore:
                         srv.has_oauth_refresh = False
                         srv.token_expires_at = None
                         srv.enabled = False
-                        # Transport changed: drop cached remote tools so agents do
-                        # not discover/invoke tools the new stdio child does not expose.
+                    # Only purge cached tools when the connector argv/kind changed
+                    # so operator schema_override / enabled flags survive no-ops.
+                    if prev != (srv.kind, srv.command, list(srv.args or [])):
                         await s.execute(delete(Tool).where(Tool.server_id == srv.id))
                     srv.vault_version = int(srv.vault_version or 0) + 1
                 migrated += 1
