@@ -487,10 +487,12 @@ export function TemporalPage() {
                               <tr key={`${task.scheduled_event_id}:${task.activity_id}`}>
                                 <td data-label="Activity">
                                   <div className="temporal-task-activity">
-                                    <strong className="mono">{task.name}</strong>
-                                    {task.attempt && task.attempt > 1 ? (
-                                      <span className="muted"> · attempt {task.attempt}</span>
-                                    ) : null}
+                                    <span>
+                                      <strong className="mono">{task.name}</strong>
+                                      {task.attempt && task.attempt > 1 ? (
+                                        <span className="muted"> · attempt {task.attempt}</span>
+                                      ) : null}
+                                    </span>
                                     {task.error ? (
                                       <div className="temporal-task-error">{task.error}</div>
                                     ) : null}
