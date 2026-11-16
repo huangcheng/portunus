@@ -560,6 +560,47 @@ async def test_callback_error_without_iss_surfaces_as_error(http):
     assert "iss) mismatch" not in r.text
 
 
+async def test_callback_code_without_iss_ok_without_configured_issuer(http, monkeypatch):
+    """Vultr-style: no catalog issuer, AS omits iss — origin anchor must accept the code."""
+    client, _registry, _app = http
+    created = await client.post(
+        "/api/servers",
+        json={
+            "name": "R",
+            "slug": "iss-omit-ok",
+            "kind": "remote",
+            "url": "https://mcp.vultr.com/mcp",
+            "oauth": {
+                "authorize_url": "https://mcp.vultr.com/authorize",
+                "token_url": "https://mcp.vultr.com/token",
+                "client_id": "cid",
+                "resource": "https://mcp.vultr.com/",
+                "scopes": [],
+            },
+        },
+    )
+    sid = created.json()["id"]
+    start = await client.post(
+        f"/api/servers/{sid}/oauth/start", json={"redirect_uri": "http://test/api/oauth/callback"}
+    )
+    state = start.json()["state"]
+
+    async def fake_exchange(pending, code, **kw):
+        from portunus_gateway.oauth import TokenBundle
+
+        assert code == "vultr-code"
+        assert not pending.issuer
+        return TokenBundle(authorization="Bearer atok", refresh_token="rtok", expires_in=3600)
+
+    monkeypatch.setattr("portunus_gateway.operator_api.exchange_code", fake_exchange)
+    r = await client.get(
+        "/api/oauth/callback",
+        params={"code": "vultr-code", "state": state},
+    )
+    assert r.status_code == 200
+    assert "Connected" in r.text
+
+
 async def test_callback_accepts_matching_iss(http, monkeypatch):
     client, registry, _app = http
     created = await client.post(

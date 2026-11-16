@@ -17,8 +17,8 @@ token_endpoint_auth_method = "none"
 # RFC 8707 resource must match Vultr's protected-resource metadata exactly
 # (trailing slash, no /mcp). Sending …/mcp makes authorize return server_error.
 resource = "https://mcp.vultr.com/"
-# AS metadata issuer identifier (exact RFC 9207 iss match).
-issuer = "https://mcp.vultr.com/"
+# Do not set issuer: Vultr's authorize redirect omits RFC 9207 iss, so an
+# explicit issuer makes Portunus reject every successful callback.
 scopes = []
 setup_hints = [
   "Org admin must enable MCP and attach the Use MCP policy. Docs: [Vultr MCP overview](https://docs.vultr.com/reference/mcp-server/overview).",

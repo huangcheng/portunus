@@ -363,8 +363,9 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             # Protected-resource metadata advertises https://mcp.vultr.com/ — not …/mcp.
             # Wrong resource makes Vultr authorize return server_error immediately.
             "resource": "https://mcp.vultr.com/",
-            # AS metadata issuer (exact RFC 9207 iss match, including trailing slash).
-            "issuer": "https://mcp.vultr.com/",
+            # No issuer: Vultr omits RFC 9207 iss on the authorize redirect, so an
+            # explicit issuer rejects every successful callback. Origin anchoring
+            # on authorize_url still applies via OAuthStore.
             "scopes": [],
             "setup_hints": [
                 (
@@ -1525,14 +1526,15 @@ class CatalogStore:
                 await s.commit()
                 log.info("gdrive migration: switched catalog row to Drive MCP oauth")
 
-        # vultr: repair known-bad oauth resource/issuer from the first seed.
-        # …/mcp as resource makes Vultr authorize return server_error; issuer
-        # without the trailing slash fails exact RFC 9207 iss match. Only those
-        # stale values are rewritten so intentional customizations are left alone.
-        # Server.oauth is repaired independently of the catalog row (authorize
-        # reads the server row, not CatalogApp.spec).
+        # vultr: repair known-bad oauth resource and drop issuer.
+        # …/mcp as resource makes Vultr authorize return server_error. An explicit
+        # issuer rejects successful callbacks because Vultr omits RFC 9207 iss.
+        # Only those stale values are rewritten; Server.oauth is repaired even
+        # when the catalog row is already correct or absent.
         _STALE_VULTR_RESOURCE = "https://mcp.vultr.com/mcp"
-        _STALE_VULTR_ISSUER = "https://mcp.vultr.com"
+        _STALE_VULTR_ISSUERS = frozenset(
+            {"https://mcp.vultr.com", "https://mcp.vultr.com/"}
+        )
         async with self._sf() as s:
             seed = next((a for a in DEFAULT_APPS if a["slug"] == "vultr"), None)
             if (
@@ -1541,8 +1543,7 @@ class CatalogStore:
                 and isinstance(seed.get("spec"), dict)
             ):
                 want_resource = seed["spec"].get("resource")
-                want_issuer = seed["spec"].get("issuer")
-                if want_resource and want_issuer:
+                if want_resource:
                     dirty = False
                     row = (
                         await s.execute(select(CatalogApp).where(CatalogApp.slug == "vultr"))
@@ -1556,8 +1557,8 @@ class CatalogStore:
                         patched_spec = dict(live)
                         if patched_spec.get("resource") == _STALE_VULTR_RESOURCE:
                             patched_spec["resource"] = want_resource
-                        if patched_spec.get("issuer") == _STALE_VULTR_ISSUER:
-                            patched_spec["issuer"] = want_issuer
+                        if patched_spec.get("issuer") in _STALE_VULTR_ISSUERS:
+                            patched_spec.pop("issuer", None)
                         if patched_spec != live:
                             try:
                                 row.spec = validate_spec("oauth", patched_spec)
@@ -1578,8 +1579,8 @@ class CatalogStore:
                         if oauth.get("resource") == _STALE_VULTR_RESOURCE:
                             oauth["resource"] = want_resource
                             patched = True
-                        if oauth.get("issuer") == _STALE_VULTR_ISSUER:
-                            oauth["issuer"] = want_issuer
+                        if oauth.get("issuer") in _STALE_VULTR_ISSUERS:
+                            oauth.pop("issuer", None)
                             patched = True
                         if patched:
                             # Keep DCR client_id if already registered; operator re-Authorize.
@@ -1587,8 +1588,7 @@ class CatalogStore:
                             dirty = True
                     if dirty:
                         await s.commit()
-                        log.info("vultr oauth metadata: repaired stale resource/issuer")
-
+                        log.info("vultr oauth metadata: repaired resource / dropped issuer")
         # Idempotent: add new skill_bridge seeds (e.g. weread) on existing deploys,
         # and refresh skill_bridge manifests when the packaged seed grows (tool list).
         # Also insert missing rclone-shim stdio seeds (yandex/drime/…) and http
