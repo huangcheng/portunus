@@ -53,6 +53,20 @@ a { color: var(--foreground); }
 svg { flex-shrink: 0; }
 ::selection { background: color-mix(in oklch, var(--primary) 65%, transparent); color: var(--primary-foreground); }
 
+/* Thin, theme-aware scrollbars via standard properties (Chromium + Firefox). */
+:root {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent;
+  --utility-bar-height: 58px;
+}
+.sidebar,
+.apps-section.featured,
+.tools-schema,
+.tools-schema-edit,
+.json-editor-input {
+  scrollbar-color: color-mix(in oklch, var(--sidebar-foreground) 22%, transparent) transparent;
+}
+
 .skip-link {
   position: fixed;
   top: 10px;
@@ -127,7 +141,11 @@ svg { flex-shrink: 0; }
   text-transform: uppercase;
   color: color-mix(in oklch, var(--sidebar-foreground) 52%, transparent);
 }
-.sidebar-content { flex: 1; padding: 18px 16px; overflow: auto; }
+.sidebar-content {
+  flex: 1;
+  padding: 18px 16px;
+  overflow: auto;
+}
 .nav-group { display: flex; flex-direction: column; gap: 5px; }
 .nav-group-label {
   padding: 0 12px 11px;
@@ -299,6 +317,7 @@ button.gateway-status.linkish:hover {
   flex: 1;
   min-width: 0;
   overflow: auto;
+  scrollbar-gutter: stable;
   background: var(--background);
 }
 .utility-bar {
@@ -308,7 +327,7 @@ button.gateway-status.linkish:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 58px;
+  min-height: var(--utility-bar-height);
   padding: 0 38px;
   border-bottom: 1px solid color-mix(in oklch, var(--border) 60%, transparent);
   background: color-mix(in oklch, var(--background) 91%, transparent);
@@ -535,7 +554,7 @@ th.text-right { text-align: right; }
 .apps-categories > button { border: 1px solid transparent; background: transparent; color: var(--muted-foreground); border-radius: 8px; height: 32px; padding: 0 11px; font-size: 11.5px; font-weight: 550; box-shadow: none; }
 .apps-categories > button:hover { color: var(--foreground); background: var(--secondary); }
 .apps-categories > button.active { border-color: var(--foreground); color: var(--primary); background: var(--foreground); }
-.apps-section { margin-top: 16px; }
+.apps-section { margin-top: 16px; scroll-margin-top: calc(var(--utility-bar-height) + 14px); }
 .apps-section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .apps-section-heading .section-kicker { margin-bottom: 6px; }
 .apps-section-title { margin: 0; font-size: 25px; font-weight: 650; letter-spacing: -0.04em; line-height: 1.15; }
@@ -559,6 +578,42 @@ th.text-right { text-align: right; }
 .featured .app-pill { background: color-mix(in oklch, var(--sidebar-foreground) 10%, transparent); color: var(--sidebar-foreground); }
 .featured .app-card:first-child .app-pill { background: color-mix(in oklch, var(--primary-foreground) 10%, transparent); color: var(--primary-foreground); }
 .apps-empty { grid-column: 1 / -1; margin: 0; padding: 44px 24px; border: 1px dashed var(--border); border-radius: 16px; text-align: center; color: var(--muted-foreground); font-size: 13px; background: color-mix(in oklch, var(--card) 60%, transparent); }
+.apps-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+  padding-top: 4px;
+}
+.apps-pagination-meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--muted-foreground);
+}
+.apps-pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.apps-pagination-controls .ghost.sm,
+.apps-pagination-controls .outline.sm {
+  min-width: 88px;
+}
+.apps-pagination-controls button[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.apps-pagination-page {
+  min-width: 5.5rem;
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+}
 .app-card {
   position: relative;
   display: grid;

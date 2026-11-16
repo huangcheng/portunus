@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react";
+import { paginate } from "./paginate";
 import { api, type OAuthBody, type Server, type Tool } from "./api";
 import { CatalogConfigPage } from "./CatalogConfigPage";
 import { EnvFields } from "./EnvFields";
@@ -189,6 +190,8 @@ function normalizeCatalogApp(app: CatalogApp): CatalogApp {
   };
 }
 
+const APPS_PAGE_SIZE = 12;
+
 export function AppsPage() {
   const [tab, setTab] = useState<Tab>("all");
   const [catalog, setCatalog] = useState<CatalogApp[]>([]);
@@ -196,6 +199,7 @@ export function AppsPage() {
   const [toolCounts, setToolCounts] = useState<Record<string, number>>({});
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<string>("all");
+  const [galleryPage, setGalleryPage] = useState(1);
   const [selectedApp, setSelectedApp] = useState<CatalogApp | null>(null);
   const [selectedServer, setSelectedServer] = useState<Server | null>(null);
   const [adding, setAdding] = useState(false);
@@ -264,6 +268,37 @@ export function AppsPage() {
     });
   }, [catalog, query, category]);
 
+  const {
+    pageCount: galleryPageCount,
+    safePage: safeGalleryPage,
+    pageItems: pagedCatalog,
+    rangeStart: galleryRangeStart,
+    rangeEnd: galleryRangeEnd,
+  } = useMemo(
+    () => paginate(filteredCatalog, galleryPage, APPS_PAGE_SIZE),
+    [filteredCatalog, galleryPage],
+  );
+  const allAppsSectionRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    setGalleryPage((p) => Math.min(p, galleryPageCount));
+  }, [galleryPageCount]);
+
+  function resetGalleryPage() {
+    setGalleryPage(1);
+  }
+
+  function goGalleryPage(next: number) {
+    const page = Math.min(galleryPageCount, Math.max(1, next));
+    if (page === galleryPage) return;
+    setGalleryPage(page);
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    allAppsSectionRef.current?.scrollIntoView({
+      block: "start",
+      behavior: reduceMotion ? "auto" : "smooth",
+    });
+  }
+
   const connected = useMemo(() => {
     const q = query.trim().toLowerCase();
     return servers.filter((s) => {
@@ -327,6 +362,7 @@ export function AppsPage() {
             onClick={() => {
               setCatalogConfig(false);
               setTab("all");
+              resetGalleryPage();
             }}
           >
             All
@@ -340,6 +376,7 @@ export function AppsPage() {
             onClick={() => {
               setCatalogConfig(false);
               setTab("connected");
+              resetGalleryPage();
             }}
           >
             Connected
@@ -354,7 +391,10 @@ export function AppsPage() {
               <input
                 placeholder="Search apps"
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  resetGalleryPage();
+                }}
                 autoComplete="off"
               />
             </span>
@@ -398,7 +438,10 @@ export function AppsPage() {
             role="radio"
             aria-checked={category === "all"}
             className={category === "all" ? "active" : undefined}
-            onClick={() => setCategory("all")}
+            onClick={() => {
+              setCategory("all");
+              resetGalleryPage();
+            }}
           >
             All
           </button>
@@ -409,7 +452,10 @@ export function AppsPage() {
               role="radio"
               aria-checked={category.toLowerCase() === c.toLowerCase()}
               className={category.toLowerCase() === c.toLowerCase() ? "active" : undefined}
-              onClick={() => setCategory(c)}
+              onClick={() => {
+                setCategory(c);
+                resetGalleryPage();
+              }}
             >
               {c}
             </button>
@@ -450,13 +496,53 @@ export function AppsPage() {
               })}
             </AppSection>
           )}
-          <AppSection title="All apps">
+          <AppSection
+            title="All apps"
+            sectionRef={allAppsSectionRef}
+            count={filteredCatalog.length || undefined}
+            footer={
+              galleryPageCount > 1 ? (
+                <div className="apps-pagination" role="navigation" aria-label="App pagination">
+                  <span className="apps-pagination-meta">
+                    {galleryRangeStart}–{galleryRangeEnd} of {filteredCatalog.length}
+                  </span>
+                  <div className="apps-pagination-controls">
+                    <button
+                      type="button"
+                      className="ghost sm"
+                      aria-disabled={safeGalleryPage <= 1}
+                      onClick={() => {
+                        if (safeGalleryPage <= 1) return;
+                        goGalleryPage(safeGalleryPage - 1);
+                      }}
+                    >
+                      Previous
+                    </button>
+                    <span className="apps-pagination-page" aria-live="polite">
+                      {safeGalleryPage} / {galleryPageCount}
+                    </span>
+                    <button
+                      type="button"
+                      className="outline sm"
+                      aria-disabled={safeGalleryPage >= galleryPageCount}
+                      onClick={() => {
+                        if (safeGalleryPage >= galleryPageCount) return;
+                        goGalleryPage(safeGalleryPage + 1);
+                      }}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              ) : null
+            }
+          >
             {filteredCatalog.length === 0 ? (
               <p className="apps-empty">
                 No apps match{query.trim() ? ` “${query.trim()}”` : " this category"}.
               </p>
             ) : (
-              filteredCatalog.map((app) => {
+              pagedCatalog.map((app) => {
                 const server = findLinkedServer(app, servers);
                 return (
                   <CatalogCard
@@ -516,11 +602,23 @@ export function AppsPage() {
   );
 }
 
-function AppSection({ title, children }: { title: string; children: ReactNode }) {
+function AppSection({
+  title,
+  children,
+  count: countProp,
+  footer,
+  sectionRef,
+}: {
+  title: string;
+  children: ReactNode;
+  count?: number;
+  footer?: ReactNode;
+  sectionRef?: Ref<HTMLElement | null>;
+}) {
   const featured = title === "Popular";
-  const count = Array.isArray(children) ? children.length : undefined;
+  const count = countProp ?? (Array.isArray(children) ? children.length : undefined);
   return (
-    <section className={`apps-section${featured ? " featured" : ""}`}>
+    <section ref={sectionRef} className={`apps-section${featured ? " featured" : ""}`}>
       <div className="apps-section-heading">
         <div>
           <p className="section-kicker">{featured ? "Curated starting points" : title === "Connected" ? "Live integrations" : "Integration directory"}</p>
@@ -529,6 +627,7 @@ function AppSection({ title, children }: { title: string; children: ReactNode })
         {typeof count === "number" && <span className="section-count">{String(count).padStart(2, "0")}</span>}
       </div>
       <div className="apps-grid">{children}</div>
+      {footer}
     </section>
   );
 }
