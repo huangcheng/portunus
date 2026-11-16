@@ -9,7 +9,7 @@ Supported algorithms (covers every mainstream authenticator):
 The wire format is the browser's PublicKeyCredential JSON: credential
 ids and challenges are base64url strings. Authdata layout per
 WebAuthn L3 §6.5.6; we verify (in order) challenge, origin, RP ID
-hash, user-present/user-verified flags, and the signature over
+hash, the user-present flag (and user-verified when required), and the signature over
 authenticatorData || SHA256(clientDataJSON). Registration additionally
 parses the attested credential data (public key from the CBOR map).
 
@@ -36,8 +36,19 @@ _allowed_origins: set[str] = set()
 
 
 def b64url_decode(s: str) -> bytes:
-    """base64url without padding — WebAuthn's idiom."""
-    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+    """base64url without padding — WebAuthn's idiom.
+
+    Invalid input raises :class:`PasskeyError` (``passkey_format``), not ``binascii.Error``.
+    """
+    try:
+        if not isinstance(s, str):
+            raise TypeError("base64url must be a string")
+        # urlsafe_b64decode does not take validate= and drops non-alphabet bytes.
+        padded = (s + "=" * (-len(s) % 4)).encode("ascii")
+        translated = padded.translate(bytes.maketrans(b"-_", b"+/"))
+        return base64.b64decode(translated, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise PasskeyError("passkey_format", "invalid base64url") from exc
 
 
 def b64url_encode(b: bytes) -> str:
@@ -97,20 +108,34 @@ def set_allowed_origins(origins: set[str]) -> None:
 # --- clientDataJSON ---
 
 
-def _verify_client_data(client_data_b64: str, expected_challenge: bytes, kind: str) -> None:
+def _verify_client_data(
+    client_data_b64: str,
+    expected_challenge: bytes,
+    kind: str,
+    allowed_origins: set[str] | frozenset[str] | None = None,
+) -> None:
     try:
         cdj = json.loads(b64url_decode(client_data_b64))
+    except PasskeyError:
+        raise PasskeyError("passkey_format", "clientDataJSON is not valid base64url JSON") from None
     except (ValueError, TypeError):
-        raise PasskeyError("passkey_format", "clientDataJSON is not valid base64url JSON")
+        raise PasskeyError("passkey_format", "clientDataJSON is not valid base64url JSON") from None
+    if not isinstance(cdj, dict):
+        raise PasskeyError("passkey_format", "clientDataJSON is not a JSON object")
     if cdj.get("type") != f"webauthn.{kind}":
         raise PasskeyError("passkey_format", f"clientData type is not webauthn.{kind}")
     presented = cdj.get("challenge")
-    if not isinstance(presented, str) or not hmac.compare_digest(
-        b64url_decode(presented), expected_challenge
-    ):
+    if not isinstance(presented, str):
         raise PasskeyError("passkey_challenge", "challenge mismatch")
+    try:
+        got = b64url_decode(presented)
+    except PasskeyError:
+        raise PasskeyError("passkey_challenge", "challenge mismatch") from None
+    if len(got) != len(expected_challenge) or not hmac.compare_digest(got, expected_challenge):
+        raise PasskeyError("passkey_challenge", "challenge mismatch")
+    origins = _allowed_origins if allowed_origins is None else allowed_origins
     origin = cdj.get("origin")
-    if not isinstance(origin, str) or origin not in _allowed_origins:
+    if not isinstance(origin, str) or origin not in origins:
         raise PasskeyError("passkey_origin", f"origin {origin!r} is not this deployment")
 
 
@@ -154,26 +179,39 @@ def _parse_authdata(authdata: bytes) -> dict:
 # Only what the two supported algs need — no general CBOR.
 
 
-def _cbor_read(buf: bytes, pos: int) -> tuple[object, int]:
+def _cbor_read(buf: bytes, pos: int, depth: int = 0) -> tuple[object, int]:
     """Decode one CBOR item at pos -> (value, next_pos). Handles exactly
     the types WebAuthn structures use: uints, negative ints, byte/text
     strings, arrays, maps. The initial byte's additional-info IS the
     value/length when < 24 — never another element."""
+    if depth > 10:
+        raise PasskeyError("passkey_format", "CBOR nesting too deep")
+    if pos < 0 or pos >= len(buf):
+        raise PasskeyError("passkey_format", "CBOR item runs past the buffer")
     ib = buf[pos]
     mt, ai = ib >> 5, ib & 0x1F
     pos += 1
+
+    def _need(n: int) -> None:
+        if pos + n > len(buf):
+            raise PasskeyError("passkey_format", "CBOR item runs past the buffer")
+
     if ai < 24:
         arg = ai
     elif ai == 24:
+        _need(1)
         arg = buf[pos]
         pos += 1
     elif ai == 25:
+        _need(2)
         arg = int.from_bytes(buf[pos : pos + 2], "big")
         pos += 2
     elif ai == 26:
+        _need(4)
         arg = int.from_bytes(buf[pos : pos + 4], "big")
         pos += 4
     elif ai == 27:
+        _need(8)
         arg = int.from_bytes(buf[pos : pos + 8], "big")
         pos += 8
     else:
@@ -186,18 +224,24 @@ def _cbor_read(buf: bytes, pos: int) -> tuple[object, int]:
         if pos + arg > len(buf):
             raise PasskeyError("passkey_format", "CBOR string runs past the buffer")
         raw = buf[pos : pos + arg]
-        return (raw.decode() if mt == 3 else raw), pos + arg
+        if mt == 3:
+            try:
+                text = raw.decode()
+            except UnicodeDecodeError:
+                raise PasskeyError("passkey_format", "CBOR text is not UTF-8") from None
+            return text, pos + arg
+        return raw, pos + arg
     if mt == 4:  # array (e.g. x5c cert chains inside attStmt)
         arr = []
         for _ in range(arg):
-            v, pos = _cbor_read(buf, pos)
+            v, pos = _cbor_read(buf, pos, depth + 1)
             arr.append(v)
         return arr, pos
     if mt == 5:  # map
         m = {}
         for _ in range(arg):
-            k, pos = _cbor_read(buf, pos)
-            v, pos = _cbor_read(buf, pos)
+            k, pos = _cbor_read(buf, pos, depth + 1)
+            v, pos = _cbor_read(buf, pos, depth + 1)
             m[k] = v
         return m, pos
     raise PasskeyError("passkey_format", f"unsupported CBOR major type {mt}")
@@ -216,6 +260,7 @@ def cose_key_from_authdata(parsed: dict) -> tuple[str, bytes]:
     if alg not in (-7, -257):
         raise PasskeyError("passkey_alg", f"unsupported COSE alg {alg} (need ES256 or RS256)")
     encoded = _encode_cose(cose_map)
+    _load_cose_public_key(encoded)
     return encoded, alg
 
 
@@ -251,29 +296,63 @@ def _encode_cose(m: dict) -> str:
 
 def _load_cose_public_key(serialized_hex: str):
     """Deserialize our stored canonical COSE map into a cryptography
-    public key object (EC P-256 or RSA)."""
-    m, _ = _cbor_read(bytes.fromhex(serialized_hex), 0)
+    public key object (EC P-256 or RSA). Raises PasskeyError on any failure."""
+    try:
+        raw = bytes.fromhex(serialized_hex)
+    except (ValueError, TypeError) as exc:
+        raise PasskeyError("passkey_format", "stored public key is not valid hex") from exc
+    m, _ = _cbor_read(raw, 0)
+    if not isinstance(m, dict):
+        raise PasskeyError("passkey_format", "stored COSE key is not a map")
     alg = m.get(3)
-    if alg == -7:  # ES256 — EC2 layout: -1 crv, -2 x, -3 y
-        x = m[-2]
-        y = m[-3]
-        if not isinstance(x, bytes) or not isinstance(y, bytes) or len(x) != 32 or len(y) != 32:
-            raise PasskeyError("passkey_format", "P-256 coordinates must be 32 bytes each")
-        if m.get(-1) != 1:  # crv 1 = P-256
-            raise PasskeyError("passkey_alg", "only the P-256 curve is supported")
-        return ec.EllipticCurvePublicNumbers(
-            int.from_bytes(x, "big"), int.from_bytes(y, "big"), ec.SECP256R1()
-        ).public_key()
-    if alg == -257:  # RS256 — RSA layout: -1 n, -2 e
-        n = m[-1]
-        e = m[-2]
-        if not isinstance(n, bytes) or not isinstance(e, bytes):
-            raise PasskeyError("passkey_format", "RSA modulus/exponent must be byte strings")
-        return rsa.RSAPublicNumbers(int.from_bytes(e, "big"), int.from_bytes(n, "big")).public_key()
+    try:
+        if alg == -7:  # ES256 — EC2 layout: -1 crv, -2 x, -3 y
+            x = m[-2]
+            y = m[-3]
+            if not isinstance(x, bytes) or not isinstance(y, bytes) or len(x) != 32 or len(y) != 32:
+                raise PasskeyError("passkey_format", "P-256 coordinates must be 32 bytes each")
+            if m.get(-1) != 1:  # crv 1 = P-256
+                raise PasskeyError("passkey_alg", "only the P-256 curve is supported")
+            return ec.EllipticCurvePublicNumbers(
+                int.from_bytes(x, "big"), int.from_bytes(y, "big"), ec.SECP256R1()
+            ).public_key()
+        if alg == -257:  # RS256 — RSA layout: -1 n, -2 e
+            n = m[-1]
+            e = m[-2]
+            if not isinstance(n, bytes) or not isinstance(e, bytes):
+                raise PasskeyError("passkey_format", "RSA modulus/exponent must be byte strings")
+            return rsa.RSAPublicNumbers(
+                int.from_bytes(e, "big"), int.from_bytes(n, "big")
+            ).public_key()
+    except PasskeyError:
+        raise
+    except (KeyError, AttributeError, ValueError, TypeError) as exc:
+        raise PasskeyError("passkey_format", "stored public key is malformed") from exc
     raise PasskeyError("passkey_alg", f"stored key has unsupported alg {alg}")
 
 
 # --- verification entry points ---
+
+
+def _require_auth_flags(parsed: dict, *, require_user_verified: bool) -> None:
+    """User presence is always required. User verification is required only when asked."""
+    if not parsed["up"]:
+        raise PasskeyError("passkey_flags", "user-present flag not set")
+    if require_user_verified and not parsed["uv"]:
+        raise PasskeyError("passkey_flags", "user-verified flag not set")
+
+
+def _require_same_credential(presented_b64: str, stored_b64: str) -> None:
+    """The assertion's credential id must be the row whose public key we verify."""
+    try:
+        presented = b64url_decode(presented_b64)
+        stored = b64url_decode(stored_b64)
+    except PasskeyError:
+        raise PasskeyError("passkey_format", "credential id is not valid base64url") from None
+    if len(presented) != len(stored) or not hmac.compare_digest(presented, stored):
+        raise PasskeyError(
+            "passkey_credential", "credential id does not match the stored credential"
+        )
 
 
 def verify_assertion(
@@ -286,21 +365,23 @@ def verify_assertion(
     expected_rp_id: str,
     stored_public_key_hex: str,
     stored_sign_count: int,
+    stored_credential_id: str,
+    require_user_verified: bool = False,
+    allowed_origins: set[str] | frozenset[str] | None = None,
 ) -> int:
     """Verify a navigator.credentials.get() assertion. Returns the new
     sign_count. Raises PasskeyError on any failure."""
-    _verify_client_data(client_data_b64, expected_challenge, "get")
+    _require_same_credential(credential_id_b64, stored_credential_id)
+    _verify_client_data(client_data_b64, expected_challenge, "get", allowed_origins)
     authdata = b64url_decode(authdata_b64)
     parsed = _parse_authdata(authdata)
     if parsed["rp_id_hash"] != hashlib.sha256(expected_rp_id.encode()).digest():
         raise PasskeyError("passkey_rp", "authenticatorData RP ID hash mismatch")
-    if not parsed["up"]:
-        raise PasskeyError("passkey_flags", "user-present flag not set")
+    _require_auth_flags(parsed, require_user_verified=require_user_verified)
 
-    # (caller checks the credential id matches the row)
     # Possible cloned authenticator: a regression from a nonzero count.
     # WebAuthn allows non-incrementing counters only when both are 0.
-    if stored_sign_count > 0 and 0 < parsed["counter"] <= stored_sign_count:
+    if stored_sign_count > 0 and parsed["counter"] <= stored_sign_count:
         raise PasskeyError(
             "passkey_counter",
             f"signature counter did not advance (stored {stored_sign_count}, got {parsed['counter']})",
@@ -342,17 +423,18 @@ def verify_registration(
     attestation_b64: str,
     expected_challenge: bytes,
     expected_rp_id: str,
+    require_user_verified: bool = False,
+    allowed_origins: set[str] | frozenset[str] | None = None,
 ) -> tuple[str, str]:
     """Verify a navigator.credentials.create() attestationObject.
     Returns (credential_id_b64, public_key_hex). Requires attested
     credential data (the new key)."""
-    _verify_client_data(client_data_b64, expected_challenge, "create")
+    _verify_client_data(client_data_b64, expected_challenge, "create", allowed_origins)
     authdata = _unwrap_attestation(attestation_b64)
     parsed = _parse_authdata(authdata)
     if parsed["rp_id_hash"] != hashlib.sha256(expected_rp_id.encode()).digest():
         raise PasskeyError("passkey_rp", "authenticatorData RP ID hash mismatch")
-    if not parsed["up"]:
-        raise PasskeyError("passkey_flags", "user-present flag not set")
+    _require_auth_flags(parsed, require_user_verified=require_user_verified)
     if not parsed["att_data"] or "credential_id" not in parsed:
         raise PasskeyError(
             "passkey_format", "registration response has no attested credential data"

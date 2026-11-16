@@ -337,3 +337,49 @@ def test_weknora_http_seed_url_from_operator():
     spec = validate_spec("http", raw["spec"])
     assert spec["url_from_operator"] is True
     assert "url" not in spec
+
+
+def test_merge_skill_bridge_seed_keeps_operator_fields():
+    import copy
+
+    from portunus_gateway.catalog import _merge_skill_bridge_seed
+
+    seed = validate_spec(
+        "skill_bridge",
+        {
+            "manifest": WEREAD_MANIFEST,
+            "secrets": [{"name": "WEREAD_API_KEY", "label": "API key"}],
+            "env_defaults": {"SKILL_ROOT": "/opt/weread"},
+        },
+    )
+    live = copy.deepcopy(seed)
+    live["secrets"] = [
+        {"name": "WEREAD_API_KEY", "label": "Operator label", "secret": True},
+        {"name": "EXTRA_TOKEN", "label": "extra", "secret": True},
+    ]
+    live["env_defaults"] = {"SKILL_ROOT": "/opt/custom", "OPERATOR_ONLY": "1"}
+    live["command"] = "/usr/bin/python3"
+    live["args"] = ["-m", "portunus_skill_bridge", "--manifest-env", "PORTUNUS_MANIFEST"]
+    grown = copy.deepcopy(seed)
+    grown["manifest"]["tools"] = [
+        *grown["manifest"]["tools"],
+        {"name": "extra_tool", "description": "added", "dispatch": "/extra", "input": {}},
+    ]
+    grown["env_defaults"] = {"SKILL_ROOT": "/opt/weread", "NEW_SEED": "yes"}
+    grown["secrets"] = [
+        *grown["secrets"],
+        {"name": "NEW_SECRET", "label": "from seed", "secret": True},
+    ]
+    merged = validate_spec("skill_bridge", _merge_skill_bridge_seed(live, grown))
+    assert "extra_tool" in {t["name"] for t in merged["manifest"]["tools"]}
+    assert [s["name"] for s in merged["secrets"]] == [
+        "WEREAD_API_KEY",
+        "EXTRA_TOKEN",
+        "NEW_SECRET",
+    ]
+    assert merged["secrets"][0]["label"] == "Operator label"
+    assert merged["env_defaults"]["SKILL_ROOT"] == "/opt/custom"
+    assert merged["env_defaults"]["OPERATOR_ONLY"] == "1"
+    assert merged["env_defaults"]["NEW_SEED"] == "yes"
+    assert merged["command"] == "/usr/bin/python3"
+    assert merged["args"] == live["args"]

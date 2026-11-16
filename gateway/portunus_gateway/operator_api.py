@@ -21,6 +21,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from . import authz, keys
 from . import passkey as pk
@@ -56,9 +57,11 @@ from .operator_auth import (
     OPERATOR,
     PASSWORD_ENV,
     SESSION_COOKIE,
+    STEP_UP_HEADER,
     CsrfError,
     OperatorAuth,
 )
+from .origin import allowed_origins
 from .operator_crypto import OperatorCryptoError
 from .turnstile import token_looks_plausible, turnstile_secret, turnstile_sitekey, verify_login_token
 from .catalog import CatalogStore
@@ -89,6 +92,21 @@ async def require_operator(request: Request) -> str:
     request.state.operator_session_id = session.id
     return OPERATOR
 
+
+async def require_step_up(request: Request, actor: str = Depends(require_operator)) -> str:
+    """Operator session plus a single-use ``X-Step-Up-Token``.
+
+    Design calls for this on enable/disable, ungrant, and vault paste (also key
+    mint/reveal). Registry tests that override ``require_operator`` attach no
+    ``OperatorAuth``; there is no session to bind a token to in that harness.
+    """
+    auth = getattr(request.app.state, "auth", None)
+    if auth is None:
+        return actor
+    sid = getattr(request.state, "operator_session_id", None)
+    if sid is None or not auth.verify_step_up(sid, request.headers.get(STEP_UP_HEADER)):
+        raise RegistryError(401, "step_up_required", "re-authenticate with a step-up token")
+    return actor
 
 
 def get_registry(request: Request) -> Registry:
@@ -358,7 +376,7 @@ async def skill_auth_server(
 async def set_server_token(
     server_id: uuid.UUID,
     body: BearerTokenBody,
-    actor: str = Depends(require_operator),
+    actor: str = Depends(require_step_up),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     """Paste a bearer token (or full ``Authorization`` value) into the vault."""
@@ -392,10 +410,12 @@ async def oauth_start(
             token_endpoint_auth_method=str(cfg.get("token_endpoint_auth_method") or "none"),
         )
         client_id = registered["client_id"]
+        raw_secret = registered.get("client_secret")
         await registry.update_server(
             server_id,
             actor=actor,
             oauth={**cfg, "client_id": client_id},
+            oauth_client_secret=raw_secret if isinstance(raw_secret, str) else None,
         )
     store: OAuthStore = request.app.state.oauth
     started = store.start(
@@ -475,7 +495,12 @@ async def _oauth_callback_result(
         secret = None
         if method != "none":
             secret = await registry.read_oauth_client_secret(pending.server_id)
-        bundle = await exchange_code(pending, code, client_secret=secret)
+        bundle = await exchange_code(
+            pending,
+            code,
+            client_secret=secret,
+            token_endpoint_auth_method=method,
+        )
         store.discard(state)
         await registry.store_oauth_tokens(pending.server_id, bundle, actor="oauth-callback")
         # Proactive Temporal refresh workflow (no-op when Temporal is not configured).
@@ -547,7 +572,7 @@ async def oauth_callback_options() -> Response:
 async def enable_server(
     server_id: uuid.UUID,
     body: EnableBody | None = None,
-    actor: str = Depends(require_operator),
+    actor: str = Depends(require_step_up),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     return await registry.set_server_enabled(server_id, (body or EnableBody()).enabled, actor)
@@ -557,7 +582,7 @@ async def enable_server(
 async def enable_tool(
     tool_id: uuid.UUID,
     body: EnableBody | None = None,
-    actor: str = Depends(require_operator),
+    actor: str = Depends(require_step_up),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     return await registry.set_tool_enabled(tool_id, (body or EnableBody()).enabled, actor)
@@ -676,12 +701,20 @@ def _rp_id(request: Request) -> str:
     return urllib.parse.urlparse(str(request.url)).hostname or "localhost"
 
 
-def _allowed_origins(request: Request) -> set[str]:
-    parsed = urllib.parse.urlparse(str(request.url))
-    scheme = parsed.scheme or "https"
-    host_header = request.headers.get("host", "localhost")
-    host = parsed.hostname or "localhost"
-    return {f"{scheme}://{host_header}", f"https://{host}", f"http://{host}"}
+def _allowed_origins(_request: Request) -> set[str]:
+    """WebAuthn origins from configured public URL / allowlist — never Host."""
+    configured = set(allowed_origins())
+    if configured:
+        return configured
+    # Local/dev fallback when neither PORTUNUS_PUBLIC_URL nor ALLOWED_ORIGINS is set.
+    if os.environ.get("PORTUNUS_DEV") == "1":
+        return {
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            "http://127.0.0.1:3000",
+            "http://localhost:3000",
+        }
+    return set()
 
 
 def _session_response(auth: OperatorAuth, token: str, body: dict[str, Any]) -> JSONResponse:
@@ -855,8 +888,15 @@ async def login_totp(body: TotpLoginBody, request: Request):
             await record_auth_event(sf, "login_totp", False, ip, "bad code")
             await auth.audit(username, "operator.login_failed", {"ip": ip, "step": "totp"})
             raise RegistryError(401, "invalid_code", "wrong or replayed authenticator code")
-        await set_totp_step(sf, step)
-        auth.consume_login_challenge(body.challenge_token)
+        # One row update wins the step. A lost race does not mint a session.
+        if not await set_totp_step(sf, step):
+            await record_auth_event(sf, "login_totp", False, ip, "replayed step")
+            await auth.audit(username, "operator.login_failed", {"ip": ip, "step": "totp"})
+            raise RegistryError(401, "invalid_code", "wrong or replayed authenticator code")
+        # Challenge is single-use and must be spent before the session exists.
+        if not auth.consume_login_challenge(body.challenge_token):
+            await record_auth_event(sf, "login_totp", False, ip, "challenge spent")
+            raise RegistryError(401, "invalid_challenge", "the challenge token is invalid or expired")
         await record_auth_event(sf, "login_totp", True, ip, username)
         return await _begin_session(auth, request, username=username, detail={"method": "totp"})
     remaining = await consume_recovery_code(sf, normalize_recovery_input(raw))
@@ -864,7 +904,9 @@ async def login_totp(body: TotpLoginBody, request: Request):
         await record_auth_event(sf, "login_totp", False, ip, "bad recovery key")
         await auth.audit(username, "operator.login_failed", {"ip": ip, "step": "recovery"})
         raise RegistryError(401, "invalid_code", "wrong or already-used recovery key")
-    auth.consume_login_challenge(body.challenge_token)
+    if not auth.consume_login_challenge(body.challenge_token):
+        await record_auth_event(sf, "login_totp", False, ip, "challenge spent")
+        raise RegistryError(401, "invalid_challenge", "the challenge token is invalid or expired")
     await record_auth_event(sf, "login_recovery", True, ip, f"{username} ({remaining} left)")
     return await _begin_session(
         auth,
@@ -884,7 +926,6 @@ async def passkey_assertion_options(request: Request) -> dict[str, Any]:
     creds = await passkey_allows(sf)
     if not creds:
         raise RegistryError(409, "no_passkey", "no passkey is registered")
-    pk.set_allowed_origins(_allowed_origins(request))
     return {
         "challenge": pk.new_challenge("assert"),
         "rpId": _rp_id(request),
@@ -903,7 +944,7 @@ async def passkey_login_verify(body: PasskeyLoginBody, request: Request):
     if wait:
         await record_auth_event(sf, "lockout", False, ip, "passkey blocked")
         return _locked(wait)
-    pk.set_allowed_origins(_allowed_origins(request))
+    origins = _allowed_origins(request)
     resp = body.response or {}
     try:
         expected = pk.consume_challenge("assert", body.challenge)
@@ -923,6 +964,8 @@ async def passkey_login_verify(body: PasskeyLoginBody, request: Request):
             expected_rp_id=_rp_id(request),
             stored_public_key_hex=row.public_key,
             stored_sign_count=row.sign_count,
+            stored_credential_id=row.credential_id,
+            allowed_origins=origins,
         )
     except pk.PasskeyError as exc:
         await record_auth_event(sf, "login_passkey", False, ip, exc.code)
@@ -1068,7 +1111,7 @@ async def recovery_status(request: Request, actor: str = Depends(require_operato
 
 @router.post("/auth/recovery/regenerate")
 async def recovery_regenerate(
-    body: PasswordBody, request: Request, actor: str = Depends(require_operator)
+    body: PasswordBody, request: Request, actor: str = Depends(require_step_up)
 ) -> dict[str, Any]:
     auth = _auth(request)
     sf = auth.session_factory
@@ -1093,7 +1136,6 @@ async def passkey_register_options(request: Request, actor: str = Depends(requir
     acct = await get_account(auth.session_factory)
     if acct is None:
         raise RegistryError(409, "setup_required", "no operator account")
-    pk.set_allowed_origins(_allowed_origins(request))
     return {
         "challenge": pk.new_challenge("create"),
         "rp": {"name": "Portunus", "id": _rp_id(request)},
@@ -1120,7 +1162,7 @@ async def passkey_register_verify(
     name = body.name.strip()
     if not (1 <= len(name) <= 64):
         raise RegistryError(422, "invalid_request", "name must be 1 to 64 characters")
-    pk.set_allowed_origins(_allowed_origins(request))
+    origins = _allowed_origins(request)
     resp = body.response or {}
     try:
         expected = pk.consume_challenge("create", body.challenge)
@@ -1129,6 +1171,7 @@ async def passkey_register_verify(
             attestation_b64=str(resp.get("attestationObject") or ""),
             expected_challenge=expected,
             expected_rp_id=_rp_id(request),
+            allowed_origins=origins,
         )
     except pk.PasskeyError as exc:
         await auth.audit(actor, "operator.passkey_register_failed", {"code": exc.code})
@@ -1506,7 +1549,7 @@ async def _key_row_view(registry: Registry, key_id: str) -> dict[str, Any]:
 @router.post("/keys", status_code=201)
 async def mint_key(
     body: MintKey,
-    actor: str = Depends(require_operator),
+    actor: str = Depends(require_step_up),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     if body.expires_at is not None and _utc(body.expires_at) <= datetime.now(timezone.utc):
@@ -1542,7 +1585,7 @@ async def list_keys(
 @router.get("/keys/{key_id}/secret")
 async def reveal_key_secret(
     key_id: str,
-    actor: str = Depends(require_operator),
+    actor: str = Depends(require_step_up),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, str]:
     try:
@@ -1584,8 +1627,19 @@ async def grant_server(
             await s.execute(select(Grant).where(Grant.key_id == key_id, Grant.server_id == server_id))
         ).first()
         if exists is None:
-            s.add(Grant(key_id=key_id, server_id=server_id))
-            await s.commit()
+            try:
+                s.add(Grant(key_id=key_id, server_id=server_id))
+                await s.commit()
+            except IntegrityError:
+                await s.rollback()
+                # Unique (key_id, server_id) lost the race, or a parent row vanished.
+                still = (
+                    await s.execute(
+                        select(Grant.id).where(Grant.key_id == key_id, Grant.server_id == server_id)
+                    )
+                ).first()
+                if still is None:
+                    raise RegistryError(404, "not_found", "key or server not found") from None
     await authz.authz_store.reload_from_db()
     await _audit(registry, actor, "grant.add", key_id, {"server_id": str(server_id)})
     return await _key_row_view(registry, key_id)
@@ -1595,7 +1649,7 @@ async def grant_server(
 async def ungrant_server(
     key_id: str,
     server_id: uuid.UUID,
-    actor: str = Depends(require_operator),
+    actor: str = Depends(require_step_up),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     async with registry.session_factory() as s:

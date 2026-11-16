@@ -157,6 +157,40 @@ def test_skill_bridge_toml_secrets_are_objects() -> None:
     assert {s["name"] for s in view["spec"]["secrets"]} == set(by_name)
 
 
+def test_load_apps_dir_shared_tree_install_as_clash(tmp_path: Path) -> None:
+    def write(slug: str, path_hint: str) -> None:
+        (tmp_path / f"{slug}.toml").write_text(
+            f'slug = "{slug}"\n'
+            'label = "L"\n'
+            'description = "d"\n'
+            'connection = "http"\n'
+            "popular = false\n"
+            "categories = []\n"
+            "tags = []\n"
+            "sort_order = 1\n"
+            "\n"
+            "[spec]\n"
+            'url = "https://example.com/mcp"\n'
+            "\n"
+            "[[artifacts]]\n"
+            'id = "skill"\n'
+            'kind = "tree"\n'
+            'install_as = "/var/lib/portunus/skills/shared"\n'
+            f'path = "{path_hint}"\n',
+            encoding="utf-8",
+        )
+
+    write("alpha", "third_party/a")
+    write("beta", "third_party/b")
+    write("gamma", "third_party/a")
+    loaded = load_apps_dir(tmp_path)
+    by_stem = {r.stem: r for r in loaded.recipes}
+    assert by_stem["alpha"].enabled is True
+    assert by_stem["beta"].enabled is False
+    assert "shared_install_as_clash" in by_stem["beta"].disable_reasons
+    assert by_stem["gamma"].enabled is True
+
+
 def test_load_apps_dir_shared_install_as_clash(tmp_path: Path) -> None:
     hx_a = "a" * 64
     hx_b = "b" * 64
@@ -190,3 +224,86 @@ def test_load_apps_dir_shared_install_as_clash(tmp_path: Path) -> None:
     assert by_stem["alpha"].enabled is True
     assert by_stem["beta"].enabled is False
     assert "shared_install_as_clash" in by_stem["beta"].disable_reasons
+
+
+def _recipe_with_scripts(tmp_path: Path, slug: str, scripts: list[tuple[str, str, str]]) -> None:
+    script_h = "e" * 64
+    arts = []
+    for aid, install_as, hx in scripts:
+        arts.append(
+            "[[artifacts]]\n"
+            f'id = "{aid}"\n'
+            'kind = "install_script"\n'
+            'script = "install.sh"\n'
+            f'script_sha256 = "{script_h}"\n'
+            f'install_as = "{install_as}"\n'
+            'arch = "linux/amd64"\n'
+            f'content_sha256 = "{hx}"\n'
+        )
+    (tmp_path / f"{slug}.toml").write_text(
+        f'slug = "{slug}"\n'
+        'label = "L"\n'
+        'description = "d"\n'
+        'connection = "http"\n'
+        "popular = false\n"
+        "categories = []\n"
+        "tags = []\n"
+        "sort_order = 1\n"
+        "\n"
+        "[spec]\n"
+        'url = "https://example.com/mcp"\n'
+        "\n" + "\n".join(arts),
+        encoding="utf-8",
+    )
+
+
+def test_clash_does_not_publish_later_artifacts_of_disabled_recipe(tmp_path: Path) -> None:
+    rclone = "/var/lib/portunus/bin/rclone"
+    other = "/var/lib/portunus/bin/other"
+    _recipe_with_scripts(tmp_path, "alpha", [("rclone", rclone, "a" * 64)])
+    _recipe_with_scripts(
+        tmp_path,
+        "beta",
+        [("rclone", rclone, "b" * 64), ("other", other, "c" * 64)],
+    )
+    _recipe_with_scripts(tmp_path, "gamma", [("other", other, "d" * 64)])
+    loaded = load_apps_dir(tmp_path)
+    by_stem = {r.stem: r for r in loaded.recipes}
+    assert by_stem["alpha"].enabled is True
+    assert by_stem["beta"].enabled is False
+    assert "shared_install_as_clash" in by_stem["beta"].disable_reasons
+    assert by_stem["gamma"].enabled is True
+
+
+def test_env_defaults_strips_keys_and_rejects_reserved_or_blank(tmp_path: Path) -> None:
+    def write(slug: str, defaults: str, secrets: str = "") -> Path:
+        path = tmp_path / f"{slug}.toml"
+        path.write_text(
+            f'slug = "{slug}"\n'
+            'label = "L"\n'
+            'description = "d"\n'
+            'connection = "stdio"\n'
+            "popular = false\n"
+            "categories = []\n"
+            "tags = []\n"
+            "sort_order = 1\n"
+            "\n"
+            "[spec]\n"
+            'command = "/bin/shim"\n'
+            "args = []\n"
+            f"{secrets}"
+            "\n"
+            "[spec.env_defaults]\n"
+            f"{defaults}\n",
+            encoding="utf-8",
+        )
+        return path
+
+    recipe = parse_recipe(write("shim", '" SKILL_ROOT " = "/opt/skill"'))
+    assert recipe.spec["env_defaults"] == {"SKILL_ROOT": "/opt/skill"}
+    with pytest.raises(CatalogVerifyError, match="PORTUNUS_"):
+        parse_recipe(write("reserved", '" PORTUNUS_HOME" = "x"'))
+    with pytest.raises(CatalogVerifyError, match="non-empty"):
+        parse_recipe(write("blank", '"   " = "x"'))
+    with pytest.raises(CatalogVerifyError, match="collides with secrets"):
+        parse_recipe(write("collide", '" TOKEN " = "x"', 'secrets = ["TOKEN"]\n'))

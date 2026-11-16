@@ -52,6 +52,9 @@ async def list_oauth_refresh_plan(skew_s: int) -> dict:
 
     due = [str(r[0]) for r in due_rows]
     if next_expiry is not None:
+        # SQLite may return naive datetimes; normalize before subtracting aware ``now``.
+        if next_expiry.tzinfo is None:
+            next_expiry = next_expiry.replace(tzinfo=timezone.utc)
         # Wake skew seconds before the next expiry.
         next_sleep_s = int((next_expiry - timedelta(seconds=skew) - now).total_seconds())
         next_sleep_s = max(30, min(next_sleep_s, 3600))
@@ -98,4 +101,9 @@ async def mark_auth_required(server_id: str) -> None:
             return
         row.last_error_code = "auth_required"
         row.last_error_at = datetime.now(timezone.utc)
+        # Stop the due-query from re-selecting this server every wave until
+        # the operator re-auths (has_oauth_refresh alone kept it forever-due
+        # when token_expires_at stayed NULL after a failed refresh).
+        row.has_oauth_refresh = False
+        row.token_expires_at = None
         await s.commit()

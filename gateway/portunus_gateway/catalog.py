@@ -606,6 +606,13 @@ def _require_str(spec: dict[str, Any], key: str) -> str:
     return val.strip()
 
 
+def _require_https(spec: dict[str, Any], key: str) -> str:
+    val = _require_str(spec, key)
+    if not val.startswith("https://"):
+        raise RegistryError(422, "invalid_request", f"spec.{key} must be an https URL")
+    return val
+
+
 def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
     if connection not in CATALOG_CONNECTIONS:
         raise RegistryError(400, "unsupported", f"connection {connection!r} is not supported")
@@ -613,9 +620,9 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
         raise RegistryError(422, "invalid_request", "spec must be an object")
     if connection == "oauth":
         out: dict[str, Any] = {
-            "url": _require_str(spec, "url"),
-            "authorize_url": _require_str(spec, "authorize_url"),
-            "token_url": _require_str(spec, "token_url"),
+            "url": _require_https(spec, "url"),
+            "authorize_url": _require_https(spec, "authorize_url"),
+            "token_url": _require_https(spec, "token_url"),
         }
         scopes = spec.get("scopes", [])
         if not isinstance(scopes, list) or not all(isinstance(s, str) and s for s in scopes):
@@ -669,14 +676,15 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
                 out["token_prefix"] = prefix
         return out
     if connection == "webdav":
+        raw_args = spec.get("args") or WEBDAV_MCP_ARGS
+        if not isinstance(raw_args, list) or not all(isinstance(a, str) for a in raw_args):
+            raise RegistryError(422, "invalid_request", "spec.args must be a string list")
         out = {
             "root_url": _require_str(spec, "root_url"),
             "root_path": str(spec.get("root_path") or "/").strip() or "/",
             "package": str(spec.get("package") or WEBDAV_MCP_PACKAGE),
-            "args": list(spec.get("args") or WEBDAV_MCP_ARGS),
+            "args": list(raw_args),
         }
-        if not isinstance(out["args"], list) or not all(isinstance(a, str) for a in out["args"]):
-            raise RegistryError(422, "invalid_request", "spec.args must be a string list")
         return out
     if connection == "skill_bridge":
         return _validate_skill_bridge_spec(spec)
@@ -690,12 +698,15 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
         raise RegistryError(422, "invalid_request", "spec.env must be a list")
     env_out: list[dict[str, Any]] = []
     for item in env:
-        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise RegistryError(422, "invalid_request", "spec.env entries need a name")
+        name = item["name"].strip()
+        if not name:
             raise RegistryError(422, "invalid_request", "spec.env entries need a name")
         env_out.append(
             {
-                "name": item["name"].strip(),
-                "label": str(item.get("label") or item["name"]),
+                "name": name,
+                "label": str(item.get("label") or name),
                 "secret": bool(item.get("secret", True)),
                 # Multi-line values (rclone config paste) render as a textarea.
                 "multiline": item.get("multiline") is True,
@@ -733,12 +744,14 @@ def _validate_skill_bridge_spec(spec: dict[str, Any]) -> dict[str, Any]:
         raise RegistryError(422, "invalid_request", "spec.secrets must be a list")
     secrets_out: list[dict[str, Any]] = []
     for item in secrets:
-        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
+        name = item.get("name") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not name.strip():
             raise RegistryError(422, "invalid_request", "spec.secrets entries need a name")
+        name = name.strip()
         secrets_out.append(
             {
-                "name": item["name"].strip(),
-                "label": str(item.get("label") or item["name"]),
+                "name": name,
+                "label": str(item.get("label") or name),
                 "secret": bool(item.get("secret", True)),
             }
         )
@@ -768,13 +781,58 @@ def _validate_skill_bridge_spec(spec: dict[str, Any]) -> dict[str, Any]:
                 422, "invalid_request", "spec.env_defaults must map strings to strings"
             )
         env_out[k.strip()] = v
+    args = spec.get("args") or SKILL_BRIDGE_ARGS
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        raise RegistryError(422, "invalid_request", "spec.args must be a string list")
     return {
         "manifest": manifest.model_dump(mode="json"),
         "secrets": secrets_out,
         "env_defaults": env_out,
         "command": str(spec.get("command") or SKILL_BRIDGE_COMMAND),
-        "args": list(spec.get("args") or SKILL_BRIDGE_ARGS),
+        "args": list(args),
     }
+
+
+def _merge_skill_bridge_seed(live: dict[str, Any], seed: dict[str, Any]) -> dict[str, Any]:
+    """Refresh the packaged manifest without discarding operator-owned spec fields.
+
+    Managed from the seed: the manifest (tools, auth, backend). Preserved from the
+    live row: extra secrets, command/args overrides, and env_defaults the operator
+    already set. Seed secrets and env_defaults fill keys the live row does not have.
+    """
+    merged: dict[str, Any] = dict(live or {})
+    seed_manifest = seed.get("manifest")
+    if isinstance(seed_manifest, dict):
+        merged["manifest"] = seed_manifest
+
+    secrets: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    live_secrets = merged.get("secrets") if isinstance(merged.get("secrets"), list) else []
+    seed_secrets = seed.get("secrets") if isinstance(seed.get("secrets"), list) else []
+    for item in [*live_secrets, *seed_secrets]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if name in seen:
+            continue
+        seen.add(name)
+        secrets.append(item)
+    merged["secrets"] = secrets
+
+    live_defaults = merged.get("env_defaults")
+    defaults = dict(live_defaults) if isinstance(live_defaults, dict) else {}
+    seed_defaults = seed.get("env_defaults") if isinstance(seed.get("env_defaults"), dict) else {}
+    for key, value in seed_defaults.items():
+        defaults.setdefault(key, value)
+    merged["env_defaults"] = defaults
+
+    command = merged.get("command")
+    if not isinstance(command, str) or not command.strip():
+        merged["command"] = seed.get("command")
+    args = merged.get("args")
+    if not isinstance(args, list) or not args:
+        merged["args"] = list(seed.get("args") or [])
+    return merged
 
 
 class CatalogStore:
@@ -958,7 +1016,11 @@ class CatalogStore:
                     or defaults_changed
                 )
                 if spec_changed:
-                    row.spec = spec
+                    live = dict(row.spec or {})
+                    merged = validate_spec("skill_bridge", _merge_skill_bridge_seed(live, spec))
+                    if merged == live:
+                        continue
+                    row.spec = merged
                     linked = (
                         await s.execute(
                             select(Server).where(Server.slug == row.slug, Server.kind == "stdio")

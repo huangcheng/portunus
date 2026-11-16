@@ -115,10 +115,16 @@ class RunnerPool:
                 fn()
 
     async def close(self) -> None:
-        for e in list(self._entries):
+        entries = list(self._entries)
+        self._entries.clear()
+        for e in entries:
             fn = getattr(e.client, "close", None)
-            if callable(fn):
+            if not callable(fn):
+                continue
+            try:
                 await fn()
+            except Exception:
+                log.exception("runner client close failed")
 
     # ---- liveness / scheduling ---------------------------------------------------
 

@@ -23,7 +23,7 @@ from portunus_gateway.oauth import (
     refresh_access_token,
     validate_oauth_config,
 )
-from portunus_gateway.operator_api import create_app, require_operator
+from portunus_gateway.operator_api import create_app, require_operator, require_step_up
 from portunus_gateway.registry import Registry
 from portunus_gateway.runner_pool import RunnerPool
 from portunus_gateway.vault import Vault
@@ -39,6 +39,7 @@ def _vault() -> Vault:
 def _app(registry: Registry):
     app = create_app(registry)
     app.dependency_overrides[require_operator] = lambda: "test-operator"
+    app.dependency_overrides[require_step_up] = lambda: "test-operator"
     return app
 
 
@@ -260,7 +261,9 @@ async def test_oauth_start_and_callback_stores_token(http, monkeypatch):
     authorize_url = start.json()["authorize_url"]
     assert "code_challenge=" in authorize_url and state in authorize_url
 
-    async def fake_exchange(pending, code, *, client_secret=None, transport=None):
+    async def fake_exchange(
+        pending, code, *, client_secret=None, token_endpoint_auth_method=None, transport=None
+    ):
         from portunus_gateway.oauth import TokenBundle
 
         assert code == "auth-code"
@@ -386,9 +389,11 @@ def test_iss_matches_semantics():
         issuer="https://idp.example/tenant1",
         issuer_origin="https://idp.example",
     )
-    # Explicit issuer → exact string comparison, no path tolerance.
+    # Explicit issuer → exact string comparison, no path tolerance; missing iss rejected.
     assert iss_matches("https://idp.example/tenant1", exact) is True
     assert iss_matches("https://idp.example", exact) is False
+    assert iss_matches("", exact) is False
+    assert iss_matches(None, exact) is False
 
 
 def test_store_start_records_issuer_anchor():
@@ -539,7 +544,9 @@ async def test_callback_accepts_matching_iss(http, monkeypatch):
     )
     state = start.json()["state"]
 
-    async def fake_exchange(pending, code, *, client_secret=None, transport=None):
+    async def fake_exchange(
+        pending, code, *, client_secret=None, token_endpoint_auth_method=None, transport=None
+    ):
         from portunus_gateway.oauth import TokenBundle
 
         return TokenBundle(authorization="Bearer ok")
@@ -581,3 +588,132 @@ def test_catalog_spec_round_trips_issuer():
                 "issuer": "idp.example",
             },
         )
+
+
+def test_catalog_oauth_endpoints_require_https():
+    from portunus_gateway.catalog import validate_spec
+    from portunus_gateway.registry import RegistryError
+
+    base = {
+        "url": "https://mcp.example.com/mcp",
+        "authorize_url": "https://idp.example/authorize",
+        "token_url": "https://idp.example/token",
+        "scopes": [],
+    }
+    for key in ("url", "authorize_url", "token_url"):
+        bad = dict(base)
+        bad[key] = "http://idp.example/plain"
+        with pytest.raises(RegistryError) as exc:
+            validate_spec("oauth", bad)
+        assert "https" in exc.value.message
+
+
+async def test_token_endpoint_auth_method_selects_basic_or_post():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"access_token": "tok", "token_type": "Bearer"})
+
+    pending = OAuthPending(
+        server_id=uuid.uuid4(),
+        code_verifier="verifier",
+        token_url="https://idp.example/token",
+        client_id="cid",
+        redirect_uri="https://portunus.example/cb",
+        created_at=0.0,
+    )
+    transport = httpx.MockTransport(handler)
+
+    await exchange_code(
+        pending,
+        "the-code",
+        client_secret="sekret",
+        token_endpoint_auth_method="client_secret_post",
+        transport=transport,
+    )
+    posted = parse_qs(seen[-1].content.decode())
+    assert posted["client_secret"] == ["sekret"]
+    assert "authorization" not in {k.lower() for k in seen[-1].headers}
+
+    await exchange_code(
+        pending,
+        "the-code",
+        client_secret="sekret",
+        token_endpoint_auth_method="client_secret_basic",
+        transport=transport,
+    )
+    basic = parse_qs(seen[-1].content.decode())
+    assert "client_secret" not in basic
+    assert seen[-1].headers["authorization"].startswith("Basic ")
+
+    await exchange_code(
+        pending,
+        "the-code",
+        client_secret="sekret",
+        token_endpoint_auth_method="none",
+        transport=transport,
+    )
+    public = parse_qs(seen[-1].content.decode())
+    assert "client_secret" not in public
+    assert "authorization" not in {k.lower() for k in seen[-1].headers}
+
+    await refresh_access_token(
+        token_url="https://idp.example/token",
+        client_id="cid",
+        refresh_token="rt",
+        client_secret="sekret",
+        token_endpoint_auth_method="client_secret_post",
+        transport=transport,
+    )
+    refreshed = parse_qs(seen[-1].content.decode())
+    assert refreshed["grant_type"] == ["refresh_token"]
+    assert refreshed["client_secret"] == ["sekret"]
+    assert "authorization" not in {k.lower() for k in seen[-1].headers}
+
+    await refresh_access_token(
+        token_url="https://idp.example/token",
+        client_id="cid",
+        refresh_token="rt",
+        client_secret="sekret",
+        token_endpoint_auth_method="client_secret_basic",
+        transport=transport,
+    )
+    assert "client_secret" not in parse_qs(seen[-1].content.decode())
+    assert seen[-1].headers["authorization"].startswith("Basic ")
+
+
+async def test_dcr_persists_client_secret(http, monkeypatch):
+    client, registry, _app = http
+
+    async def fake_register(**kwargs):
+        assert kwargs["token_endpoint_auth_method"] == "client_secret_post"
+        return {"client_id": "dyn-1", "client_secret": "dyn-secret"}
+
+    monkeypatch.setattr("portunus_gateway.operator_api.register_oauth_client", fake_register)
+    created = await client.post(
+        "/api/servers",
+        json={
+            "name": "DCR",
+            "slug": "dcr-secret",
+            "kind": "remote",
+            "url": "https://mcp.example.com/mcp",
+            "oauth": {
+                "authorize_url": "https://idp.example/authorize",
+                "token_url": "https://idp.example/token",
+                "scopes": ["mcp"],
+                "registration_endpoint": "https://idp.example/register",
+                "token_endpoint_auth_method": "client_secret_post",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    sid = uuid.UUID(created.json()["id"])
+    start = await client.post(
+        f"/api/servers/{sid}/oauth/start",
+        json={"redirect_uri": "http://test/api/oauth/callback"},
+    )
+    assert start.status_code == 200, start.text
+    assert await registry.read_oauth_client_secret(sid) == "dyn-secret"
+    cfg = await registry.remote_oauth_config(sid)
+    assert cfg["client_id"] == "dyn-1"

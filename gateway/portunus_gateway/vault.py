@@ -31,9 +31,17 @@ class Vault:
     def __init__(self, keys: dict[int, bytes]) -> None:
         if not keys:
             raise VaultError("keyring is empty")
-        self._aeads = {v: AESGCM(k) for v, k in keys.items()}
+        aeads: dict[int, AESGCM] = {}
+        for version, key in keys.items():
+            # Same version grammar as ``from_keyring`` (``k[1-9][0-9]*``). ``bool`` is an ``int``.
+            if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+                raise VaultError(f"invalid key version {version!r}")
+            if not isinstance(key, (bytes, bytearray)) or len(key) != KEY_LEN:
+                raise VaultError(f"key k{version} must be {KEY_LEN} bytes")
+            aeads[version] = AESGCM(bytes(key))
+        self._aeads = aeads
         # New entries are sealed under the newest key; older versions stay readable.
-        self.current_version = max(keys)
+        self.current_version = max(aeads)
 
     @classmethod
     def from_keyring(cls, keyring: str) -> Vault:

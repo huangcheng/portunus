@@ -125,22 +125,24 @@ def test_mega_session_drops_pass_and_2fa(monkeypatch, tmp_path):
     assert cfg["session_id"] == "sess" and cfg["master_key"] == "mk=="
 
 
-def test_ensure_obscured_passes_through_when_reveal_ok(monkeypatch, tmp_path):
+def test_ensure_obscured_passes_through_real_obscured(monkeypatch, tmp_path):
+    """Round-trip with rclone's public obscure algorithm (in-process reveal)."""
+    import base64
+
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
     rclone = tmp_path / "rclone"
     rclone.write_text("#!/bin/sh\n")
-    # 24+ chars of base64url → ≥16 decoded bytes → reveal candidate.
-    blob = "YWFhYWFhYWFhYWFhYWFhYWFhYWE"
+    iv = b"\x01" * 16
+    pt = b"secret-pass"
+    enc = Cipher(algorithms.AES(shim._RCLONE_OBSCURE_KEY), modes.CTR(iv)).encryptor()
+    ct = enc.update(pt) + enc.finalize()
+    blob = base64.urlsafe_b64encode(iv + ct).decode().rstrip("=")
 
-    class _R:
-        def __init__(self, code: int, out: str = ""):
-            self.returncode = code
-            self.stdout = out
+    def _no_run(*_a, **_k):  # pragma: no cover
+        raise AssertionError("subprocess must not run for already-obscured values")
 
-    def _run(argv, **_k):
-        assert argv[1] == "reveal"
-        return _R(0, "plain\n")
-
-    monkeypatch.setattr(shim.subprocess, "run", _run)
+    monkeypatch.setattr(shim.subprocess, "run", _no_run)
     assert shim.ensure_obscured(rclone, blob) == blob
 
 
@@ -162,16 +164,14 @@ def test_ensure_obscured_obscures_plaintext(monkeypatch, tmp_path):
         return _R(0, "OBSCURED\n")
 
     monkeypatch.setattr(shim.subprocess, "run", _run)
-    # Short non-base64url → skip reveal, obscure via stdin only.
     assert shim.ensure_obscured(rclone, "plaintext") == "OBSCURED"
     assert calls == ["obscure"]
 
 
-def test_ensure_obscured_reobscures_nonprintable_reveal(monkeypatch, tmp_path):
-    """reveal can 'succeed' on arbitrary base64url; garbage plaintext → obscure."""
+def test_ensure_obscured_reobscures_garbage_base64(monkeypatch, tmp_path):
+    """Random base64url ≥16 bytes decrypts to garbage → obscure via stdin."""
     rclone = tmp_path / "rclone"
     rclone.write_text("#!/bin/sh\n")
-    blob = "YWxzb2Jhc2U2NHBhc3N3b3JkMTIz"
 
     class _R:
         def __init__(self, code: int, out: str = ""):
@@ -179,9 +179,10 @@ def test_ensure_obscured_reobscures_nonprintable_reveal(monkeypatch, tmp_path):
             self.stdout = out
 
     def _run(argv, **_k):
-        if argv[1] == "reveal":
-            return _R(0, "\x00\x01bin\n")
+        assert argv[1] == "obscure"
         return _R(0, "OBSCURED\n")
 
     monkeypatch.setattr(shim.subprocess, "run", _run)
+    # 32 zero bytes → CTR decrypt of empty-ish / non-utf8 or non-printable.
+    blob = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     assert shim.ensure_obscured(rclone, blob) == "OBSCURED"

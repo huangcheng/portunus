@@ -142,6 +142,9 @@ def should_throttle_success(
     if last_ok_at is None:
         return False
     clock = now or datetime.now(timezone.utc)
+    # SQLite (and some callers) hand back naive datetimes that mean UTC.
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
     if last_ok_at.tzinfo is None:
         last_ok_at = last_ok_at.replace(tzinfo=timezone.utc)
     return (clock - last_ok_at).total_seconds() < SUCCESS_THROTTLE_S

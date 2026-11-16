@@ -96,6 +96,9 @@ async def reveal_agent_token(key_id: str, vault: Vault) -> str:
         row = (await session.execute(select(AgentKey).where(AgentKey.key_id == key_id))).scalar_one_or_none()
     if row is None or row.revoked_at is not None or authz.authz_store.is_revoked(key_id):
         raise AuthError("unauthorized", "unknown agent key")
+    expires_at = _as_utc(row.expires_at)
+    if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        raise AuthError("unauthorized", "agent key expired")
     if row.secret_ciphertext is None or row.secret_key_version is None:
         raise AuthError("unauthorized", "secret not recoverable")
     try:

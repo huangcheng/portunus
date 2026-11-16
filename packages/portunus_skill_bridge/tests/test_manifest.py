@@ -127,6 +127,69 @@ def test_external_session_alias_is_device_qr():
     assert m.auth.is_device_qr()
 
 
+def test_http_header_value_rejects_crlf_and_nul():
+    from portunus_skill_bridge.manifest import Manifest
+
+    base = {
+        "name": "x",
+        "backend": "http_rpc",
+        "http": {"base_url": "https://example.com", "headers": {}},
+        "tools": [{"name": "t", "description": "d", "dispatch": "t"}],
+    }
+    for value in ("a\r\nAuthorization: Bearer x", "a\nb", "a\x00b"):
+        spec = {
+            **base,
+            "http": {"base_url": "https://example.com", "headers": {"X-A": value}},
+        }
+        with pytest.raises(Exception, match="invalid header value"):
+            Manifest.model_validate(spec)
+
+
+def test_manifest_rejects_bad_timeouts_urls_headers_and_field_names():
+    from portunus_skill_bridge.manifest import Manifest
+
+    base = {
+        "name": "x",
+        "backend": "http_rpc",
+        "auth": {"type": "bearer_env", "env": "TOKEN"},
+        "http": {"base_url": "https://example.com"},
+        "tools": [{"name": "t", "description": "d", "dispatch": "t", "input": {}}],
+    }
+    for timeout in (0, -1, float("nan"), float("inf")):
+        spec = {**base, "http": {"base_url": "https://example.com", "timeout_s": timeout}}
+        with pytest.raises(Exception):
+            Manifest.model_validate(spec)
+    for url in ("", "   ", "/relative", "ftp://example.com/x"):
+        spec = {**base, "http": {"base_url": url}}
+        with pytest.raises(Exception):
+            Manifest.model_validate(spec)
+    spec = {**base, "auth": {"type": "bearer_env", "env": "TOKEN", "header": "X\r\nInjected"}}
+    with pytest.raises(Exception, match="invalid header name"):
+        Manifest.model_validate(spec)
+    spec = {
+        **base,
+        "tools": [
+            {
+                "name": "t",
+                "description": "d",
+                "dispatch": "t",
+                "input": {"user-name": {"type": "string"}},
+            }
+        ],
+    }
+    with pytest.raises(Exception, match="not a valid parameter name"):
+        Manifest.model_validate(spec)
+    nan_auth = {
+        "name": "x",
+        "backend": "json_cli",
+        "auth": {"type": "device_qr", "capture_timeout_s": float("nan")},
+        "cli": {"command": ["echo"]},
+        "tools": [{"name": "t", "description": "d", "cli": "t"}],
+    }
+    with pytest.raises(Exception):
+        Manifest.model_validate(nan_auth)
+
+
 def test_http_rpc_requires_dispatch():
     from portunus_skill_bridge.manifest import Manifest
 

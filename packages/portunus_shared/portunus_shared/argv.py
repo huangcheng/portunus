@@ -36,6 +36,28 @@ def _reject(message: str) -> ArgvError:
     return ArgvError(message)
 
 
+_WIN_EXTS = frozenset({".exe", ".cmd", ".bat"})
+
+
+def _program_name(real: str) -> str:
+    """Basename of an allowlisted realpath, without a Windows launcher extension."""
+    base = os.path.basename(real)
+    stem, ext = os.path.splitext(base)
+    if ext.casefold() in _WIN_EXTS:
+        base = stem
+    return base.casefold()
+
+
+def _is_python_basename(name: str) -> bool:
+    """``python``, ``python3``, and versioned interpreters (``python3.12``)."""
+    if name in _PYTHON:
+        return True
+    if not name.startswith("python"):
+        return False
+    rest = name[len("python") :]
+    return bool(rest) and all(part.isdigit() for part in rest.split("."))
+
+
 def _check_trailing(args: list[str], trailing_allowlist: list[str]) -> None:
     for a in args:
         if a.startswith("-") and a not in trailing_allowlist:
@@ -109,6 +131,22 @@ def validate_stdio_command(
         allowed = {os.path.realpath(p) for p in binary_allowlist}
         if real not in allowed:
             raise _reject("binary not in binary_allowlist")
+        # The same binary must not skip the closed grammar just because the
+        # operator spelled it as an absolute path that happens to be allowlisted.
+        name = _program_name(real)
+        if name == "npx":
+            _validate_npx(args, trailing_allowlist)
+            return
+        if name == "uvx":
+            _validate_uvx(args, trailing_allowlist)
+            return
+        if name == "pikpak":
+            if tuple(args) != _PIKPAK_MCP_ARGS:
+                raise _reject("pikpak requires exactly: mcp --stdio")
+            return
+        if _is_python_basename(name):
+            _validate_python_skill_bridge(args)
+            return
         for a in args:
             if a not in trailing_allowlist:
                 raise _reject(f"arg not in trailing_allowlist: {a!r}")

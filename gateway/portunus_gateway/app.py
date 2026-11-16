@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from starlette.routing import Route
 
 from .omni import Omni
@@ -27,11 +28,32 @@ def build_app(*, registry: Registry, omni: Omni, auth: OperatorAuth | None = Non
     # A Route (not a Mount) so ``POST /mcp`` matches without a trailing-slash redirect.
     app.router.routes.append(Route("/mcp", endpoint=omni.asgi))
 
-    @app.get("/.well-known/oauth-protected-resource", include_in_schema=False)
-    async def oauth_protected_resource(request: Request) -> dict[str, Any]:
+    # RFC 9728 §3.1: resource ``<origin>/mcp`` is also discovered at the path-suffixed URI.
+    # response_model=None: the union return is not a Pydantic field, and stacking
+    # these decorators otherwise builds that model twice.
+    @app.get(
+        "/.well-known/oauth-protected-resource",
+        include_in_schema=False,
+        response_model=None,
+    )
+    @app.get(
+        "/.well-known/oauth-protected-resource/mcp",
+        include_in_schema=False,
+        response_model=None,
+    )
+    async def oauth_protected_resource(request: Request) -> dict[str, Any] | JSONResponse:
         """RFC 9728 Protected Resource Metadata (MCP authorization MUST when authenticating)."""
         headers = {k.lower(): v for k, v in request.headers.items()}
-        return protected_resource_document(headers)
+        doc = protected_resource_document(headers)
+        if doc is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "code": "not_found",
+                    "message": "protected resource URL is not configured",
+                },
+            )
+        return doc
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:

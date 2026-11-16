@@ -50,7 +50,7 @@ export function isSkillBridgeApp(app: CatalogApp): app is SkillBridgeApp {
 }
 
 export function hasWebDavCredentials(server: { env_names: string[] } | null | undefined): boolean {
-  return !!server?.env_names.includes("WEBDAV_PASSWORD");
+  return server?.env_names?.includes("WEBDAV_PASSWORD") ?? false;
 }
 
 /** Manifest auth.type for platform Connect (external_session is a deprecated device_qr alias). */
@@ -125,7 +125,8 @@ export function hasSkillBridgeSecrets(
   if (isPlatformSkillAuth(app)) {
     return !!server.has_skill_session || have.has("SKILL_SESSION");
   }
-  return names.length > 0 || !!server;
+  // Secrets all present (or none required). Server non-null already guarded above.
+  return true;
 }
 
 export function specString(spec: Record<string, unknown>, key: string, fallback = ""): string {

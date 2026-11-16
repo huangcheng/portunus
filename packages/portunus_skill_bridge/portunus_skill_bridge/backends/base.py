@@ -25,7 +25,11 @@ def resolve_auth_headers(manifest: Manifest) -> dict[str, str]:
         )
     headers: dict[str, str]
     if auth.type == "bearer_env":
-        token = value if value.lower().startswith("bearer ") else f"{auth.prefix}{value}".strip()
+        prefix = auth.prefix
+        # Match the configured scheme, not a hard-coded "bearer ". Do not strip
+        # the concatenation: a prefix without surrounding whitespace must survive.
+        already = bool(prefix) and value.casefold().startswith(prefix.casefold())
+        token = value if already else f"{prefix}{value}"
         headers = {auth.header: token}
     elif auth.type == "header_env":
         headers = {auth.header: value}
@@ -37,5 +41,10 @@ def resolve_auth_headers(manifest: Manifest) -> dict[str, str]:
             raise RuntimeError(
                 f"missing secret env {env_name!r}; connect the app in Portunus first"
             )
+        # Header names are case-insensitive. A companion that reuses auth.header
+        # would overwrite the token, or send two conflicting copies.
+        collision = next((name for name in headers if name.lower() == header.lower()), None)
+        if collision is not None:
+            raise RuntimeError(f"extra header {header!r} collides with {collision!r}")
         headers[header] = companion
     return headers

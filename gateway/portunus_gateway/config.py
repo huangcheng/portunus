@@ -21,6 +21,9 @@ def load_keyring() -> str:
 
 PEPPER_FILE_ENV = "PORTUNUS_PEPPER_FILE"
 MIN_PEPPER_LEN = 32
+# A real pepper is a short base64 blob. Bound the read so a mis-pointed path
+# (for example a device node) cannot fill memory before the length check.
+_MAX_PEPPER_FILE_BYTES = 4096
 
 _pepper_cache: dict[str, bytes] = {}
 
@@ -44,9 +47,12 @@ def load_pepper() -> bytes:
         return cached
     try:
         with open(path, "rb") as fh:
-            raw = fh.read().strip()
+            raw = fh.read(_MAX_PEPPER_FILE_BYTES + 1)
     except OSError as exc:
         raise VaultError(f"cannot read pepper file: {type(exc).__name__}") from None
+    if len(raw) > _MAX_PEPPER_FILE_BYTES:
+        raise VaultError(f"pepper file exceeds {_MAX_PEPPER_FILE_BYTES} bytes")
+    raw = raw.strip()
     try:
         pepper = base64.b64decode(raw, validate=True)
     except (binascii.Error, ValueError):

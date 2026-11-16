@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from portunus_shared import package_fingerprint
 
 
@@ -25,6 +27,17 @@ def test_fingerprint_stable_and_changes_with_content(tmp_path: Path) -> None:
     second = package_fingerprint(pkg)
     assert second != first
     assert len(second) == 12
+
+
+def test_fingerprint_rejects_empty_or_missing_tree(tmp_path: Path) -> None:
+    missing = tmp_path / "gone"
+    with pytest.raises(FileNotFoundError):
+        package_fingerprint(missing)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "only.pyc").write_bytes(b"\0")
+    with pytest.raises(FileNotFoundError):
+        package_fingerprint(empty)
 
 
 def test_fingerprint_ignores_non_py(tmp_path: Path) -> None:

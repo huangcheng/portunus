@@ -39,6 +39,46 @@ async def test_http_rpc_posts_flat_body(monkeypatch):
     assert "Bearer wrk-test" in captured["headers"]["Authorization"]
 
 
+@pytest.mark.anyio
+async def test_http_rpc_malformed_json_falls_back_to_text(monkeypatch):
+    monkeypatch.setenv("WEREAD_API_KEY", "wrk-test")
+    m = load_manifest(WEREAD)
+    backend = HttpRpcBackend(m)
+    tool = next(t for t in m.tools if t.name == "search_books")
+
+    async def fake_request(self, method, url, **kwargs):  # noqa: ANN001
+        return httpx.Response(
+            502,
+            headers={"content-type": "application/problem+json"},
+            content=b"",
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    out = await backend.call(tool, {"keyword": "x"})
+    assert out["ok"] is False
+    assert out["status_code"] == 502
+    assert out["error"]["status_code"] == 502
+    assert "text" in out["error"]
+
+
+@pytest.mark.anyio
+async def test_http_rpc_parses_json_suffix_content_type(monkeypatch):
+    monkeypatch.setenv("WEREAD_API_KEY", "wrk-test")
+    m = load_manifest(WEREAD)
+    backend = HttpRpcBackend(m)
+    tool = next(t for t in m.tools if t.name == "search_books")
+
+    async def fake_request(self, method, url, **kwargs):  # noqa: ANN001
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "Application/Problem+JSON; charset=utf-8"},
+            content=b'{"ok": true}',
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    assert await backend.call(tool, {"keyword": "x"}) == {"ok": True}
+
+
 def test_build_server_registers_tools():
     m = load_manifest(WEREAD)
     server = build_server(m)

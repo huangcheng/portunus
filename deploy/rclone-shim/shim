@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import hashlib
 import os
 import secrets
@@ -54,7 +55,15 @@ CONF_DIGEST_VERSION = "2"
 # ``token`` JSON blobs or MEGA session fields — those are not Password-typed and
 # must not be run through obscure.
 PASSWORD_KEYS = frozenset(
-    {"pass", "password", "password2", "key_file_pass", "secret_key", "key"}
+    {
+        "pass",
+        "password",
+        "password2",
+        "key_file_pass",
+        "secret_key",
+        "secret_access_key",
+        "key",
+    }
 )
 # Only cloud-storage backends: ``local``/``alias``/``union``/``crypt`` would turn
 # the runner filesystem (cwd "/") into a WebDAV share for the agent.
@@ -131,6 +140,68 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+# rclone fs/config/obscure AES-256 key (public; obscurity is not secrecy).
+_RCLONE_OBSCURE_KEY = bytes(
+    [
+        0x9C,
+        0x93,
+        0x5B,
+        0x48,
+        0x73,
+        0x0A,
+        0x55,
+        0x4D,
+        0x6B,
+        0xFD,
+        0x7C,
+        0x63,
+        0xC8,
+        0x86,
+        0xA9,
+        0x2B,
+        0xD3,
+        0x90,
+        0x19,
+        0x8E,
+        0xB8,
+        0x12,
+        0x8A,
+        0xFB,
+        0xF4,
+        0xDE,
+        0x16,
+        0x2B,
+        0x8B,
+        0x95,
+        0xF6,
+        0x38,
+    ]
+)
+
+
+def _rclone_reveal_inprocess(value: str) -> str | None:
+    """Reveal an rclone-obscured value without spawning rclone (no argv leak).
+
+    Returns plaintext on success, or None when ``value`` is not an obscured blob.
+    Any base64url ≥16 bytes "decrypts"; callers must still sanity-check plaintext.
+    """
+    try:
+        raw = base64.urlsafe_b64decode(value + ("=" * (-len(value) % 4)))
+    except (ValueError, binascii.Error):
+        return None
+    if len(raw) < 16:
+        return None
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    iv, ct = raw[:16], raw[16:]
+    decryptor = Cipher(algorithms.AES(_RCLONE_OBSCURE_KEY), modes.CTR(iv)).decryptor()
+    plain = decryptor.update(ct) + decryptor.finalize()
+    try:
+        return plain.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def ensure_obscured(rclone: Path, value: str) -> str:
     """Return an rclone-obscured password; pass through values already obscured.
 
@@ -139,49 +210,36 @@ def ensure_obscured(rclone: Path, value: str) -> str:
     ``input too short when revealing password`` on plaintext — which aborts
     the connector before session_id/master_key (MEGA) can be tried.
 
-    ``rclone reveal`` succeeds for any base64url blob that decodes to ≥16 bytes
-    (random IV + AES-CTR), so exit status alone is not proof the value was
-    produced by ``obscure``. Require the revealed plaintext to be printable
-    UTF-8; otherwise treat the paste as plaintext and obscure it. ``obscure``
-    reads the password on stdin (``-``) so it never appears on argv;
-    ``reveal`` still takes an argument (rclone has no stdin form) — brief
-    /proc cmdline exposure of an already-obscured blob only.
+    Reveal is done in-process (rclone's public obscure key) so passwords never
+    touch argv. Fresh obscuring uses ``rclone obscure -`` on stdin.
     """
     if not value:
         return value
 
-    def _run(*argv: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-        try:
-            return subprocess.run(
-                [str(rclone), *argv],
-                input=input_text,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=10,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as e:
-            fail(f"cannot obscure password field for rclone config ({type(e).__name__})")
-
-    # Obscured values are unpadded base64url decoding to ≥16 bytes (IV + ciphertext).
-    # Anything else is plaintext — obscure via stdin so the password never hits argv.
-    candidate = False
     try:
-        pad = "=" * (-len(value) % 4)
-        raw = base64.urlsafe_b64decode(value + pad)
-        candidate = len(raw) >= 16 and all(
-            c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-            for c in value
+        revealed = _rclone_reveal_inprocess(value)
+    except ImportError:
+        fail("cryptography package required to normalize rclone passwords")
+    if (
+        revealed is not None
+        and revealed.isprintable()
+        and "\ufffd" not in revealed
+        and "\x00" not in revealed
+    ):
+        return value
+
+    try:
+        obscured = subprocess.run(
+            [str(rclone), "obscure", "-"],
+            input=value + "\n",
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+            check=False,
         )
-    except (ValueError, binascii.Error):
-        candidate = False
-    if candidate:
-        revealed = _run("reveal", "--", value)
-        plain = revealed.stdout.strip() if revealed.returncode == 0 else ""
-        if plain and plain.isprintable() and "\ufffd" not in plain:
-            return value
-    obscured = _run("obscure", "-", input_text=value + "\n")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        fail(f"cannot obscure password field for rclone config ({type(e).__name__})")
     if obscured.returncode != 0 or not obscured.stdout.strip():
         fail("cannot obscure password field for rclone config")
     return obscured.stdout.strip()
@@ -249,7 +307,7 @@ def main() -> None:
     conf_file = state_dir / f"rclone-{digest}.conf"
     if conf_file.exists():
         os.utime(conf_file)  # live connector: keep the 30-day prune away
-    if not conf_file.exists():
+    else:
         # rclone's config format is line-based: re-encode values containing
         # newlines with the base64; marker (same form config dumps use).
         def _fmt(v: str) -> str:
@@ -260,10 +318,25 @@ def main() -> None:
         body = f"[{remote}]\n" + "\n".join(
             f"{k} = {_fmt(v)}" for k, v in cfg.items()
         ) + "\n"
-        # Atomic + owner-only from creation (no umask window, no symlink follow).
-        fd = os.open(conf_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(body)
+        # Write via a sibling temp then replace so concurrent shims never see a
+        # zero-length conf and a crash mid-write cannot leave a durable empty file.
+        tmp_path = state_dir / f"rclone-{digest}.{os.getpid()}.tmp"
+        try:
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(body)
+            os.replace(tmp_path, conf_file)
+        except FileExistsError:
+            # Another shim won the create race — reuse their conf.
+            if tmp_path.exists():
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink()
+            if not conf_file.exists():
+                fail("rclone conf create race; retry")
+        except Exception:
+            with contextlib.suppress(OSError):
+                tmp_path.unlink()
+            raise
     # Prune confs whose digest no longer matches any live paste we have seen is
     # not knowable here; instead cap the directory growth by aging out files
     # untouched for 30 days.

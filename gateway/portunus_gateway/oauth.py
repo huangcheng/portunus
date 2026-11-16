@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -76,15 +76,19 @@ def iss_matches(iss: str | None, pending: OAuthPending) -> bool:
 
     Exact issuer comparison needs the AS's issuer identifier from metadata discovery,
     which this operator-configured flow deliberately does not perform. With an explicit
-    ``issuer`` configured we compare exactly (RFC 3986 §6.2.1, no normalization);
-    otherwise we anchor on the authorize endpoint's origin — a response from a different
-    authority is rejected while tenant paths are tolerated. An absent ``iss`` cannot be
-    verified either way (only AS metadata says whether the AS sends it) and is accepted.
+    ``issuer`` configured, RFC 9207 requires ``iss`` and we compare it exactly
+    (RFC 3986 §6.2.1, no normalization). Otherwise we anchor on the authorize endpoint's
+    origin — a response from a different authority is rejected while tenant paths are
+    tolerated. An absent ``iss`` is accepted only in that fallback: without a configured
+    issuer, only AS metadata says whether the AS sends ``iss``.
     """
+    # When an exact issuer is configured, RFC 9207 mix-up defense requires ``iss``.
+    # Omitting it must not skip the check. Without a configured issuer we still
+    # accept a missing ``iss`` (AS metadata alone says whether the AS sends it).
+    if pending.issuer:
+        return bool(iss) and iss == pending.issuer
     if not iss:
         return True
-    if pending.issuer:
-        return iss == pending.issuer
     got = _origin_of(iss)
     return got is not None and got == pending.issuer_origin
 
@@ -233,8 +237,16 @@ class OAuthStore:
             params["scope"] = " ".join(scopes)
         if resource:
             params["resource"] = resource
-        sep = "&" if "?" in authorize_url else "?"
-        return {"state": state, "authorize_url": f"{authorize_url}{sep}{urlencode(params)}"}
+        # Merge into the query component. Concatenation drops params into a fragment
+        # (``https://as/authorize#/cb``) and turns a trailing ``?`` into ``?&``.
+        parsed = urlparse(authorize_url)
+        existing = [
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key not in params
+        ]
+        authorize = urlunparse(parsed._replace(query=urlencode([*existing, *params.items()])))
+        return {"state": state, "authorize_url": authorize}
 
     def get(self, state: str) -> OAuthPending:
         self._purge()
@@ -305,10 +317,38 @@ async def register_oauth_client(
         data = resp.json()
     except ValueError:
         raise OAuthError(502, "upstream_crash", "registration endpoint returned non-JSON") from None
+    if not isinstance(data, dict):
+        raise OAuthError(502, "upstream_crash", "registration endpoint returned non-object JSON")
     client_id = data.get("client_id")
     if not isinstance(client_id, str) or not client_id.strip():
         raise OAuthError(502, "upstream_crash", "registration omitted client_id")
     return data
+
+
+def _apply_token_client_auth(
+    data: dict[str, str],
+    *,
+    client_id: str,
+    client_secret: str | None,
+    auth_method: str | None,
+) -> httpx.Auth | None:
+    """Attach a client secret the way ``token_endpoint_auth_method`` requires.
+
+    ``client_secret_post`` (GitHub) puts the secret in the form body.
+    ``client_secret_basic`` uses HTTP Basic. ``none`` sends nothing.
+    A secret with no declared method keeps the historical Basic default.
+    """
+    if not client_secret:
+        return None
+    method = auth_method or "client_secret_basic"
+    if method == "client_secret_post":
+        data["client_secret"] = client_secret
+        return None
+    if method == "none":
+        return None
+    if method == "client_secret_basic":
+        return httpx.BasicAuth(client_id, client_secret)
+    return None
 
 
 def _token_error_message(resp: httpx.Response) -> str:
@@ -327,13 +367,25 @@ def _token_error_message(resp: httpx.Response) -> str:
     return f"token endpoint rejected the code (HTTP {resp.status_code})"
 
 
+def _has_header_ctl(value: str) -> bool:
+    """True when ``value`` contains a byte that must not appear in an HTTP header."""
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
 def _parse_token_response(body: Any) -> TokenBundle:
     if not isinstance(body, dict):
         raise OAuthError(502, "upstream_crash", "token endpoint returned non-object JSON")
     token = body.get("access_token")
     if not isinstance(token, str) or not token:
         raise OAuthError(502, "upstream_crash", "token endpoint omitted access_token")
+    if _has_header_ctl(token):
+        raise OAuthError(502, "upstream_crash", "token endpoint returned an invalid access_token")
+    # RFC 6749 token types are visible ASCII (%x21-7E). The single SP before the
+    # access token is added here; whitespace or controls inside token_type would
+    # be header injection when this value is replayed as Authorization.
     token_type = str(body.get("token_type") or "Bearer").strip() or "Bearer"
+    if not token_type.isascii() or any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in token_type):
+        raise OAuthError(502, "upstream_crash", "token endpoint returned an invalid token_type")
     refresh = body.get("refresh_token")
     refresh_token = refresh if isinstance(refresh, str) and refresh.strip() else None
     expires_raw = body.get("expires_in")
@@ -356,6 +408,7 @@ async def exchange_code(
     code: str,
     *,
     client_secret: str | None = None,
+    token_endpoint_auth_method: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> TokenBundle:
     """Exchange ``code`` for tokens; returns Authorization + optional refresh/expiry."""
@@ -372,10 +425,12 @@ async def exchange_code(
         # RFC 8707: required when the authorize request included ``resource`` (e.g. Ardot).
         data["resource"] = pending.resource
     headers = {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}
-    # Public clients (token_endpoint_auth_method=none) must not send Basic auth.
-    auth: httpx.Auth | None = None
-    if client_secret:
-        auth = httpx.BasicAuth(pending.client_id, client_secret)
+    auth = _apply_token_client_auth(
+        data,
+        client_id=pending.client_id,
+        client_secret=client_secret,
+        auth_method=token_endpoint_auth_method,
+    )
     try:
         async with httpx.AsyncClient(
             transport=transport, trust_env=False, timeout=httpx.Timeout(30.0)
@@ -398,6 +453,7 @@ async def refresh_access_token(
     client_id: str,
     refresh_token: str,
     client_secret: str | None = None,
+    token_endpoint_auth_method: str | None = None,
     resource: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> TokenBundle:
@@ -412,9 +468,12 @@ async def refresh_access_token(
     if resource:
         data["resource"] = resource
     headers = {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}
-    auth: httpx.Auth | None = None
-    if client_secret:
-        auth = httpx.BasicAuth(client_id, client_secret)
+    auth = _apply_token_client_auth(
+        data,
+        client_id=client_id,
+        client_secret=client_secret,
+        auth_method=token_endpoint_auth_method,
+    )
     try:
         async with httpx.AsyncClient(
             transport=transport, trust_env=False, timeout=httpx.Timeout(30.0)

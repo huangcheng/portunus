@@ -376,7 +376,7 @@ button.ghost:hover { background: var(--secondary); color: var(--foreground); }
 button.destructive { background: transparent; color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 20%, var(--border)); }
 button.destructive:hover { background: color-mix(in oklch, var(--destructive) 7%, var(--card)); border-color: color-mix(in oklch, var(--destructive) 35%, var(--border)); }
 button.sm { height: 38px; padding: 0 14px; font-size: 12.5px; }
-button:disabled { opacity: 0.45; cursor: not-allowed; pointer-events: none; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.icon-btn { width: 36px; height: 36px; padding: 0; flex-shrink: 0; }
 
 input, textarea, select {
@@ -594,7 +594,7 @@ th.text-right { text-align: right; }
 .app-card-title { font-weight: 650; font-size: 16.5px; letter-spacing: -0.025em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px color-mix(in oklch, var(--success) 10%, transparent); flex-shrink: 0; }
 .app-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 6px; font-size: 9.5px; font-weight: 600; line-height: 1.5; flex-shrink: 0; color: var(--muted-foreground); background: var(--secondary); }
-.app-pill.ok { color: var(--primary); background: color-mix(in oklch, var(--primary) 13%, transparent); }
+.app-pill.ok { color: var(--success); background: color-mix(in oklch, var(--success) 13%, transparent); }
 .app-pill.warn { color: var(--warning); background: color-mix(in oklch, var(--warning) 10%, transparent); }
 .app-card-desc { margin: 7px 0 0; max-width: 48ch; font-size: 12.5px; color: var(--muted-foreground); line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-wrap: pretty; }
 .app-card-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 13px; margin-top: 17px; font-size: 10.5px; color: var(--muted-foreground); }
@@ -620,7 +620,7 @@ th.text-right { text-align: right; }
 .apps-drawer-header h2 { margin: 0; font-size: 23px; font-weight: 640; letter-spacing: -0.035em; }
 .apps-drawer-header .desc { margin: 7px 0 0; max-width: 48ch; font-size: 11.5px; color: color-mix(in oklch, var(--sidebar-foreground) 55%, transparent); line-height: 1.55; }
 .apps-drawer-header .app-pill { background: color-mix(in oklch, var(--sidebar-foreground) 10%, transparent); color: var(--sidebar-foreground); }
-.apps-drawer-header .app-pill.ok { background: color-mix(in oklch, var(--primary) 14%, transparent); color: var(--primary); }
+.apps-drawer-header .app-pill.ok { background: color-mix(in oklch, var(--success) 14%, transparent); color: var(--success); }
 .apps-drawer-close { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; color: color-mix(in oklch, var(--sidebar-foreground) 60%, transparent); border: 1px solid var(--sidebar-border); border-radius: 50%; }
 .apps-drawer-close:hover { color: var(--primary-foreground); background: var(--primary); }
 .apps-drawer > form, .apps-drawer > .stack, .apps-drawer > .server-tools { margin: 25px 25px 0; }
@@ -755,7 +755,7 @@ th.text-right { text-align: right; }
 .notice.warn { color: var(--warning); border-color: color-mix(in oklch, var(--warning) 22%, var(--border)); background: color-mix(in oklch, var(--warning) 6%, var(--card)); }
 .error { color: var(--destructive); margin: 0; font-size: 12px; }
 .apps-notice { margin: 0; font-size: 12px; color: var(--success); line-height: 1.5; }
-.muted { color: var(--muted-foreground); }
+.muted { margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
 code { font-family: var(--font-mono); font-size: 0.92em; }
 .grant { display: inline-flex; align-items: center; gap: 2px; margin: 2px 6px 2px 0; padding: 2px 2px 2px 8px; border-radius: 6px; background: var(--secondary); color: var(--secondary-foreground); font-family: var(--font-mono); font-size: 11px; }
 .grant button { height: 22px; padding: 0 6px; border: 0; background: transparent; color: var(--muted-foreground); font-size: 14px; box-shadow: none; }
@@ -999,7 +999,7 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
   padding: 3px;
   border-radius: 12px;
   border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
-  background: color-mix(in oklch, var(--card) 88%, var(--bg));
+  background: color-mix(in oklch, var(--card) 88%, var(--background));
 }
 .temporal-filters button {
   height: 34px;
@@ -1007,7 +1007,7 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
   border: 0;
   border-radius: 9px;
   background: transparent;
-  color: var(--muted);
+  color: var(--muted-foreground);
   font: inherit;
   font-size: 13px;
   font-weight: 550;
@@ -1015,8 +1015,8 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
 }
 .temporal-filters button.active {
   background: var(--card);
-  color: var(--fg);
-  box-shadow: 0 1px 2px color-mix(in oklch, var(--fg) 12%, transparent);
+  color: var(--foreground);
+  box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 12%, transparent);
 }
 .temporal-search {
   display: flex;
@@ -1160,7 +1160,10 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
 .account-layout { display: grid; grid-template-columns: 12rem minmax(0, 1fr); gap: 18px; align-items: start; }
 .account-nav { display: flex; flex-direction: column; gap: 4px; padding: 6px; border-radius: 14px; border: 1px solid color-mix(in oklch, var(--border) 65%, transparent); background: var(--card); }
 .account-nav button { justify-content: flex-start; height: 38px; color: var(--muted-foreground); box-shadow: none; }
-.account-nav button[aria-current="page"] { background: color-mix(in oklch, var(--primary) 12%, transparent); color: var(--primary); }
+.account-nav button[aria-current="page"] {
+  background: color-mix(in oklch, var(--success) 12%, transparent);
+  color: var(--success);
+}
 .account-badge {
   justify-self: end; align-self: center;
   font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
@@ -1168,7 +1171,6 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
   border: 1px solid var(--border); color: var(--muted-foreground);
 }
 .account-badge.on { color: var(--success); border-color: color-mix(in oklch, var(--success) 35%, var(--border)); }
-.muted { margin: 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
 .totp-scan { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 18px; align-items: start; }
 .qr-frame { width: 176px; height: 176px; padding: 10px; border-radius: 12px; background: #fff; border: 1px solid var(--border); }
 .qr-pending { background: var(--muted); }

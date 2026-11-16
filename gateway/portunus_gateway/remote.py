@@ -354,7 +354,9 @@ class RemoteClient:
                         limits=limits,
                     ) as post_http,
                 ):
-                    session = _ClassicSseSession(self, sse_http, post_http)
+                    session = _ClassicSseSession(
+                        self, sse_http, post_http, timeout_s=budget
+                    )
                     try:
                         await session.connect()
                         return await op(session)  # type: ignore[arg-type]
@@ -372,7 +374,7 @@ class RemoteClient:
 
     # ---- one hop-by-hop request ----
 
-    async def _target(self, url: httpx.URL, *, prev: _Target | None, start_loopback: bool | None):
+    async def _target(self, url: httpx.URL, *, prev: _Target | None):
         scheme = url.scheme.lower()
         if scheme not in ("http", "https"):
             raise SsrfError("scheme must be https (or allowlisted loopback http)")
@@ -394,7 +396,9 @@ class RemoteClient:
         if not addresses:
             raise PortunusError("upstream_crash", "remote host did not resolve")
         # A redirect may not steer a non-loopback origin at an allowlisted loopback service.
-        may_use_loopback = allowlisted and (start_loopback is None or start_loopback)
+        # Loopback only for the first hop or when the immediately previous hop
+        # was already loopback — never re-enter loopback after a public redirect.
+        may_use_loopback = allowlisted and (prev is None or prev.loopback)
         for addr in addresses:
             check_address(addr, allow_loopback=may_use_loopback)
         loopback = all(ipaddress.ip_address(a).is_loopback or _mapped_loopback(a) for a in addresses)
@@ -414,8 +418,7 @@ class RemoteClient:
         """Send with manual, fully re-validated redirects. Returns the final response + body."""
         url = url if url is not None else self._parse_start()
         hdrs = dict(headers)
-        target = await self._target(url, prev=None, start_loopback=None)
-        start_loopback = target.loopback
+        target = await self._target(url, prev=None)
         hops = 0
         while True:
             response, data = await self._send_pinned(http, method, target, hdrs, body)
@@ -435,7 +438,7 @@ class RemoteClient:
                 next_url = target.url.join(location)
             except (httpx.InvalidURL, ValueError):
                 raise SsrfError("invalid redirect location") from None
-            nxt = await self._target(next_url, prev=target, start_loopback=start_loopback)
+            nxt = await self._target(next_url, prev=target)
             if nxt.origin != target.origin:
                 # Never forward caller credentials across origins, on this or any later hop.
                 hdrs = {k: v for k, v in hdrs.items() if _cross_origin_safe(k)}
@@ -493,7 +496,7 @@ class RemoteClient:
     ) -> httpx.Response:
         """DNS-pinned streaming request (classic SSE GET). Caller must ``aclose``."""
         url = url if url is not None else self._parse_start()
-        target = await self._target(url, prev=None, start_loopback=None)
+        target = await self._target(url, prev=None)
         response, _ = await self._send_pinned(http, method, target, headers, None, stream=True)
         return response
 
@@ -542,10 +545,15 @@ class _ClassicSseSession:
         client: RemoteClient,
         sse_http: httpx.AsyncClient,
         post_http: httpx.AsyncClient,
+        *,
+        timeout_s: float,
     ) -> None:
         self.c = client
         self.sse_http = sse_http
         self.post_http = post_http
+        # Per-call budget (policy timeout when the caller did not pass one). The
+        # RPC wait must honor it; capping at min(60, policy) ignores a longer budget.
+        self._rpc_timeout_s = timeout_s
         self.protocol = HANDSHAKE_PROTOCOL_VERSION
         self.modern = False
         self._next_id = 0
@@ -618,42 +626,62 @@ class _ClassicSseSession:
         data_lines: list[str] = []
         event_bytes = 0
         max_bytes = self.c.policy.max_response_bytes
+        # Byte-oriented read so a huge line cannot balloon memory before the cap.
+        buf = b""
+        total_bytes = 0
         try:
-            async for line in response.aiter_lines():
-                if line.startswith(":"):
-                    continue
-                if line.startswith("event:"):
-                    event = line[6:].strip() or "message"
-                    continue
-                if line.startswith("data:"):
-                    chunk = line[5:].lstrip(" ")
-                    event_bytes += len(chunk.encode("utf-8", "replace"))
-                    if event_bytes > max_bytes:
-                        raise PortunusError("payload_too_large", "SSE event too large")
-                    data_lines.append(chunk)
-                    continue
-                if line != "":
-                    continue
-                data = "\n".join(data_lines)
-                data_lines = []
-                event_bytes = 0
-                ev, event = event, "message"
-                if not data:
-                    continue
-                if ev == "endpoint":
-                    await self._on_endpoint(data.strip())
-                    continue
-                try:
-                    obj = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
-                    continue
-                mid = obj.get("id")
-                if isinstance(mid, int) and mid in self._pending:
-                    fut = self._pending.pop(mid)
-                    if not fut.done():
-                        fut.set_result(obj)
+            async for chunk in response.aiter_bytes():
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    raise PortunusError("payload_too_large", "SSE stream too large")
+                buf += chunk
+                while True:
+                    nl = buf.find(b"\n")
+                    if nl < 0:
+                        if len(buf) > max_bytes:
+                            raise PortunusError("payload_too_large", "SSE line too large")
+                        break
+                    raw_line, buf = buf[:nl], buf[nl + 1 :]
+                    if raw_line.endswith(b"\r"):
+                        raw_line = raw_line[:-1]
+                    line = raw_line.decode("utf-8", "replace")
+                    if line.startswith(":"):
+                        continue
+                    if line.startswith("event:"):
+                        event = line[6:].strip() or "message"
+                        continue
+                    if line.startswith("data:"):
+                        piece = line[5:].lstrip(" ")
+                        piece_len = len(piece.encode("utf-8", "replace"))
+                        # Empty `data:` lines still append a list entry. Count the
+                        # raw line so they cannot grow data_lines without bound.
+                        event_bytes += piece_len if piece_len else len(raw_line) + 1
+                        if event_bytes > max_bytes:
+                            raise PortunusError("payload_too_large", "SSE event too large")
+                        data_lines.append(piece)
+                        continue
+                    if line != "":
+                        continue
+                    data = "\n".join(data_lines)
+                    data_lines = []
+                    event_bytes = 0
+                    ev, event = event, "message"
+                    if not data:
+                        continue
+                    if ev == "endpoint":
+                        await self._on_endpoint(data.strip())
+                        continue
+                    try:
+                        obj = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(obj, dict):
+                        continue
+                    mid = obj.get("id")
+                    if isinstance(mid, int) and mid in self._pending:
+                        fut = self._pending.pop(mid)
+                        if not fut.done():
+                            fut.set_result(obj)
         except asyncio.CancelledError:
             raise
         except httpx.TimeoutException:
@@ -683,7 +711,7 @@ class _ClassicSseSession:
             ):
                 raise PortunusError("upstream_crash", "SSE endpoint changed origin")
             # Re-validate through SSRF policy.
-            await self.c._target(msg, prev=None, start_loopback=None)
+            await self.c._target(msg, prev=None)
             self._endpoint_fut.set_result(msg)
         except Exception as e:  # noqa: BLE001
             if not self._endpoint_fut.done():
@@ -753,7 +781,7 @@ class _ClassicSseSession:
             except (UnicodeDecodeError, json.JSONDecodeError):
                 pass
         try:
-            msg = await asyncio.wait_for(fut, timeout=min(60.0, float(self.c.policy.timeout_s)))
+            msg = await asyncio.wait_for(fut, timeout=self._rpc_timeout_s)
         except TimeoutError:
             self._pending.pop(mid, None)
             raise PortunusError("upstream_timeout", "SSE response timed out") from None
@@ -853,12 +881,13 @@ class _Session:
 
     @staticmethod
     def _is_premodern_http(code: int) -> bool:
-        """HTTP 4xx on the discover probe that means 'peer does not speak 2026-07-28'.
+        """HTTP statuses on the discover probe that mean 'peer has no server/discover'.
 
-        Auth / size errors still hard-fail. Spec-legal peers may reject an unknown protocol
-        version with plain 400 rather than JSON-RPC -32601.
+        Only unsupported-endpoint / method / media-type responses fall back to initialize.
+        Auth, size, timeout, and rate-limit statuses (401/403/408/413/425/429, …) hard-fail.
+        Spec-legal peers may reject an unknown protocol version with plain 400.
         """
-        return 400 <= code < 500 and code not in (401, 403, 413)
+        return code in (400, 404, 405, 406, 415)
 
     def _check_status(
         self,

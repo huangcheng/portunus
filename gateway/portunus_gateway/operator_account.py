@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,7 @@ from .operator_crypto import (
     decrypt_totp_secret,
     encrypt_totp_secret,
     hash_recovery_code,
+    recovery_code_digests,
 )
 
 logger = logging.getLogger("portunus.gateway.operator_account")
@@ -193,8 +194,10 @@ def totp_verify_at(secret: str, code: str, last_step: int | None) -> int | None:
         step = int(now // 30) + offset
         if last_step is not None and step <= last_step:
             continue
-        if hmac.compare_digest(totp.at(now + offset * 30), code):
-            return step
+        expected = totp.at(now + offset * 30)
+        if not isinstance(code, str) or not code.isascii() or not hmac.compare_digest(expected, code):
+            continue
+        return step
     return None
 
 
@@ -241,14 +244,32 @@ async def confirm_totp(sf: SessionFactory, secret: str, codes: list[dict[str, st
         await s.commit()
 
 
-async def set_totp_step(sf: SessionFactory, step: int) -> None:
+async def set_totp_step(sf: SessionFactory, step: int) -> bool:
+    """Advance ``totp_last_step`` only when it is unset or older.
+
+    The ``WHERE`` makes the write atomic: a concurrent replay matches no row.
+    Returns False when nothing was updated.
+    """
     async with sf() as s:
-        row = await s.get(OperatorAccount, 1)
-        if row is None:
-            return
-        row.totp_last_step = step
-        row.updated_at = _now()
+        updated = (
+            await s.execute(
+                update(OperatorAccount)
+                .where(
+                    OperatorAccount.id == 1,
+                    or_(
+                        OperatorAccount.totp_last_step.is_(None),
+                        OperatorAccount.totp_last_step < step,
+                    ),
+                )
+                .values(totp_last_step=step, updated_at=_now())
+                .returning(OperatorAccount.id)
+            )
+        ).first()
+        if updated is None:
+            await s.rollback()
+            return False
         await s.commit()
+        return True
 
 
 async def disable_totp(sf: SessionFactory) -> None:
@@ -283,16 +304,20 @@ async def replace_recovery_codes(sf: SessionFactory, codes: list[dict[str, str]]
 
 
 async def consume_recovery_code(sf: SessionFactory, normalized: str) -> int | None:
-    """Atomically spend a code. Returns remaining unused codes, or None if it did not match."""
+    """Atomically spend a code. Returns remaining unused codes, or None if it did not match.
+
+    Digests are tried under every valid ``PORTUNUS_SECRETS_KEY`` version so a
+    key rotation does not invalidate outstanding recovery codes.
+    """
     try:
-        digest = hash_recovery_code(normalized)
+        digests = recovery_code_digests(normalized)
     except OperatorCryptoError:
         return None
     async with sf() as s:
         row = (
             await s.execute(
                 update(RecoveryCode)
-                .where(RecoveryCode.code_hash == digest, RecoveryCode.used_at.is_(None))
+                .where(RecoveryCode.code_hash.in_(digests), RecoveryCode.used_at.is_(None))
                 .values(used_at=_now())
                 .returning(RecoveryCode.code_hash)
             )
@@ -364,9 +389,14 @@ async def save_passkey(
                 )
             )
         else:
+            # A re-registered credential restarts its authenticator counter at 0.
+            # Leaving the previous sign_count in place makes every later assertion
+            # look like a cloned authenticator.
             row.public_key = public_key
             row.name = name
             row.transports = transports
+            row.sign_count = 0
+            row.last_used_at = None
         await s.commit()
 
 

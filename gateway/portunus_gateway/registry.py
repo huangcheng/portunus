@@ -10,8 +10,9 @@ Invariants
   just-in-time for a probe and never returned by any API or written to the audit log.
 * A probe is an ephemeral runner child in the ``probe`` pool: at most ``max_probes`` at once,
   one per server, outside the invoke slot FSM and its caps. A re-probe that finds a tool's
-  schema or description changed disables that tool again (it must be re-approved); tools that
-  disappeared are kept (invoke reports ``tool_missing``).
+  schema, description, or annotations changed disables that tool again (it must be re-approved);
+  an unchanged tool keeps its operator enablement, including disabled. Tools that disappeared
+  are kept (invoke reports ``tool_missing``).
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ _OAUTH_JOB_SITE_TTL_S = 300.0
 
 from portunus_shared import ALLOWED_PORTUNUS_ENV, DEFAULTS, PortunusError, validate_stdio_command
 from sqlalchemy import case, func, literal, or_, select, update
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db.models import AuditEvent, CatalogApp, Server, SiteHealth, Tool, VaultEntry
@@ -195,6 +196,11 @@ def normalize_cubox_env(env: dict[str, str]) -> dict[str, str]:
     return out
 
 
+def _utf8_len(value: str) -> int:
+    """Byte length. ``MAX_ENV_BYTES`` is a byte budget; ``len(str)`` counts characters."""
+    return len(value.encode("utf-8"))
+
+
 def validate_env(env: dict[str, str]) -> dict[str, str]:
     if not isinstance(env, dict) or len(env) > MAX_ENV_ENTRIES:
         raise RegistryError(422, "invalid_env", "env must be an object of string literals")
@@ -209,7 +215,7 @@ def validate_env(env: dict[str, str]) -> dict[str, str]:
             raise RegistryError(422, "invalid_env", f"env name not allowed: {k}")
         if "\x00" in v:
             raise RegistryError(422, "invalid_env", "NUL in env value")
-        total += len(k) + len(v)
+        total += _utf8_len(k) + _utf8_len(v)
     if total > MAX_ENV_BYTES:
         raise RegistryError(422, "invalid_env", "env too large")
     return normalize_cubox_env(dict(env))
@@ -230,7 +236,7 @@ def validate_headers(headers: dict[str, str]) -> dict[str, str]:
             raise RegistryError(422, "invalid_env", f"header name not allowed: {k}")
         if "\r" in v or "\n" in v or "\x00" in v:
             raise RegistryError(422, "invalid_env", "invalid header value")
-        total += len(k) + len(v)
+        total += _utf8_len(k) + _utf8_len(v)
         out[k] = v
     if total > MAX_ENV_BYTES:
         raise RegistryError(422, "invalid_env", "headers too large")
@@ -521,7 +527,7 @@ class Registry:
                     await self._record_site_outcome(
                         server_id, code, site_id, upstream_ms=upstream_ms
                     )
-                except (SQLAlchemyError, OSError):  # storage/IO only — bugs must surface
+                except Exception:  # noqa: BLE001 — must not skip the server-level write below
                     log.exception("site health update failed for %s", server_id)
             await self._record_outcome(
                 server_id,
@@ -1797,6 +1803,7 @@ class Registry:
                 client_id=client_id,
                 refresh_token=refresh,
                 client_secret=secret,
+                token_endpoint_auth_method=method,
                 resource=resource if isinstance(resource, str) else None,
             )
         except OAuthError as e:
@@ -1874,7 +1881,7 @@ class Registry:
                             schema_hash=schema_hash(probed),
                             schema_override=None,
                             annotations=annotations,
-                            enabled=True,
+                            enabled=False,
                         )
                     )
                     added += 1
@@ -1884,14 +1891,14 @@ class Registry:
                     or tool.description != item["description"]
                     or tool.annotations != annotations
                 )
-                was_disabled = not tool.enabled
                 tool.description = item["description"]
                 tool.schema = probed
                 tool.annotations = annotations
                 # Override survives probe; hash always tracks the effective schema.
                 tool.schema_hash = schema_hash(effective_schema(tool))
-                tool.enabled = True
-                if probed_changed or was_disabled:
+                if probed_changed:
+                    # Contract changed: the previous operator approval no longer applies.
+                    tool.enabled = False
                     changed.append(tool.upstream_name)
             seen = {i["name"] for i in incoming}
             missing = sorted(n for n in existing if n not in seen)

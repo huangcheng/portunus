@@ -21,13 +21,14 @@ class HttpRpcBackend:
         if self.http.dispatch_mode == "url_path":
             path = (tool.dispatch or "").lstrip("/")
             url = f"{self.http.base_url.rstrip('/')}/{path}"
-            body: dict[str, Any] = {**self.http.const, **arguments}
+            # Arguments first so manifest const keys cannot be overridden.
+            body: dict[str, Any] = {**arguments, **self.http.const}
         else:
             url = self.http.base_url
             body = {
+                **arguments,
                 **self.http.const,
                 self.http.dispatch_field: tool.dispatch,
-                **arguments,
             }
         headers = {
             "Content-Type": "application/json",
@@ -42,12 +43,15 @@ class HttpRpcBackend:
                 headers=headers,
             )
         # Return structured JSON when possible; otherwise text + status.
-        ct = resp.headers.get("content-type", "")
-        if "application/json" in ct:
-            data = resp.json()
+        ct = resp.headers.get("content-type", "").lower()
+        if "json" in ct:
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {"status_code": resp.status_code, "text": resp.text}
         else:
             data = {"status_code": resp.status_code, "text": resp.text}
-        if resp.status_code >= 400:
+        if not resp.is_success:
             return {
                 "ok": False,
                 "status_code": resp.status_code,

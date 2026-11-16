@@ -113,6 +113,15 @@ def test_read_truncated_raises_incomplete():
         asyncio.run(read_frame(R(b"")))
 
 
+def test_read_deeply_nested_json_is_frame_error():
+    # Deep enough to trip json.loads' RecursionError (a RuntimeError, not ValueError).
+    nested = b"[" * 25000 + b"]" * 25000
+    raw = len(nested).to_bytes(4, "big") + nested
+    with pytest.raises(FrameError) as ei:
+        asyncio.run(read_frame(R(raw)))
+    assert isinstance(ei.value.__cause__, RecursionError)
+
+
 def test_read_invalid_json_and_non_object():
     bad = b"{nope"
     with pytest.raises(FrameError):
@@ -200,3 +209,11 @@ def test_validate_message_rejects_bad():
         validate_message({"op": "hello"})
     with pytest.raises(FrameError):
         validate_message({"version": 1})
+    # Non-string ops are unhashable; this must be FrameError, not TypeError.
+    with pytest.raises(FrameError):
+        validate_message({"version": 1, "op": []})
+    with pytest.raises(FrameError):
+        validate_message({"version": {"n": 1}, "op": "hello"})
+    # JSON true == 1, but it is not wire version 1.
+    with pytest.raises(FrameError):
+        validate_message({"version": True, "op": "hello"})

@@ -214,6 +214,8 @@ def load_policy_lists(path: str) -> tuple[list[str], list[str]]:
     try:
         data = json.loads(Path(path).read_text())
         trusted, allow = data["trusted_path"], data["binary_allowlist"]
+        if not isinstance(trusted, list) or not isinstance(allow, list):
+            raise ValueError("trusted_path and binary_allowlist must be lists")
         if not all(isinstance(x, str) for x in [*trusted, *allow]):
             raise ValueError("entries must be strings")
     except (OSError, ValueError, KeyError, TypeError) as e:
@@ -225,7 +227,10 @@ def expected_runner_uid(*, dev: bool) -> int | None:
     """Peer uid the runner socket must belong to (spec §3). Dev mode skips the check."""
     raw = os.environ.get("PORTUNUS_RUNNER_UID")
     if raw:
-        return int(raw)
+        try:
+            return int(raw)
+        except ValueError as e:
+            raise ConfigError(f"PORTUNUS_RUNNER_UID must be an integer, got {raw!r}") from e
     try:
         return pwd.getpwnam(RUNNER_USER).pw_uid
     except KeyError:
@@ -373,15 +378,16 @@ def create_gateway_app() -> FastAPI:
                 yield
         finally:
             stop.set()
+            tasks: list[asyncio.Task] = [retention_task]
             retention_task.cancel()
             if probe_worker_task is not None:
                 probe_worker_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await retention_task
-            if probe_worker_task is not None:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await probe_worker_task
-            await pool.close()
+                tasks.append(probe_worker_task)
+            # A probe worker that already failed raises from await and would skip pool.close().
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                await pool.close()
 
     app.router.lifespan_context = lifespan
 
@@ -412,6 +418,40 @@ def run_migrations() -> None:
     command.upgrade(Config(str(ini)), "head")
 
 
+def _parse_bind(value: str) -> tuple[str, int]:
+    """Parse ``host:port`` or ``[ipv6]:port`` for uvicorn.
+
+    Bracketed IPv6 hosts are unwrapped (uvicorn wants a bare ``::1``, not ``[::1]``).
+    A missing colon or a non-numeric port fails here instead of as a raw ``ValueError``.
+    """
+    raw = value.strip()
+    if raw.startswith("["):
+        bracket = raw.find("]")
+        rest = raw[bracket + 1 :] if bracket != -1 else ""
+        if bracket <= 1 or not rest.startswith(":") or ":" in rest[1:]:
+            raise ConfigError(
+                f"invalid PORTUNUS_BIND {value!r} (expected host:port or [ipv6]:port)"
+            )
+        host = raw[1:bracket]
+        port_text = rest[1:]
+    else:
+        host, sep, port_text = raw.rpartition(":")
+        if not sep or ":" in host:
+            raise ConfigError(
+                f"invalid PORTUNUS_BIND {value!r} (expected host:port or [ipv6]:port)"
+            )
+        if not host:
+            host = "127.0.0.1"
+    if not port_text.isdigit():
+        raise ConfigError(
+            f"invalid PORTUNUS_BIND {value!r} (expected host:port or [ipv6]:port)"
+        )
+    port = int(port_text)
+    if port > 65535:
+        raise ConfigError(f"invalid PORTUNUS_BIND {value!r} (port out of range)")
+    return host, port
+
+
 def cli() -> None:
     import uvicorn
 
@@ -419,8 +459,8 @@ def cli() -> None:
     if os.environ.get("PORTUNUS_SKIP_MIGRATE") != "1":
         run_migrations()
     app = create_gateway_app()
-    host, _, port = os.environ.get("PORTUNUS_BIND", DEFAULT_BIND).rpartition(":")
-    uvicorn.run(app, host=host or "127.0.0.1", port=int(port), workers=1, log_level="info")
+    host, port = _parse_bind(os.environ.get("PORTUNUS_BIND", DEFAULT_BIND))
+    uvicorn.run(app, host=host, port=port, workers=1, log_level="info")
 
 
 if __name__ == "__main__":

@@ -335,7 +335,10 @@ def _already_gateway_error(structured: Any) -> bool:
     if not isinstance(structured, dict):
         return False
     err = structured.get("error")
-    return isinstance(err, dict) and err.get("code") in ERROR_CODES
+    if not isinstance(err, dict):
+        return False
+    code = err.get("code")
+    return isinstance(code, str) and code in ERROR_CODES
 
 
 def _first_text(content: list[Any]) -> str:
@@ -591,7 +594,7 @@ def decode_cursor(
     expect = {"after": after, "scope": got_scope, "query": got_query}
     body = json.dumps(expect, separators=(",", ":"), sort_keys=True).encode()
     want = hmac.new(load_pepper(), body, hashlib.sha256).hexdigest()[:32]
-    if not hmac.compare_digest(got_sig, want):
+    if not got_sig.isascii() or not hmac.compare_digest(got_sig, want):
         raise PortunusError("invalid_cursor", "invalid cursor")
     return after
 
@@ -1361,7 +1364,8 @@ class Omni:
         proxy = self.registry.remote
         if proxy is None:
             raise PortunusError("unsupported", "remote proxy is not configured")
-        self.state_cache.put(server.id, server.enabled, server.vault_version)
+        seen_version = int(server.vault_version or 0)
+        self.state_cache.put(server.id, server.enabled, seen_version)
         remote_attrs = {
             tel.ATTR_SERVER: server.slug,
             tel.ATTR_TOOL: tool.upstream_name,
@@ -1405,8 +1409,17 @@ class Omni:
         self._check_key(key_id)
         if not self.authz.has_grant(key_id, server.id):
             raise PortunusError("not_granted", "grant removed during the call")
-        if not server.enabled:
+        async with self._sf() as s:
+            fresh = await s.get(ServerRow, server.id)
+        if fresh is None or not fresh.enabled:
+            self.state_cache.put(
+                server.id, False, None if fresh is None else int(fresh.vault_version or 0)
+            )
             raise PortunusError("server_disabled", "server is disabled")
+        fresh_version = int(fresh.vault_version or 0)
+        self.state_cache.put(server.id, True, fresh_version)
+        if fresh_version != seen_version:
+            raise PortunusError("cancelled", "server changed during the call")
         return finish_result(
             result,
             server=server.slug,
@@ -1414,6 +1427,26 @@ class Omni:
             max_bytes=max_bytes,
             truncate=truncate,
         )
+
+
+def _declared_body_too_large(declared: str) -> bool:
+    """True when Content-Length is a decimal integer above ``MAX_BODY_BYTES``.
+
+    Unicode digits pass ``str.isdigit`` but ``int()`` rejects them, and a digit
+    string longer than the interpreter allows also raises. Those are not a
+    declared size: the body read enforces the cap. Leading zeros are ignored.
+    """
+    if not declared.isascii() or not declared.isdigit():
+        return False
+    digits = declared.lstrip("0")
+    if not digits:
+        return False
+    if len(digits) > 20:
+        return True
+    try:
+        return int(digits) > MAX_BODY_BYTES
+    except ValueError:
+        return False
 
 
 # ---- ASGI gate -------------------------------------------------------------------------
@@ -1593,7 +1626,7 @@ class _Gate:
             return
 
         declared = headers.get("content-length", "")
-        if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        if _declared_body_too_large(declared):
             await _error_response(413, "payload_too_large", "request body exceeds 1MiB")(
                 scope, receive, send
             )

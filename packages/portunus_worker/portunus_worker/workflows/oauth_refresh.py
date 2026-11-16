@@ -77,16 +77,10 @@ class OAuthRefreshWorkflow:
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                 except ActivityError:
-                    # Activity already retried; park this server and keep the queue moving.
+                    # Transient activity failure (timeout/network) — do NOT clear
+                    # has_oauth_refresh; the next wave will retry. Only ok=False
+                    # below means the registry classified a real auth failure.
                     failed += 1
-                    try:
-                        await workflow.execute_activity(
-                            oauth_acts.mark_auth_required,
-                            server_id,
-                            start_to_close_timeout=timedelta(seconds=30),
-                        )
-                    except ActivityError:
-                        pass
                     continue
                 if not result.get("ok"):
                     failed += 1

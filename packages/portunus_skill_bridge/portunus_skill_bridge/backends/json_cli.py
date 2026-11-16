@@ -3,17 +3,51 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any
 
 from portunus_skill_bridge.manifest import Manifest, ToolSpec
 
+# ${NAME} and $NAME. Unresolved references must not become a literal HOME or argv.
+_ENV_REF = re.compile(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+
 
 def _expand(value: str) -> str:
-    return os.path.expandvars(os.path.expanduser(value))
+    expanded = os.path.expandvars(os.path.expanduser(value))
+
+    def repl(match: re.Match[str]) -> str:
+        name = match.group(1) if match.group(1) is not None else match.group(2)
+        got = os.environ.get(name)
+        return match.group(0) if got is None else got
+
+    return _ENV_REF.sub(repl, expanded)
+
+
+def _absolute_existing_dir(raw: str, *, label: str) -> str:
+    """Expand ``raw`` and require an absolute directory that already exists."""
+    expanded = _expand(raw).strip()
+    path = Path(expanded)
+    if not expanded or _ENV_REF.search(expanded) or not path.is_absolute() or not path.is_dir():
+        raise RuntimeError(f"{label} must be an absolute existing directory")
+    return expanded
+
+
+# Vendor CLIs have no manifest timeout of their own. Bound the wait so a stalled
+# child cannot hang the tool call, and reap it if the caller is cancelled.
+_CALL_TIMEOUT_S = 60.0
+_RESERVED_OP_KEYS = frozenset({"id", "type"})
+
+
+async def _kill_child(proc: asyncio.subprocess.Process) -> None:
+    with contextlib.suppress(ProcessLookupError, OSError):
+        proc.kill()
+    with contextlib.suppress(Exception):
+        await proc.wait()
 
 
 class JsonCliBackend:
@@ -29,13 +63,23 @@ class JsonCliBackend:
         if ident.agent_name:
             args += ["--agent-name", ident.agent_name]
         if ident.agent_profile_dir:
-            args += ["--agent-profile-dir", _expand(ident.agent_profile_dir)]
+            args += [
+                "--agent-profile-dir",
+                _absolute_existing_dir(ident.agent_profile_dir, label="agent_profile_dir"),
+            ]
         elif ident.agent_instance_id:
             args += ["--agent-instance-id", ident.agent_instance_id]
         return args
 
     @staticmethod
-    def _flag_args(arguments: dict[str, Any]) -> list[str]:
+    def _value_token(val: Any) -> str:
+        text = str(val)
+        if text.startswith("-"):
+            raise RuntimeError(f"cli argument value must not start with '-': {text!r}")
+        return text
+
+    @classmethod
+    def _flag_args(cls, arguments: dict[str, Any]) -> list[str]:
         argv: list[str] = []
         for key, val in arguments.items():
             flag = f"--{key.replace('_', '-')}"
@@ -45,9 +89,9 @@ class JsonCliBackend:
                 continue
             elif isinstance(val, (list, tuple)):
                 for item in val:
-                    argv += [flag, str(item)]
+                    argv += [flag, cls._value_token(item)]
             else:
-                argv += [flag, str(val)]
+                argv += [flag, cls._value_token(val)]
         return argv
 
     async def call(self, tool: ToolSpec, arguments: dict[str, Any]) -> Any:
@@ -74,6 +118,10 @@ class JsonCliBackend:
 
         if self.cli.run_wrapper == "run_operation":
             op_type = tool.operation or tool.name
+            reserved = _RESERVED_OP_KEYS.intersection(arguments)
+            if reserved:
+                names = ", ".join(sorted(reserved))
+                raise RuntimeError(f"arguments must not override reserved operation keys: {names}")
             op = {"id": "op-1", "type": op_type, **arguments}
             payload = {
                 "version": 1,
@@ -96,13 +144,11 @@ class JsonCliBackend:
         env = dict(os.environ)
         state = env.get("STATE_DIR", "").strip()
         if state:
-            env["HOME"] = state
+            env["HOME"] = _absolute_existing_dir(state, label="STATE_DIR")
             return env
         ident = self.cli.identity
         if ident.agent_profile_dir:
-            profile = _expand(ident.agent_profile_dir).strip()
-            if profile:
-                env["HOME"] = profile
+            env["HOME"] = _absolute_existing_dir(ident.agent_profile_dir, label="agent_profile_dir")
         return env
 
     async def _run(
@@ -116,7 +162,15 @@ class JsonCliBackend:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        out_b, err_b = await proc.communicate(stdin.encode() if stdin is not None else None)
+        payload = stdin.encode() if stdin is not None else None
+        try:
+            out_b, err_b = await asyncio.wait_for(proc.communicate(payload), _CALL_TIMEOUT_S)
+        except asyncio.CancelledError:
+            await _kill_child(proc)
+            raise
+        except TimeoutError:
+            await _kill_child(proc)
+            raise RuntimeError(f"cli timed out after {_CALL_TIMEOUT_S:g}s") from None
         out = out_b.decode("utf-8", errors="replace").strip()
         err = err_b.decode("utf-8", errors="replace").strip()
         parsed: Any

@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 from portunus_shared import PortunusError, read_frame, wire
-from test_grace import TOKEN, connect, wait_until
+from test_grace import TOKEN, connect, script_host, wait_until
 
 from portunus_runner import spawn as spawn_mod
 from portunus_runner.main import RunnerServer
@@ -21,7 +21,7 @@ pytestmark = pytest.mark.anyio
 
 SLEEP = os.path.realpath(shutil.which("sleep") or "/bin/sleep")
 SH = os.path.realpath("/bin/sh")
-PY = os.path.realpath(sys.executable)
+PY = script_host()
 
 
 def _rid():

@@ -14,6 +14,9 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+from yaml import YAMLError
+
 from .db.models import CATALOG_CONNECTIONS
 from .catalog import validate_spec
 from .registry import RegistryError
@@ -235,8 +238,11 @@ def _normalize_env_defaults(raw: Any, secret_names: set[str]) -> dict[str, str]:
         raise CatalogVerifyError("spec.env_defaults must be a table")
     out: dict[str, str] = {}
     for k, v in raw.items():
-        if not isinstance(k, str) or not k:
+        if not isinstance(k, str):
             raise CatalogVerifyError("env_defaults keys must be strings")
+        k = k.strip()
+        if not k:
+            raise CatalogVerifyError("env_defaults keys must be non-empty strings")
         if k.startswith("PORTUNUS_"):
             raise CatalogVerifyError(f"env_defaults key {k!r} must not start with PORTUNUS_")
         if k in secret_names:
@@ -411,7 +417,7 @@ def load_apps_dir(
     for path in sorted(apps_dir.glob("*.toml"), key=lambda p: p.stem):
         try:
             recipes.append(parse_recipe(path, manifest_root=manifest_root))
-        except CatalogVerifyError as e:
+        except (CatalogVerifyError, OSError, ImportError, ValidationError, YAMLError, ValueError) as e:
             recipes.append(
                 Recipe(
                     stem=path.stem,
@@ -448,26 +454,44 @@ def load_apps_dir(
     for r in recipes:
         if not r.enabled:
             continue
+        staged: list[tuple[str, tuple[str, str, str, str]]] = []
+        clash = False
         for art in r.artifacts:
-            if art.kind != "install_script":
-                continue
-            rows: list[tuple[str, str]] = []
-            if art.content_by_arch:
-                for arch, hx in art.content_by_arch.items():
-                    rows.append((arch, hx))
+            rows: list[tuple[str, tuple[str, str]]] = []
+            if art.kind == "install_script":
+                if art.content_by_arch:
+                    for arch, hx in art.content_by_arch.items():
+                        rows.append((f"{art.install_as}|{arch}", (art.script_sha256 or "", hx)))
+                else:
+                    assert art.arch and art.content_sha256 and art.script_sha256
+                    rows.append(
+                        (
+                            f"{art.install_as}|{art.arch}",
+                            (art.script_sha256, art.content_sha256),
+                        )
+                    )
+            elif art.kind == "tree":
+                # No content hash: the packaging path is the identity. An empty
+                # path cannot prove two recipes install the same tree.
+                content = art.path or ""
+                sig = ("tree", content) if content else ("tree", f"unpinned:{r.stem}:{art.id}")
+                rows.append((art.install_as, sig))
             else:
-                assert art.arch and art.content_sha256 and art.script_sha256
-                rows.append((art.arch, art.content_sha256))
-            for arch, hx in rows:
-                key = f"{art.install_as}|{arch}"
-                sig = (art.script_sha256 or "", hx)
+                rows.append((art.install_as, (art.kind, f"unpinned:{r.stem}:{art.id}")))
+            for key, sig in rows:
                 prev = holders.get(key)
-                if prev is None:
-                    holders[key] = (r.stem, art.id, sig[0], sig[1])
-                elif (prev[2], prev[3]) != sig:
+                if prev is not None and (prev[2], prev[3]) != sig:
                     r.enabled = False
                     r.disable_reasons.append("shared_install_as_clash")
+                    clash = True
                     break
+                staged.append((key, (r.stem, art.id, sig[0], sig[1])))
+            if clash:
+                break
+        if clash:
+            continue
+        for key, entry in staged:
+            holders[key] = entry
 
     return LoadedCatalog(recipes=recipes, digest=digest, apps_dir=apps_dir)
 

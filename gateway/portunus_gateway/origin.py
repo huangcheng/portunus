@@ -13,10 +13,31 @@ from urllib.parse import urlparse
 
 
 def _origin_of(url: str) -> str | None:
-    parsed = urlparse(url.strip())
-    if not parsed.scheme or not parsed.netloc:
+    try:
+        parsed = urlparse(url.strip())
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        # Browsers serialize Origin with a lowercase scheme/host; drop default ports.
+        # hostname/port raise ValueError on unbalanced IPv6 literals and bad ports.
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
         return None
-    return f"{parsed.scheme}://{parsed.netloc}"
+    if not host:
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    if port is not None and not (
+        (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+    ):
+        host = f"{host}:{port}"
+    return f"{scheme}://{host}"
+
+
+def normalize_origin(url: str) -> str | None:
+    """Lowercase scheme/host with default ports omitted. None when ``url`` is not an origin."""
+    return _origin_of(url)
 
 
 @lru_cache(maxsize=1)
@@ -29,8 +50,14 @@ def allowed_origins() -> frozenset[str]:
             item = part.strip()
             if not item:
                 continue
-            # Accept bare origins or full URLs.
-            origin = _origin_of(item) if "://" in item else item.rstrip("/")
+            # Accept bare origins or full URLs. Bare hosts need a scheme to match
+            # real Origin headers; assume https unless the entry looks like localhost.
+            if "://" in item:
+                origin = _origin_of(item)
+            else:
+                host = item.rstrip("/")
+                scheme = "http" if host.startswith(("localhost", "127.0.0.1", "[::1]")) else "https"
+                origin = _origin_of(f"{scheme}://{host}")
             if origin:
                 out.add(origin)
     public = os.environ.get("PORTUNUS_PUBLIC_URL", "").strip()
@@ -61,4 +88,5 @@ def origin_allowed(origin: str | None) -> bool:
     """
     if origin is None or origin == "":
         return True
-    return origin.strip() in allowed_origins()
+    normalized = _origin_of(origin)
+    return normalized is not None and normalized in allowed_origins()

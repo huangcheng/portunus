@@ -79,10 +79,7 @@ function appStatus(app: CatalogApp, server: Server | null): {
     return { active, configured: active };
   }
   if (isStdioApp(app)) {
-    const secrets = Array.isArray(app.spec.env) ? app.spec.env : [];
-    const required = secrets
-      .filter((item): item is { name: string } => !!item && typeof item === "object" && typeof (item as { name?: unknown }).name === "string")
-      .map((item) => item.name);
+    const required = parseEnvRows(app.spec.env).map((r) => r.name);
     if (required.length) {
       const names = new Set(server?.env_names ?? []);
       const active = required.every((n) => names.has(n));

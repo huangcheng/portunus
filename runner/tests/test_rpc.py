@@ -1,19 +1,17 @@
 """Runner ``rpc`` op: bridge one ``tools/call`` to a tracked child's stdio (spec §6.2)."""
 
 import json
-import os
-import sys
 import textwrap
 import uuid
 
 import pytest
 from portunus_runner.main import RunnerServer
 from portunus_shared import wire
-from test_grace import TOKEN, connect, wait_until
+from test_grace import TOKEN, connect, script_host, wait_until
 
 pytestmark = pytest.mark.anyio
 
-PY = os.path.realpath(sys.executable)
+PY = script_host()
 
 SERVER_SRC = textwrap.dedent(
     """

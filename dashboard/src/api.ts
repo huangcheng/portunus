@@ -17,43 +17,92 @@ export const setCsrf = (t: string) => {
   csrf = t;
 };
 
-async function call<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
-  const res = await fetch(`/api${path}`, {
-    method,
-    credentials: "same-origin",
-    headers: {
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      ...(method !== "GET" ? { "X-CSRF-Token": csrf } : {}),
-      ...headers,
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+type ErrorBody = {
+  code?: unknown;
+  message?: unknown;
+  errors?: unknown;
+};
+
+async function stepUpHeaders(password?: string): Promise<Record<string, string>> {
+  const pw =
+    password ??
+    (typeof window !== "undefined"
+      ? window.prompt("Confirm your operator password to continue")
+      : null);
+  if (!pw) {
+    throw new ApiError(401, "cancelled", "step-up cancelled");
+  }
+  const { step_up_token } = await call<{ step_up_token: string }>("POST", "/auth/step-up", {
+    password: pw,
   });
+  return { "X-Step-Up-Token": step_up_token };
+}
+
+async function call<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`/api${path}`, {
+      method,
+      credentials: "same-origin",
+      signal: AbortSignal.timeout(60_000),
+      headers: {
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(method !== "GET" && method !== "HEAD"
+          ? { "X-CSRF-Token": csrf }
+          : {}),
+        ...extraHeaders,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (err) {
+    const aborted = err instanceof DOMException && err.name === "TimeoutError";
+    throw new ApiError(
+      0,
+      aborted ? "timeout" : "network_error",
+      aborted ? "request timed out" : "network request failed",
+    );
+  }
   if (res.status === 204) return undefined as T;
-  const data = await res.json().catch(() => ({}));
+  const raw: unknown = await res.json().catch(() => ({}));
+  const data: ErrorBody =
+    raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as ErrorBody) : {};
   if (!res.ok) {
     const detail = Array.isArray(data.errors)
-      ? data.errors.map((e: { loc: string[] }) => e.loc.join(".")).join(", ")
+      ? data.errors
+          .map((e) => {
+            if (typeof e === "string") return e;
+            if (e && typeof e === "object" && Array.isArray((e as { loc?: unknown }).loc)) {
+              return ((e as { loc: unknown[] }).loc).map(String).join(".");
+            }
+            return "";
+          })
+          .filter(Boolean)
+          .join(", ")
       : "";
-    // Session gone / never logged in: bounce the shell to <Login/>. Skip /auth/login
-    // so a wrong password stays on the form instead of remounting it.
-    // Login, TOTP, passkey, and setup stay on the form. A 401 there is a
-    // credential failure, not a dead session.
-    // Only code "unauthorized" means the operator cookie died — upstream MCP
-    // auth_required used to leak as HTTP 401 and falsely logged the console out.
-    const publicAuth =
-      path === "/auth/setup" || path === "/auth/status" || path.startsWith("/auth/login");
-    if (res.status === 401 && !publicAuth && (data.code ?? "unauthorized") === "unauthorized") {
+    // Only an explicit JSON `code: "unauthorized"` means the operator cookie died.
+    // Skip public auth forms and step-up (wrong password while the session is alive).
+    const publicAuth = path.startsWith("/auth/");
+    if (res.status === 401 && !publicAuth && data.code === "unauthorized") {
       csrf = "";
       window.dispatchEvent(new Event("portunus-unauthorized"));
     }
     throw new ApiError(
       res.status,
-      data.code ?? "error",
-      data.message ?? (detail ? `invalid: ${detail}` : res.statusText),
-      data,
+      typeof data.code === "string" ? data.code : "error",
+      typeof data.message === "string"
+        ? data.message
+        : detail
+          ? `invalid: ${detail}`
+          : res.statusText,
+      data as Record<string, unknown>,
     );
   }
-  return data as T;
+  return raw as T;
 }
 
 export type OAuthConfig = {
@@ -324,8 +373,9 @@ export type PasskeyAssertionOptions = {
 export const api = {
   apps: () => call<CatalogAppRow[]>("GET", "/apps"),
   createApp: (b: Omit<CatalogAppRow, "id">) => call<CatalogAppRow>("POST", "/apps", b),
-  updateApp: (id: string, b: Partial<CatalogAppRow>) => call<CatalogAppRow>("PATCH", `/apps/${id}`, b),
-  deleteApp: (id: string) => call<void>("DELETE", `/apps/${id}`),
+  updateApp: (id: string, b: Partial<CatalogAppRow>) =>
+    call<CatalogAppRow>("PATCH", `/apps/${encodeURIComponent(id)}`, b),
+  deleteApp: (id: string) => call<void>("DELETE", `/apps/${encodeURIComponent(id)}`),
   authStatus: () => call<AuthStatus>("GET", "/auth/status"),
   setup: async (body: { username: string; password: string; bootstrap_password?: string }) => {
     const r = await call<{ csrf_token: string; username: string }>("POST", "/auth/setup", body);
@@ -364,6 +414,8 @@ export const api = {
   },
   changePassword: (current: string, next: string) =>
     call<{ ok: boolean }>("POST", "/auth/password", { current, next }),
+  stepUp: (password: string) =>
+    call<{ step_up_token: string }>("POST", "/auth/step-up", { password }),
   totpEnable: () => call<{ secret: string; provisioning_uri: string }>("POST", "/auth/totp/enable", {}),
   totpConfirm: (secret: string, code: string) =>
     call<{ ok: boolean; codes: string[] }>("POST", "/auth/totp/confirm", { secret, code }),
@@ -371,8 +423,15 @@ export const api = {
     call<{ secret: string; provisioning_uri: string }>("POST", "/auth/totp/qr", { password }),
   totpDisable: (password: string) => call<{ ok: boolean }>("POST", "/auth/totp/disable", { password }),
   recovery: () => call<RecoveryStatus>("GET", "/auth/recovery"),
-  regenerateRecovery: (password: string) =>
-    call<{ ok: boolean; codes: string[] }>("POST", "/auth/recovery/regenerate", { password }),
+  regenerateRecovery: async (password: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<{ ok: boolean; codes: string[] }>(
+      "POST",
+      "/auth/recovery/regenerate",
+      { password },
+      headers,
+    );
+  },
   passkeyRegisterOptions: () => call<PasskeyCreationOptions>("POST", "/auth/passkey/register/options", {}),
   passkeyRegister: (body: {
     name: string;
@@ -411,36 +470,78 @@ export const api = {
   },
   fleetSkillsSync: (hosts?: string[]) =>
     call<{ workflow_id: string }>("POST", "/fleet/skills-sync", hosts ? { hosts } : {}),
-  logout: () => call<void>("POST", "/auth/logout"),
+  logout: async () => {
+    try {
+      await call<void>("POST", "/auth/logout");
+    } finally {
+      setCsrf("");
+    }
+  },
   servers: () => call<Server[]>("GET", "/servers"),
   createServer: (b: CreateServerBody) => call<Server>("POST", "/servers", b),
-  updateServer: (id: string, b: UpdateServerBody) => call<Server>("PATCH", `/servers/${id}`, b),
-  probe: (id: string) => call<unknown>("POST", `/servers/${id}/probe`),
+  updateServer: (id: string, b: UpdateServerBody) =>
+    call<Server>("PATCH", `/servers/${encodeURIComponent(id)}`, b),
+  probe: (id: string) => call<unknown>("POST", `/servers/${encodeURIComponent(id)}/probe`),
   skillAuth: (id: string, action: string, opts?: { token?: string; job_id?: string }) =>
-    call<SkillAuthResult>("POST", `/servers/${id}/skill-auth`, {
+    call<SkillAuthResult>("POST", `/servers/${encodeURIComponent(id)}/skill-auth`, {
       action,
       ...(opts?.token ? { token: opts.token } : {}),
       ...(opts?.job_id ? { job_id: opts.job_id } : {}),
     }),
-  tools: (id: string) => call<Tool[]>("GET", `/servers/${id}/tools`),
-  setServerEnabled: (id: string, enabled: boolean) =>
-    call<Server>("POST", `/servers/${id}/enable`, { enabled }),
-  setToolEnabled: (id: string, enabled: boolean) =>
-    call<Tool>("POST", `/tools/${id}/enable`, { enabled }),
+  tools: (id: string) => call<Tool[]>("GET", `/servers/${encodeURIComponent(id)}/tools`),
+  setServerEnabled: async (id: string, enabled: boolean, password?: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<Server>(
+      "POST",
+      `/servers/${encodeURIComponent(id)}/enable`,
+      { enabled },
+      headers,
+    );
+  },
+  setToolEnabled: async (id: string, enabled: boolean, password?: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<Tool>("POST", `/tools/${encodeURIComponent(id)}/enable`, { enabled }, headers);
+  },
   setToolSchemaOverride: (id: string, schema: Record<string, unknown>) =>
-    call<Tool>("PUT", `/tools/${id}/schema-override`, { schema }),
+    call<Tool>("PUT", `/tools/${encodeURIComponent(id)}/schema-override`, { schema }),
   clearToolSchemaOverride: (id: string) =>
-    call<Tool>("DELETE", `/tools/${id}/schema-override`),
-  setBearerToken: (id: string, token: string) =>
-    call<Server>("POST", `/servers/${id}/auth/token`, { token }),
+    call<Tool>("DELETE", `/tools/${encodeURIComponent(id)}/schema-override`),
+  setBearerToken: async (id: string, token: string, password?: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<Server>(
+      "POST",
+      `/servers/${encodeURIComponent(id)}/auth/token`,
+      { token },
+      headers,
+    );
+  },
   oauthStart: (id: string, redirect_uri: string) =>
-    call<{ authorize_url: string; state: string }>("POST", `/servers/${id}/oauth/start`, { redirect_uri }),
+    call<{ authorize_url: string; state: string }>(
+      "POST",
+      `/servers/${encodeURIComponent(id)}/oauth/start`,
+      { redirect_uri },
+    ),
   keys: () => call<Key[]>("GET", "/keys"),
-  mintKey: (label: string) => call<Key & { token: string }>("POST", "/keys", { label: label || null }),
-  revealKey: (id: string) => call<{ token: string }>("GET", `/keys/${id}/secret`),
-  deleteKey: (id: string) => call<void>("DELETE", `/keys/${id}`),
-  grant: (key: string, server: string) => call<Key>("PUT", `/keys/${key}/grants/${server}`),
-  ungrant: (key: string, server: string) => call<Key>("DELETE", `/keys/${key}/grants/${server}`),
+  mintKey: async (label: string, password?: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<Key & { token: string }>("POST", "/keys", { label: label || null }, headers);
+  },
+  revealKey: async (id: string, password?: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<{ token: string }>("GET", `/keys/${encodeURIComponent(id)}/secret`, undefined, headers);
+  },
+  deleteKey: (id: string) => call<void>("DELETE", `/keys/${encodeURIComponent(id)}`),
+  grant: (key: string, server: string) =>
+    call<Key>("PUT", `/keys/${encodeURIComponent(key)}/grants/${encodeURIComponent(server)}`),
+  ungrant: async (key: string, server: string, password?: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<Key>(
+      "DELETE",
+      `/keys/${encodeURIComponent(key)}/grants/${encodeURIComponent(server)}`,
+      undefined,
+      headers,
+    );
+  },
   fleet: () => call<FleetResponse>("GET", "/fleet"),
   audit: (q?: { limit?: number; before?: string; action?: string; target?: string }) => {
     const p = new URLSearchParams();

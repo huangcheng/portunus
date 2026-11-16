@@ -105,6 +105,14 @@ def test_guard_codes_outside_reserved_ranges():
             assert not (low <= code <= high), (code, low, high)
 
 
+def test_content_length_parse_does_not_raise():
+    assert omni_module._declared_body_too_large("²") is False
+    assert omni_module._declared_body_too_large("9" * 5000) is True
+    assert omni_module._declared_body_too_large("000000000000000000001") is False
+    assert omni_module._declared_body_too_large(str(omni_module.MAX_BODY_BYTES + 1)) is True
+    assert omni_module._declared_body_too_large(str(omni_module.MAX_BODY_BYTES)) is False
+
+
 def test_no_guard_code_is_minus_32002():
     """The spec names -32002 explicitly: implementations of this version MUST NOT emit it."""
     assert -32002 not in _GUARD_RPC_CODES.values()

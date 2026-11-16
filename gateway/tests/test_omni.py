@@ -65,6 +65,13 @@ class Stack:
         await self.registry.probe(sid, "test")
         if enable:
             await self.registry.set_server_enabled(sid, True, "test")
+            # Probe inserts every tool disabled; approve the ones this helper discovered.
+            async with async_session() as s:
+                tool_ids = list(
+                    (await s.execute(select(Tool.id).where(Tool.server_id == sid))).scalars().all()
+                )
+            for tool_id in tool_ids:
+                await self.registry.set_tool_enabled(tool_id, True, "test")
         return sid
 
     async def add_key(self, *servers):

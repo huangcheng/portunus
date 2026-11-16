@@ -67,7 +67,10 @@ async def read_frame(reader: asyncio.StreamReader | _Reader) -> dict:
     body = await reader.readexactly(n)
     try:
         obj = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as e:
+    except RecursionError as e:
+        # Deeply nested JSON raises RecursionError (a RuntimeError), not ValueError.
+        raise FrameError(f"invalid frame body: {e}") from e
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
         raise FrameError(f"invalid frame body: {e}") from e
     if not isinstance(obj, dict):
         raise FrameError("frame must be a JSON object")
@@ -75,11 +78,14 @@ async def read_frame(reader: asyncio.StreamReader | _Reader) -> dict:
 
 
 def validate_message(msg: dict) -> None:
-    """Check envelope: version == 1 and op in OPS."""
-    if msg.get("version") != WIRE_VERSION:
-        raise FrameError(f"unsupported wire version: {msg.get('version')!r}")
-    if msg.get("op") not in OPS:
-        raise FrameError(f"unknown op: {msg.get('op')!r}")
+    """Check envelope: integer version == 1 and a string op in OPS."""
+    version = msg.get("version")
+    # bool is an int subclass, and JSON true compares equal to 1.
+    if isinstance(version, bool) or not isinstance(version, int) or version != WIRE_VERSION:
+        raise FrameError(f"unsupported wire version: {version!r}")
+    op = msg.get("op")
+    if not isinstance(op, str) or op not in OPS:
+        raise FrameError(f"unknown op: {op!r}")
 
 
 def _msg(

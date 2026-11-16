@@ -11,7 +11,7 @@ import pytest
 from portunus_gateway.db.models import AuditEvent, ToolCall
 from portunus_gateway.db.session import async_session
 from portunus_gateway.fleet import build_fleet, db_backend_label
-from portunus_gateway.operator_api import create_app, require_operator
+from portunus_gateway.operator_api import create_app, require_operator, require_step_up
 from portunus_gateway.registry import Registry
 from portunus_gateway.retention import purge_once
 from portunus_gateway.runner_pool import RunnerPool
@@ -60,6 +60,7 @@ def _registry(pool: RunnerPool | None = None) -> Registry:
 def _app(registry: Registry, *, pool: RunnerPool | None = None, started_at: datetime | None = None):
     app = create_app(registry)
     app.dependency_overrides[require_operator] = lambda: "test-operator"
+    app.dependency_overrides[require_step_up] = lambda: "test-operator"
     if pool is not None:
         app.state.runner_pool = pool
     app.state.started_at = started_at or datetime(2026, 11, 11, 8, 59, 41, tzinfo=timezone.utc)

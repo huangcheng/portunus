@@ -127,6 +127,14 @@ api() {
   cat "$WORK/resp.json"
 }
 
+# stepped: fresh single-use step-up token, then the same call as api.
+stepped() {
+  STEP="$(api POST /api/auth/step-up "$PW_JSON" | jget step_up_token)"
+  [[ -n "$STEP" ]] || fail "no step-up token"
+  api "$@"
+  STEP=""
+}
+
 # mcp TOKEN TOOL ARGS_JSON -> prints the JSON-RPC response body (stateless Streamable HTTP)
 mcp() {
   local token="$1" tool="$2" args="$3"
@@ -157,16 +165,12 @@ LOGIN="$(curl -fsS -c "$JAR" -H 'Content-Type: application/json' --data "$PW_JSO
 CSRF="$(printf '%s' "$LOGIN" | jget csrf_token)"
 [[ -n "$CSRF" ]] || fail "no csrf token"
 
-log "step-up"
-STEP="$(api POST /api/auth/step-up "$PW_JSON" | jget token)"
-[[ -n "$STEP" ]] || fail "no step-up token"
-
 log "mint agent keys"
-KEY_JSON="$(api POST /api/keys '{"label":"e2e"}')"
+KEY_JSON="$(stepped POST /api/keys '{"label":"e2e"}')"
 TOKEN="$(printf '%s' "$KEY_JSON" | jget token)"
 KEY_ID="$(printf '%s' "$KEY_JSON" | jget key_id)"
 [[ "$TOKEN" == pm-* ]] || fail "unexpected agent token shape"
-OTHER_TOKEN="$(api POST /api/keys '{"label":"e2e-ungranted"}' | jget token)"
+OTHER_TOKEN="$(stepped POST /api/keys '{"label":"e2e-ungranted"}' | jget token)"
 
 log "register stdio fixture server ($E2E_COMMAND)"
 BODY="$(SLUG="$SLUG" CMD="$E2E_COMMAND" python3 -c 'import json,os
@@ -187,8 +191,8 @@ assert t[0]["enabled"] is False, "probed tool must start disabled"
 print(t[0]["id"])')" || fail "probe result unexpected: $TOOLS"
 
 log "enable tool alpha + server, grant key"
-api POST "/api/tools/$ALPHA_ID/enable" '{"enabled":true}' >/dev/null
-api POST "/api/servers/$SERVER_ID/enable" '{"enabled":true}' >/dev/null
+stepped POST "/api/tools/$ALPHA_ID/enable" '{"enabled":true}' >/dev/null
+stepped POST "/api/servers/$SERVER_ID/enable" '{"enabled":true}' >/dev/null
 api PUT "/api/keys/$KEY_ID/grants/$SERVER_ID" >/dev/null
 
 log "discover via /mcp"

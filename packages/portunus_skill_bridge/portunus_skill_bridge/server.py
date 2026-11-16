@@ -12,7 +12,7 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, Field, create_model
 
 from portunus_skill_bridge.backends import build_backend
-from portunus_skill_bridge.manifest import Manifest, ToolSpec
+from portunus_skill_bridge.manifest import Manifest, ToolSpec, validate_input_field_name
 
 log = logging.getLogger("portunus.skill_bridge")
 
@@ -29,6 +29,7 @@ _TYPE_MAP = {
 def _params_model(tool: ToolSpec) -> type[BaseModel]:
     fields: dict[str, Any] = {}
     for name, spec in tool.input.items():
+        validate_input_field_name(name)
         py_t = _TYPE_MAP.get(spec.type, Any)
         desc = spec.description or ""
         if spec.required:

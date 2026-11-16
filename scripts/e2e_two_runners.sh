@@ -138,6 +138,14 @@ api() {
   cat "$WORK/resp.json"
 }
 
+# stepped: fresh single-use step-up token, then the same call as api.
+stepped() {
+  STEP="$(api POST /api/auth/step-up "$PW_JSON" | jget step_up_token)"
+  [[ -n "$STEP" ]] || fail "no step-up token"
+  api "$@"
+  STEP=""
+}
+
 # mcp TOKEN TOOL ARGS_JSON -> JSON-RPC response body. Bounded by --max-time so a hang is a failure.
 MCP_MAX_TIME="${E2E_MCP_MAX_TIME:-45}"
 mcp() {
@@ -192,8 +200,7 @@ PW_JSON="$(PW="$PORTUNUS_OPERATOR_PASSWORD" python3 -c 'import json,os;print(jso
 LOGIN="$(curl -fsS --max-time 10 -c "$JAR" -H 'Content-Type: application/json' --data "$PW_JSON" "$BASE/api/auth/login")" \
   || fail "operator login rejected"
 CSRF="$(printf '%s' "$LOGIN" | jget csrf_token)"
-STEP="$(api POST /api/auth/step-up "$PW_JSON" | jget token)"
-KEY_JSON="$(api POST /api/keys '{"label":"e2e-fleet"}')"
+KEY_JSON="$(stepped POST /api/keys '{"label":"e2e-fleet"}')"
 TOKEN="$(printf '%s' "$KEY_JSON" | jget token)"
 KEY_ID="$(printf '%s' "$KEY_JSON" | jget key_id)"
 
@@ -211,8 +218,8 @@ ALPHA_ID="$(api GET "/api/servers/$SERVER_ID/tools" | python3 -c 'import json,sy
 t=[x for x in json.load(sys.stdin) if x["name"]=="alpha"]
 assert t, "probe did not discover alpha"
 print(t[0]["id"])')" || fail "probe result unexpected"
-api POST "/api/tools/$ALPHA_ID/enable" '{"enabled":true}' >/dev/null
-api POST "/api/servers/$SERVER_ID/enable" '{"enabled":true}' >/dev/null
+stepped POST "/api/tools/$ALPHA_ID/enable" '{"enabled":true}' >/dev/null
+stepped POST "/api/servers/$SERVER_ID/enable" '{"enabled":true}' >/dev/null
 api PUT "/api/keys/$KEY_ID/grants/$SERVER_ID" >/dev/null
 
 invoke_alpha() {
@@ -262,8 +269,8 @@ SERVER2_ID="$(api POST /api/servers "$BODY2" | jget id)"
 api POST "/api/servers/$SERVER2_ID/probe" >/dev/null || fail "probe on fallback runner failed"
 ALPHA2_ID="$(api GET "/api/servers/$SERVER2_ID/tools" | python3 -c 'import json,sys
 print([x for x in json.load(sys.stdin) if x["name"]=="alpha"][0]["id"])')"
-api POST "/api/tools/$ALPHA2_ID/enable" '{"enabled":true}' >/dev/null
-api POST "/api/servers/$SERVER2_ID/enable" '{"enabled":true}' >/dev/null
+stepped POST "/api/tools/$ALPHA2_ID/enable" '{"enabled":true}' >/dev/null
+stepped POST "/api/servers/$SERVER2_ID/enable" '{"enabled":true}' >/dev/null
 api PUT "/api/keys/$KEY_ID/grants/$SERVER2_ID" >/dev/null
 
 START="$SECONDS"

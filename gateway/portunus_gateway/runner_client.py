@@ -54,6 +54,7 @@ log = logging.getLogger("portunus.gateway.runner")
 
 DEFAULT_SOCKET = "/run/portunus/runner.sock"
 DEFAULT_SITE_ID = "local"  # v1 runners advertise no fleet metadata: they are the one local site
+_ENVELOPE_KEYS = frozenset({"version", "op", "request_id", "token", "gateway_epoch", "conn_id"})
 
 # Seconds a single frame write may take; a wedged link must hand over to reconnect.
 SEND_TIMEOUT_S: float = 5.0
@@ -289,14 +290,18 @@ class RunnerClient:
         if conn is None or (conn_seq is not None and conn_seq != conn.seq):
             raise RunnerRequestError("runner_unavailable", "runner not connected", sent=False)
         request_id = uuid.uuid4().hex
+        overlap = _ENVELOPE_KEYS.intersection(fields)
+        if overlap:
+            name = sorted(overlap)[0]
+            raise RunnerRequestError("unsupported", f"field {name} is reserved", sent=False)
         frame = {
+            **fields,
             "version": WIRE_VERSION,
             "op": op,
             "request_id": request_id,
             "token": self._token,
             "gateway_epoch": self.epoch,
             "conn_id": conn.conn_id,
-            **fields,
         }
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = fut
@@ -507,8 +512,12 @@ class RunnerClient:
                     await t
             self._fail_pending("runner connection lost")
             if self.on_disconnected is not None:
-                with contextlib.suppress(Exception):
+                try:
                     await _maybe_await(self.on_disconnected())
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("on_disconnected failed")
         return True
 
     async def _announce_connected(self, conn: _Conn) -> None:
@@ -556,7 +565,10 @@ class RunnerClient:
                     except Exception:
                         log.exception("on_child_exited failed")
                 continue
-            fut = self._pending.get(msg.get("request_id"))
+            request_id = msg.get("request_id")
+            if not isinstance(request_id, str):
+                continue
+            fut = self._pending.get(request_id)
             if fut is None or fut.done():
                 continue
             if msg.get("ok") is True:
@@ -564,9 +576,11 @@ class RunnerClient:
             else:
                 err = msg.get("error") if isinstance(msg.get("error"), dict) else {}
                 code = err.get("code")
+                if not isinstance(code, str) or code not in ERROR_CODES:
+                    code = "unsupported"
                 fut.set_exception(
                     RunnerRequestError(
-                        code if code in ERROR_CODES else "unsupported",
+                        code,
                         str(err.get("message", "")),
                         reason=msg.get("reason") if isinstance(msg.get("reason"), str) else None,
                         reply=msg,

@@ -18,42 +18,69 @@ import asyncio
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from portunus_gateway.db.models import AgentKey, Grant, Server
 from portunus_gateway.db.session import async_session
 
 
+def _unique_violation(exc: IntegrityError) -> bool:
+    """True for the ``(key_id, server_id)`` race, not for foreign-key failures."""
+    orig = getattr(exc, "orig", None)
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    if sqlstate == "23505":
+        return True
+    return "unique" in str(orig or exc).lower()
+
+
 async def ensure_full_grants() -> int:
     """Grant every active key every server (single-operator default).
 
-    Returns the number of grant rows inserted. Reloads the in-memory authz snapshot when
-    anything was added.
+    Returns the number of grant rows inserted by this call. ``Grant`` is unique on
+    ``(key_id, server_id)``; a concurrent caller can insert the same pairs between the
+    read and the commit. That ``IntegrityError`` is "already meshed": retry once against
+    a fresh read (so pairs only this call saw are not rolled back with the conflict),
+    then reload the snapshot either way.
     """
-    async with async_session() as session:
-        key_ids = list(
-            (
-                await session.execute(select(AgentKey.key_id).where(AgentKey.revoked_at.is_(None)))
-            ).scalars()
-        )
-        server_ids = list((await session.execute(select(Server.id))).scalars())
-        existing = {
-            (k, sid)
-            for k, sid in (await session.execute(select(Grant.key_id, Grant.server_id))).all()
-        }
-        added = 0
-        for key_id in key_ids:
-            for server_id in server_ids:
-                if (key_id, server_id) in existing:
-                    continue
-                session.add(Grant(key_id=key_id, server_id=server_id))
-                added += 1
-        if added:
-            await session.commit()
-        else:
-            await session.rollback()
-    if added:
+    inserted = 0
+    conflicted = False
+    for _attempt in range(2):
+        async with async_session() as session:
+            key_ids = list(
+                (
+                    await session.execute(
+                        select(AgentKey.key_id).where(AgentKey.revoked_at.is_(None))
+                    )
+                ).scalars()
+            )
+            server_ids = list((await session.execute(select(Server.id))).scalars())
+            existing = {
+                (k, sid)
+                for k, sid in (await session.execute(select(Grant.key_id, Grant.server_id))).all()
+            }
+            pending: list[Grant] = []
+            for key_id in key_ids:
+                for server_id in server_ids:
+                    if (key_id, server_id) in existing:
+                        continue
+                    pending.append(Grant(key_id=key_id, server_id=server_id))
+            if not pending:
+                await session.rollback()
+                break
+            session.add_all(pending)
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                if not _unique_violation(exc):
+                    raise
+                conflicted = True
+                continue
+            inserted += len(pending)
+            break
+    if inserted or conflicted:
         await authz_store.reload_from_db()
-    return added
+    return inserted
 
 
 class AuthzStore:

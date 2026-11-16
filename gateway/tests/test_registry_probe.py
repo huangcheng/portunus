@@ -21,7 +21,7 @@ import httpx
 import pytest
 from portunus_gateway.db.models import AuditEvent, Server, VaultEntry
 from portunus_gateway.db.session import async_session
-from portunus_gateway.operator_api import create_app, require_operator
+from portunus_gateway.operator_api import create_app, require_operator, require_step_up
 from portunus_gateway.registry import Registry
 from portunus_gateway.runner_client import RunnerClient, RunnerRequestError
 from portunus_gateway.vault import Vault
@@ -43,6 +43,7 @@ def _app(registry: Registry, *, authed: bool = True):
     app = create_app(registry)
     if authed:
         app.dependency_overrides[require_operator] = lambda: "test-operator"
+        app.dependency_overrides[require_step_up] = lambda: "test-operator"
     return app
 
 
@@ -116,7 +117,7 @@ def _body(slug="fix", **over):
     return body
 
 
-async def test_probe_lists_tools_enabled(real):
+async def test_probe_lists_tools_disabled(real):
     client, _registry, srv = real
     r = await client.post("/api/servers", json=_body())
     assert r.status_code == 201
@@ -127,7 +128,7 @@ async def test_probe_lists_tools_enabled(real):
     assert pr.status_code == 200, pr.text
     tools = (await client.get(f"/api/servers/{sid}/tools")).json()
     assert {t["name"] for t in tools} == {"alpha", "beta"}
-    assert tools and all(t["enabled"] is True for t in tools)
+    assert tools and all(t["enabled"] is False for t in tools)
     assert all(t["schema_hash"] and isinstance(t["schema"], dict) for t in tools)
     assert pr.json()["added"] == 2
     # the probe child is gone and never became an invoke child
@@ -325,8 +326,9 @@ async def test_enable_server(real):
 
     er = await client.post(f"/api/servers/{sid}/enable")
     assert er.status_code == 200 and er.json()["enabled"] is True
+    # Enabling the server does not approve tools discovered by probe.
     tools = {t["name"]: t["enabled"] for t in (await client.get(f"/api/servers/{sid}/tools")).json()}
-    assert tools == {"alpha": True, "beta": True}
+    assert tools == {"alpha": False, "beta": False}
 
 
 async def test_enable_tool_toggle(real):
@@ -334,6 +336,9 @@ async def test_enable_tool_toggle(real):
     sid = (await client.post("/api/servers", json=_body())).json()["id"]
     await client.post(f"/api/servers/{sid}/probe")
     tools = (await client.get(f"/api/servers/{sid}/tools")).json()
+    for tool in tools:
+        on = await client.post(f"/api/tools/{tool['id']}/enable", json={"enabled": True})
+        assert on.status_code == 200 and on.json()["enabled"] is True
     alpha = next(t for t in tools if t["name"] == "alpha")
     off = await client.post(f"/api/tools/{alpha['id']}/enable", json={"enabled": False})
     assert off.status_code == 200 and off.json()["enabled"] is False
@@ -464,11 +469,16 @@ async def test_probe_request_shape(scripted):
     assert "child_id" not in call  # ephemeral probe, never an invoke child
 
 
-async def test_reprobe_keeps_all_tools_enabled(scripted):
+async def test_reprobe_preserves_operator_enablement(scripted):
     client, _registry, runner = scripted
     sid = await _mk(client)
     await client.post(f"/api/servers/{sid}/probe")
     by_name = {t["name"]: t for t in (await client.get(f"/api/servers/{sid}/tools")).json()}
+    assert by_name["alpha"]["enabled"] is False
+    assert by_name["beta"]["enabled"] is False
+    for name in ("alpha", "beta"):
+        on = await client.post(f"/api/tools/{by_name[name]['id']}/enable", json={"enabled": True})
+        assert on.status_code == 200
 
     # beta unchanged, alpha schema changed, gamma new, nothing else missing
     runner.tools = [
@@ -483,11 +493,18 @@ async def test_reprobe_keeps_all_tools_enabled(scripted):
     assert r.json()["missing"] == []
 
     now = {t["name"]: t for t in (await client.get(f"/api/servers/{sid}/tools")).json()}
-    assert now["beta"]["enabled"] is True
-    assert now["alpha"]["enabled"] is True
+    assert now["beta"]["enabled"] is True  # unchanged approval sticks
+    assert now["alpha"]["enabled"] is False  # schema change needs re-approval
     assert now["alpha"]["schema_hash"] != by_name["alpha"]["schema_hash"]
-    assert now["gamma"]["enabled"] is True
+    assert now["gamma"]["enabled"] is False  # newly discovered
     assert now["alpha"]["id"] == by_name["alpha"]["id"]  # same row
+
+    off = await client.post(f"/api/tools/{now['beta']['id']}/enable", json={"enabled": False})
+    assert off.status_code == 200
+    r = await client.post(f"/api/servers/{sid}/probe")
+    assert r.status_code == 200
+    again = {t["name"]: t for t in (await client.get(f"/api/servers/{sid}/tools")).json()}
+    assert again["beta"]["enabled"] is False  # operator-disabled survives an unchanged reprobe
 
     runner.tools = [_tool("beta")]
     r = await client.post(f"/api/servers/{sid}/probe")

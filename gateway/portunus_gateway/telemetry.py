@@ -96,7 +96,7 @@ def setup_telemetry(*, service_version: str | None = None) -> None:
             log.info(
                 "OTLP export enabled endpoint=%s metrics=%s",
                 host,
-                "off" if metrics_exporter == "none" and not metrics_endpoint else "on",
+                "on" if metric_readers else "off",
             )
         except Exception:
             # Bad OTEL_* config must never block gateway startup.

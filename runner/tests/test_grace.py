@@ -13,6 +13,32 @@ from portunus_runner.main import RunnerServer
 pytestmark = pytest.mark.anyio
 
 TOKEN = "tok-secret"
+
+
+def script_host() -> str:
+    """Allowlisted launcher that runs this interpreter but is not named python.
+
+    Absolute paths whose real basename is python/npx/uvx keep the closed grammar.
+    Fixture servers still need an allowlisted host that can exec a pinned script.
+    """
+    global _SCRIPT_HOST
+    if _SCRIPT_HOST:
+        return _SCRIPT_HOST
+    import shlex
+    import stat
+    import sys
+    import tempfile
+
+    directory = tempfile.mkdtemp(prefix="portunus-pyhost-")
+    path = os.path.join(directory, "pyhost")
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n")
+    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    _SCRIPT_HOST = os.path.realpath(path)
+    return _SCRIPT_HOST
+
+
+_SCRIPT_HOST: str | None = None
 HB = 0.05  # heartbeat_s override -> gap threshold 3*HB
 GRACE = 0.2  # grace_s override
 

@@ -74,8 +74,8 @@ class LoginThrottle:
     def record_failure(self, ip: str) -> bool:
         """Count a failure; return True if this failure locked the IP out."""
         now = self._clock()
-        if len(self._state) >= _MAX_TRACKED_IPS:
-            self._prune(now)
+        if ip not in self._state:
+            self._make_room(now)
         count, start, locked_until = self._state.get(ip, [0, now, 0.0])
         if locked_until and locked_until <= now:
             count, start, locked_until = 0, now, 0.0  # lock served; start fresh
@@ -91,6 +91,26 @@ class LoginThrottle:
 
     def record_success(self, ip: str) -> None:
         self._state.pop(ip, None)
+
+    def _make_room(self, now: float) -> None:
+        """Keep ``_state`` at or under ``_MAX_TRACKED_IPS`` before inserting a new IP.
+
+        Prune at most once per new IP (not on every attempt). If every remaining
+        entry is still live, evict the oldest unlocked window, then the lockout
+        that expires soonest.
+        """
+        if len(self._state) < _MAX_TRACKED_IPS:
+            return
+        self._prune(now)
+        while len(self._state) >= _MAX_TRACKED_IPS:
+            victim = min(self._state, key=lambda item: self._evict_rank(item, now))
+            del self._state[victim]
+
+    def _evict_rank(self, ip: str, now: float) -> tuple[int, float]:
+        _count, start, locked_until = self._state[ip]
+        if locked_until > now:
+            return (1, locked_until)
+        return (0, start)
 
     def _prune(self, now: float) -> None:
         self._state = {
@@ -309,8 +329,9 @@ class OperatorAuth:
             return None
         return username
 
-    def consume_login_challenge(self, token: str) -> None:
-        self._challenges.pop(_sha256(token), None)
+    def consume_login_challenge(self, token: str) -> bool:
+        """Consume a live challenge. Returns False if it was already spent or missing."""
+        return self._challenges.pop(_sha256(token), None) is not None
 
     # ---- audit -----------------------------------------------------------------------
 

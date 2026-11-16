@@ -211,11 +211,13 @@ async def test_mixed_dns_answer_rejected_if_any_address_is_private():
 
 
 async def test_default_resolver_denies_decimal_encoded_loopback():
-    # getaddrinfo expands "2130706433" to 127.0.0.1; validation happens on the resolved address.
+    # Platforms differ on whether getaddrinfo accepts dotted-decimal integers as
+    # hostnames; pin the resolution so the SSRF check is what we assert.
     c = RemoteClient(
         "https://2130706433/mcp",
         headers={},
         policy=RemotePolicy(),
+        resolver=static_resolver({"2130706433": ["127.0.0.1"]}),
         transport=httpx.MockTransport(mcp_handler()),
     )
     with pytest.raises(SsrfError):
@@ -605,6 +607,30 @@ async def test_redirect_downgrade_to_http_rejected():
     with pytest.raises(SsrfError):
         await c.list_tools()
     assert len(seen) == 1
+
+
+async def test_redirect_loopback_via_public_host_cannot_reenter_loopback():
+    """Allowlisted loopback → public → allowlisted loopback must stop at the return hop."""
+    seen: list[httpx.Request] = []
+    hops = {"n": 0}
+
+    def redirect(request: httpx.Request):
+        hops["n"] += 1
+        if hops["n"] == 1:
+            return httpx.Response(307, headers={"location": "https://public.example/mcp"})
+        if hops["n"] == 2:
+            return httpx.Response(307, headers={"location": "http://127.0.0.1:8000/mcp"})
+        return None
+
+    c = client(
+        "http://127.0.0.1:8000/mcp",
+        handler=mcp_handler(seen, redirect=redirect),
+        resolver=static_resolver({"public.example": [PUBLIC]}),
+        policy=RemotePolicy(loopback_allowlist=frozenset({"127.0.0.1"})),
+    )
+    with pytest.raises(SsrfError):
+        await c.list_tools()
+    assert len(seen) == 2
 
 
 async def test_redirect_from_public_host_to_allowlisted_loopback_rejected():

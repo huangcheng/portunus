@@ -3,11 +3,32 @@
 from __future__ import annotations
 
 import json
+import keyword
+import math
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+def validate_input_field_name(name: str) -> None:
+    """Reject manifest input keys that ``inspect.Parameter`` or ``create_model`` cannot use."""
+    if (
+        not isinstance(name, str)
+        or not name.isidentifier()
+        or keyword.iskeyword(name)
+        or name.startswith("_")
+        or name.startswith("model_")
+    ):
+        raise ValueError(f"input field {name!r} is not a valid parameter name")
+
+
+def _positive_finite_seconds(v: object) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+        raise ValueError("timeout/interval must be a positive finite number of seconds")
+    return float(v)
 
 
 class FieldSpec(BaseModel):
@@ -31,6 +52,13 @@ class ToolSpec(BaseModel):
     # Single token (`search`) or argv prefix (`["folder", "list"]`) before flags.
     cli: str | list[str] | None = None
     input: dict[str, FieldSpec] = Field(default_factory=dict)
+
+    @field_validator("input")
+    @classmethod
+    def _input_field_names(cls, v: dict[str, FieldSpec]) -> dict[str, FieldSpec]:
+        for name in v:
+            validate_input_field_name(name)
+        return v
 
 
 class SkillAuthActions(BaseModel):
@@ -61,6 +89,16 @@ class AuthSpec(BaseModel):
     env: str | None = None
     header: str = "Authorization"
     prefix: str = "Bearer "
+
+    @field_validator("header")
+    @classmethod
+    def _auth_header(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("auth.header must be a non-empty header name")
+        if "\n" in v or "\r" in v or ":" in v:
+            raise ValueError(f"invalid header name {v!r}")
+        return v.strip()
+
     # Injected only for skill_exec auth (e.g. LOGIN_MODE=device, OPENCLAW_CLI=1).
     login_env: dict[str, str] = Field(default_factory=dict)
     actions: SkillAuthActions = Field(default_factory=SkillAuthActions)
@@ -129,9 +167,7 @@ class AuthSpec(BaseModel):
     @field_validator("capture_timeout_s", "poll_interval_s")
     @classmethod
     def _positive_seconds(cls, v: float) -> float:
-        if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
-            raise ValueError("timeout/interval must be a positive number of seconds")
-        return float(v)
+        return _positive_finite_seconds(v)
 
     @field_validator("connect_hint")
     @classmethod
@@ -163,6 +199,18 @@ class HttpSpec(BaseModel):
 
     base_url: str
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "POST"
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise ValueError("base_url must be a non-empty absolute http(s) URL")
+        url = v.strip()
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("base_url must be a non-empty absolute http(s) URL")
+        return url
+
     const: dict[str, Any] = Field(default_factory=dict)
     # Fixed request headers (non-secret), e.g. ima-openapi-ctx.
     headers: dict[str, str] = Field(default_factory=dict)
@@ -171,6 +219,11 @@ class HttpSpec(BaseModel):
     dispatch_mode: Literal["body_field", "url_path"] = "body_field"
     dispatch_field: str = "api_name"
     timeout_s: float = 60.0
+
+    @field_validator("timeout_s")
+    @classmethod
+    def _timeout_s(cls, v: float) -> float:
+        return _positive_finite_seconds(v)
 
     @field_validator("headers")
     @classmethod
@@ -181,6 +234,8 @@ class HttpSpec(BaseModel):
                 raise ValueError("http.headers must map strings to strings")
             if "\n" in k or "\r" in k or ":" in k:
                 raise ValueError(f"invalid header name {k!r}")
+            if any(c in val for c in "\r\n\x00"):
+                raise ValueError(f"invalid header value for {k!r}")
             out[k.strip()] = val
         if len(out) > 32:
             raise ValueError("http.headers supports at most 32 entries")

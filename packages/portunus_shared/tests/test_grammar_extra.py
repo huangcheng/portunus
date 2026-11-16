@@ -112,6 +112,19 @@ def test_absolute_symlink_realpath(tmp_path):
         _v(str(link), [], binaries=[str(link.parent / "other")])
 
 
+def test_absolute_hardened_basenames_keep_grammar(tmp_path):
+    npx = tmp_path / "npx"
+    npx.write_text("#!/bin/sh\n")
+    py = tmp_path / "python3.12"
+    py.write_text("")
+    with pytest.raises(ArgvError):
+        _v(str(npx), ["demo@1.2.3"], binaries=[str(npx)])
+    _v(str(npx), ["--ignore-scripts", "demo@1.2.3"], binaries=[str(npx)])
+    with pytest.raises(ArgvError):
+        _v(str(py), ["script.py"], trailing=["script.py"], binaries=[str(py)])
+    _v(str(py), ["-m", "portunus_skill_bridge", "--manifest-stdin"], binaries=[str(py)])
+
+
 def test_absolute_rejected(tmp_path):
     exe = tmp_path / "srv"
     exe.write_text("")

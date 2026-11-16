@@ -33,6 +33,21 @@ def test_present_origin_requires_allowlist(monkeypatch):
     assert origin_allowed("https://portunus.example.com") is True
 
 
+def test_origin_folds_case_and_default_port(monkeypatch):
+    from portunus_gateway.origin import normalize_origin
+
+    assert normalize_origin("https://Example.COM:443/ignored") == "https://example.com"
+    assert normalize_origin("http://localhost:80") == "http://localhost"
+    assert normalize_origin("http://localhost:8080") == "http://localhost:8080"
+    assert normalize_origin("https://[::1]:443") == "https://[::1]"
+    assert normalize_origin("http://[::1]:8080") == "http://[::1]:8080"
+    assert normalize_origin("https://example.com:notaport") is None
+    monkeypatch.setenv("PORTUNUS_PUBLIC_URL", "https://Portunus.Example.com:443")
+    clear_origin_cache()
+    assert origin_allowed("https://portunus.example.com") is True
+    assert origin_allowed("https://Portunus.Example.com:443") is True
+
+
 def test_explicit_allowed_origins(monkeypatch):
     monkeypatch.setenv(
         "PORTUNUS_ALLOWED_ORIGINS",
