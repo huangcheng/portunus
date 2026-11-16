@@ -197,8 +197,12 @@ async def test_update_unknown_server_404_and_unknown_field_422(http):
     assert r.status_code == 422
 
 
-async def test_update_custom_name_slug_and_argv(http):
+async def test_update_custom_name_slug_and_argv(http, db):
     sid = await _mk(http, slug="edit-me")
+    async with async_session() as s:
+        before_vv = (
+            await s.execute(select(Server).where(Server.id == uuid.UUID(sid)))
+        ).scalar_one().vault_version or 0
     r = await http.patch(
         f"/api/servers/{sid}",
         json={
@@ -214,6 +218,7 @@ async def test_update_custom_name_slug_and_argv(http):
     assert body["slug"] == "renamed-mcp"
     assert body["args"] == ["-y", "--ignore-scripts", "demo@2.0.0"]
     assert body["recipe_slug"] is None
+    assert body["vault_version"] == int(before_vv) + 1
 
 
 async def test_update_slug_conflict_409(http):

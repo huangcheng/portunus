@@ -371,7 +371,7 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "setup_hints": [
                 (
                     "Paste a Raindrop API access token (Bearer). Docs: "
-                    "[developer.raindrop.io/mcp](https://developer.raindrop.io/mcp/mcp). "
+                    "[developer.raindrop.io/mcp](https://developer.raindrop.io/mcp). "
                     "MCP is Pro-beta."
                 ),
             ],
@@ -469,10 +469,11 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             },
             "setup_hints": [
                 (
-                    "Enable API Extension and paste the save URL or token from "
+                    "Enable API Extension, then paste the full save URL from "
                     "[cubox.pro](https://cubox.pro/web/settings/extensions) or "
-                    "[cubox.cc](https://cubox.cc/web/settings/extensions). Docs: "
-                    "[help.cubox.pro/ai/agents](https://help.cubox.pro/ai/agents/)."
+                    "[cubox.cc](https://cubox.cc/web/settings/extensions) "
+                    "(a full URL also sets CUBOX_SERVER; a bare token keeps the cubox.pro default). "
+                    "Docs: [help.cubox.pro/ai/agents](https://help.cubox.pro/ai/agents/)."
                 ),
             ],
         },
@@ -1275,29 +1276,50 @@ class CatalogStore:
             if added or refreshed:
                 await s.commit()
 
-        # Backfill / normalize portable preferred_regions on linked servers
-        # (empty, or legacy host-specific overseas-* tags from private fleets).
+        # Normalize legacy host-specific overseas-* tags to portable egress tags.
+        # Do NOT refill empty preferred_regions: empty means operator chose "Any"
+        # (create_server already applies catalog defaults when regions are omitted).
         regions_fixed = 0
+        recipe_bound = 0
         affinity_slugs = sorted(OVERSEAS_EGRESS_SLUGS | DOMESTIC_EGRESS_SLUGS)
         async with self._sf() as s:
             linked = (
                 await s.execute(select(Server).where(Server.slug.in_(affinity_slugs)))
             ).scalars().all()
             for srv in linked:
+                if srv.recipe_slug is None:
+                    srv.recipe_slug = srv.slug.casefold()
+                    recipe_bound += 1
                 hint = preferred_regions_for_slug(srv.slug)
                 if not hint:
                     continue
                 cur = list(srv.preferred_regions or [])
-                needs = (not cur) or any(r.startswith("overseas-") for r in cur)
-                if not needs or cur == hint:
+                if not any(r.startswith("overseas-") for r in cur):
+                    continue
+                if cur == hint:
                     continue
                 srv.preferred_regions = hint
                 regions_fixed += 1
-            if regions_fixed:
-                await s.commit()
-                log.info(
-                    "egress preferred_regions backfill: %d server(s)", regions_fixed
+            # Also bind recipe_slug for any other catalog-linked rows (non-affinity).
+            unbound = (
+                await s.execute(
+                    select(Server).where(
+                        Server.recipe_slug.is_(None),
+                        Server.slug.in_(select(CatalogApp.slug)),
+                    )
                 )
+            ).scalars().all()
+            for srv in unbound:
+                srv.recipe_slug = srv.slug.casefold()
+                recipe_bound += 1
+            if regions_fixed or recipe_bound:
+                await s.commit()
+                if regions_fixed:
+                    log.info(
+                        "egress preferred_regions backfill: %d server(s)", regions_fixed
+                    )
+                if recipe_bound:
+                    log.info("recipe_slug backfill: %d server(s)", recipe_bound)
 
         return inserted + added + refreshed
 

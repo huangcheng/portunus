@@ -11,5 +11,5 @@ sort_order = 52
 [spec]
 url = "https://api.raindrop.io/rest/v2/ai/mcp"
 setup_hints = [
-  "Paste a Raindrop API access token (Bearer). Docs: [developer.raindrop.io/mcp](https://developer.raindrop.io/mcp/mcp). MCP is Pro-beta.",
+  "Paste a Raindrop API access token (Bearer). Docs: [developer.raindrop.io/mcp](https://developer.raindrop.io/mcp). MCP is Pro-beta.",
 ]

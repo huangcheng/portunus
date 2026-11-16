@@ -3,9 +3,8 @@ import { api } from "./api";
 import { JsonObjectEditor, parseJsonStringMap } from "./JsonObjectEditor";
 import {
   NPX_ARGS_DEFAULT,
-  normalizeStdioArgs,
+  prepareStdioArgv,
   stdioArgsHint,
-  validateStdioArgs,
 } from "./stdioArgv";
 
 /** Create a custom remote/stdio MCP endpoint (Apps “Add custom MCP”). */
@@ -54,19 +53,17 @@ export function CreateMcpForm({ onCreated, onCancel }: { onCreated: () => void; 
       // Routing affinity comes from catalog egress defaults (or manage-drawer choices).
       const preferred_regions: string[] = [];
       if (kind === "stdio") {
-        const rawArgs = args.split(/\s+/).filter(Boolean);
-        const normalized = normalizeStdioArgs(command, rawArgs);
-        if (normalized.join(" ") !== rawArgs.join(" ")) {
-          setArgs(normalized.join(" ") + (normalized.length ? " " : ""));
-        }
-        const argvError = validateStdioArgs(command, normalized);
+        const { argv, error: argvError } = prepareStdioArgv(command, args);
         if (argvError) throw new Error(argvError);
+        if (argv.join(" ") !== args.trim()) {
+          setArgs(argv.join(" ") + (argv.length ? " " : ""));
+        }
         await api.createServer({
           name,
           slug,
           kind: "stdio",
-          command,
-          args: normalized,
+          command: command.trim(),
+          args: argv,
           env: envMap,
           preferred_regions,
         });

@@ -37,7 +37,7 @@ from sqlalchemy import case, func, literal, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .db.models import AuditEvent, CatalogApp, Server, SiteHealth, Tool, VaultEntry
+from .db.models import AuditEvent, CatalogApp, Server, SiteHealth, Tool, ToolCall, VaultEntry
 from .health import (
     HealthFacts,
     health_fields,
@@ -968,6 +968,12 @@ class Registry:
         entries = [self._seal_entry(server.id, key, value) for key, value in secrets.items()]
         async with self._sf() as s:
             try:
+                # Bind catalog Connect to the recipe so slug/argv freezes work.
+                catalog_row = (
+                    await s.execute(select(CatalogApp.id).where(CatalogApp.slug == slug.casefold()))
+                ).scalar_one_or_none()
+                if catalog_row is not None:
+                    server.recipe_slug = slug.casefold()
                 s.add(server)
                 await s.flush()  # server row first: vault entries reference it
                 s.add_all(entries)
@@ -1072,8 +1078,15 @@ class Registry:
                     ).scalar_one_or_none()
                     if catalog_hit is not None:
                         raise RegistryError(400, "reserved_slug", "slug is reserved by the catalog")
-                    audit["slug"] = {"from": server.slug, "to": new_slug}
+                    old_slug = server.slug
+                    audit["slug"] = {"from": old_slug, "to": new_slug}
                     server.slug = new_slug
+                    # Keep denormalized tool-call history attached to this server.
+                    await s.execute(
+                        update(ToolCall)
+                        .where(ToolCall.server_slug == old_slug)
+                        .values(server_slug=new_slug)
+                    )
             next_command = server.command if command is None else command
             next_args = list(server.args or []) if args is None else list(args)
             if command is not None or args is not None:
@@ -1082,11 +1095,18 @@ class Registry:
                     server.command = next_command
                     server.args = next_args
                     audit["argv"] = True
+                    # Children are keyed by vault_version: bump so live children on the
+                    # old argv are retired and the next invoke respawns with the new one.
+                    server.vault_version = int(server.vault_version or 0) + 1
                     needs_reprobe = True
             if regions is not None:
                 server.preferred_regions = regions
                 audit["preferred_regions"] = regions
             if remote_url is not None:
+                if not custom:
+                    raise RegistryError(
+                        422, "invalid_request", "catalog servers freeze url to the recipe"
+                    )
                 server.url = remote_url
                 audit["url"] = True
             if oauth is not None:

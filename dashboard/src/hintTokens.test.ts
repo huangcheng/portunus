@@ -46,4 +46,8 @@ describe("tokenizeSetupHint", () => {
   it("empty", () => {
     assert.deepEqual(tokenizeSetupHint(""), []);
   });
+  it("leaves URLs with parentheses as literal text", () => {
+    const raw = "[wiki](https://en.wikipedia.org/wiki/Foo_(bar))";
+    assert.deepEqual(tokenizeSetupHint(raw), [{ kind: "text", text: raw }]);
+  });
 });

@@ -13,23 +13,8 @@ function commandBasename(command: string): string {
 /** Ensure npx argv includes -y/--yes and --ignore-scripts in the required order. */
 export function normalizeStdioArgs(command: string, args: string[]): string[] {
   if (commandBasename(command) !== "npx") return args;
-  const out = [...args];
-  let i = 0;
-  if (out[0] === "-y" || out[0] === "--yes") i = 1;
-  if (!out.includes("--ignore-scripts")) {
-    out.splice(i, 0, "--ignore-scripts");
-  }
-  if (out[0] !== "-y" && out[0] !== "--yes") {
-    out.unshift("-y");
-  }
-  // Keep --ignore-scripts immediately after the yes flag.
-  const ignoreAt = out.indexOf("--ignore-scripts");
-  const yesAt = out[0] === "-y" || out[0] === "--yes" ? 0 : -1;
-  if (ignoreAt > 0 && yesAt === 0 && ignoreAt !== 1) {
-    out.splice(ignoreAt, 1);
-    out.splice(1, 0, "--ignore-scripts");
-  }
-  return out;
+  const rest = args.filter((a) => a !== "-y" && a !== "--yes" && a !== "--ignore-scripts");
+  return ["-y", "--ignore-scripts", ...rest];
 }
 
 /** Validate npx/uvx argv before create; returns an error message or null. */
@@ -45,15 +30,30 @@ export function validateStdioArgs(command: string, args: string[]): string | nul
     if (!args[i] || !NPX_PKG.test(args[i])) {
       return "npx requires exactly one package pinned as name@MAJOR.MINOR.PATCH";
     }
+    const extra = args.slice(i + 1).find((a) => a.startsWith("-"));
+    if (extra) return `unexpected npx flag: ${extra}`;
     return null;
   }
   if (base === "uvx") {
     if (!args[0] || !UVX_PKG.test(args[0])) {
       return "uvx requires exactly one package pinned as name==MAJOR.MINOR.PATCH";
     }
+    const extra = args.slice(1).find((a) => a.startsWith("-"));
+    if (extra) return `unexpected uvx flag: ${extra}`;
     return null;
   }
   return null;
+}
+
+/** Parse args text, normalize, and validate for create/edit paths. */
+export function prepareStdioArgv(
+  command: string,
+  argsText: string,
+): { argv: string[]; error: string | null } {
+  const cmd = command.trim();
+  const rawArgs = argsText.split(/\s+/).filter(Boolean);
+  const argv = normalizeStdioArgs(cmd, rawArgs);
+  return { argv, error: validateStdioArgs(cmd, argv) };
 }
 
 export function stdioArgsHint(command: string): string | null {

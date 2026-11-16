@@ -103,6 +103,11 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
   const [envDefaults, setEnvDefaults] = useState(
     envDefaultsText(asStringMap(initial?.spec?.env_defaults)),
   );
+  const [setupHintsText, setSetupHintsText] = useState(
+    Array.isArray(initial?.spec?.setup_hints)
+      ? (initial!.spec.setup_hints as unknown[]).map(String).join("\n")
+      : "",
+  );
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -120,6 +125,11 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
     setSpec({ ...initial.spec });
     setManifestJson(JSON.stringify((initial.spec.manifest as object) ?? {}, null, 2) + "\n");
     setEnvDefaults(envDefaultsText(asStringMap(initial.spec.env_defaults)));
+    setSetupHintsText(
+      Array.isArray(initial.spec.setup_hints)
+        ? (initial.spec.setup_hints as unknown[]).map(String).join("\n")
+        : "",
+    );
     setError("");
   }, [initial]);
 
@@ -129,6 +139,7 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
     if (editing) return;
     setConnection(next);
     setSpec(emptySpec(next));
+    setSetupHintsText("");
     if (next === "skill_bridge") {
       setManifestJson("{\n}\n");
       setEnvDefaults("");
@@ -139,16 +150,16 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
     setSpec((prev) => ({ ...prev, ...partial }));
   }
 
-  function setupHintsFromSpec(): string[] | undefined {
-    if (!("setup_hints" in spec)) return undefined;
-    const raw = spec.setup_hints;
-    if (!Array.isArray(raw)) return [];
-    return raw.map(String).map((s) => s.trim()).filter(Boolean);
+  function setupHintsFromText(): string[] {
+    return setupHintsText
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
 
   function withSetupHints(out: Record<string, unknown>): Record<string, unknown> {
-    const hints = setupHintsFromSpec();
-    if (hints !== undefined) out.setup_hints = hints;
+    // Always round-trip: empty textarea clears hints; typing newlines stays editable.
+    out.setup_hints = setupHintsFromText();
     return out;
   }
 
@@ -510,7 +521,7 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
                 value={String(spec.url ?? "")}
                 onChange={(e) => patchSpec({ url: e.target.value })}
                 placeholder="https://example.com/mcp"
-                required
+                required={spec.url_from_operator !== true}
               />
             </label>
             <div className="form-grid">
@@ -664,19 +675,8 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
           Setup hints (one per line; optional <code>[label](https://…)</code> links)
           <textarea
             rows={3}
-            value={
-              Array.isArray(spec.setup_hints)
-                ? (spec.setup_hints as unknown[]).map(String).join("\n")
-                : ""
-            }
-            onChange={(e) =>
-              patchSpec({
-                setup_hints: e.target.value
-                  .split("\n")
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-              })
-            }
+            value={setupHintsText}
+            onChange={(e) => setSetupHintsText(e.target.value)}
             placeholder="Paste the API key from the [vendor console](https://example.com)."
           />
         </label>

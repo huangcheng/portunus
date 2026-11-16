@@ -46,3 +46,17 @@ def test_toml_recipes_declare_egress():
     assert dropbox.egress == "overseas"
     weknora = parse_recipe(apps / "weknora.toml")
     assert weknora.egress == "any"
+
+
+def test_toml_egress_matches_default_apps():
+    """Mode A (DEFAULT_APPS) and mode B (TOML) must agree per slug."""
+    apps_dir = Path(__file__).resolve().parents[2] / "catalog" / "apps"
+    seed = {str(a["slug"]): normalize_egress(a.get("egress")) for a in DEFAULT_APPS}
+    for path in sorted(apps_dir.glob("*.toml")):
+        recipe = parse_recipe(path)
+        if recipe.slug not in seed:
+            continue
+        assert normalize_egress(recipe.egress) == seed[recipe.slug], recipe.slug
+        assert preferred_regions_for_slug(recipe.slug) == preferred_regions_for_egress(
+            recipe.egress
+        )

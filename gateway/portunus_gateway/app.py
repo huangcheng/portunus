@@ -25,6 +25,19 @@ from .registry import Registry
 _SKILL_MD = Path(__file__).resolve().parent / "static" / "SKILL.md"
 
 
+def _load_skill_md() -> str | None:
+    """Read packaged SKILL.md once; None when missing or unreadable."""
+    try:
+        if not _SKILL_MD.is_file():
+            return None
+        return _SKILL_MD.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+_SKILL_MD_TEXT = _load_skill_md()
+
+
 def build_app(*, registry: Registry, omni: Omni, auth: OperatorAuth | None = None) -> FastAPI:
     app = create_app(registry, auth=auth)
     app.state.omni = omni
@@ -35,13 +48,13 @@ def build_app(*, registry: Registry, omni: Omni, auth: OperatorAuth | None = Non
     @app.get("/SKILL.md", include_in_schema=False)
     async def agent_skill_md() -> Response:
         """Public agent instructions for connecting to this Portunus gateway."""
-        if not _SKILL_MD.is_file():
+        if _SKILL_MD_TEXT is None:
             return JSONResponse(
                 status_code=404,
                 content={"code": "not_found", "message": "SKILL.md is not packaged"},
             )
         return PlainTextResponse(
-            _SKILL_MD.read_text(encoding="utf-8"),
+            _SKILL_MD_TEXT,
             media_type="text/markdown; charset=utf-8",
             headers={"Cache-Control": "public, max-age=300"},
         )

@@ -38,11 +38,7 @@ import {
   regionsToChoice,
   type RoutingChoice,
 } from "./routingPreference";
-import {
-  normalizeStdioArgs,
-  stdioArgsHint,
-  validateStdioArgs,
-} from "./stdioArgv";
+import { prepareStdioArgv, stdioArgsHint } from "./stdioArgv";
 
 type Tab = "all" | "connected";
 
@@ -1925,6 +1921,7 @@ function GenericManagePanel({
   const [slug, setSlug] = useState(server.slug);
   const [command, setCommand] = useState(server.command || "npx");
   const [args, setArgs] = useState((server.args ?? []).join(" "));
+  const [argsDirty, setArgsDirty] = useState(false);
   const [url, setUrl] = useState(server.url || "");
   const [token, setToken] = useState("");
   const custom = !server.recipe_slug;
@@ -1936,6 +1933,7 @@ function GenericManagePanel({
     setSlug(server.slug);
     setCommand(server.command || "npx");
     setArgs((server.args ?? []).join(" "));
+    setArgsDirty(false);
     setUrl(server.url || "");
     setToken("");
     setError("");
@@ -1958,17 +1956,21 @@ function GenericManagePanel({
         patch.slug = slug.trim();
       }
       if (current.kind === "stdio" && custom) {
-        const rawArgs = args.split(/\s+/).filter(Boolean);
-        const normalized = normalizeStdioArgs(command.trim(), rawArgs);
-        if (normalized.join(" ") !== rawArgs.join(" ")) {
-          setArgs(normalized.join(" "));
+        const cmd = command.trim();
+        const cmdChanged = cmd !== (current.command || "");
+        // Only re-parse argv text when the operator edited it — join/split is lossy
+        // for args that contain whitespace.
+        if (argsDirty || cmdChanged) {
+          const source = argsDirty ? args : (current.args ?? []).join(" ");
+          const { argv, error: argvError } = prepareStdioArgv(cmd, source);
+          if (argvError) throw new Error(argvError);
+          setArgs(argv.join(" "));
+          setArgsDirty(false);
+          patch.command = cmd;
+          patch.args = argv;
         }
-        const argvError = validateStdioArgs(command.trim(), normalized);
-        if (argvError) throw new Error(argvError);
-        patch.command = command.trim();
-        patch.args = normalized;
       }
-      if (current.kind === "remote") {
+      if (current.kind === "remote" && custom) {
         const nextUrl = url.trim();
         if (nextUrl && nextUrl !== (current.url || "")) {
           patch.url = nextUrl;
@@ -1980,6 +1982,7 @@ function GenericManagePanel({
       setSlug(updated.slug);
       setCommand(updated.command || "npx");
       setArgs((updated.args ?? []).join(" "));
+      setArgsDirty(false);
       setUrl(updated.url || "");
       setNotice("Saved.");
       await onChanged();
@@ -2060,7 +2063,10 @@ function GenericManagePanel({
                 Args
                 <input
                   value={args}
-                  onChange={(e) => setArgs(e.target.value)}
+                  onChange={(e) => {
+                    setArgsDirty(true);
+                    setArgs(e.target.value);
+                  }}
                   placeholder="-y --ignore-scripts pkg@1.2.3"
                   readOnly={!custom}
                   disabled={!custom}
@@ -2077,6 +2083,8 @@ function GenericManagePanel({
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               required
+              readOnly={!custom}
+              disabled={!custom}
               autoComplete="off"
             />
           </label>
@@ -2493,6 +2501,7 @@ function ServerLifecycle({
   if (!current) return null;
 
   const routing = regionsToChoice(current.preferred_regions);
+  const customRegions = routing === null;
 
   async function probe() {
     setError("");
@@ -2535,7 +2544,7 @@ function ServerLifecycle({
   }
 
   async function setRouting(choice: RoutingChoice) {
-    if (choice === routing) return;
+    if (routing !== null && choice === routing) return;
     setError("");
     setNotice("");
     setBusy(true);
@@ -2578,8 +2587,18 @@ function ServerLifecycle({
           ))}
         </div>
         <p className="provider-hint">
-          Soft affinity among healthy sites. Tag runners with{" "}
-          <code>PORTUNUS_REGIONS</code> including <code>domestic</code> or <code>overseas</code>.
+          {customRegions ? (
+            <>
+              Custom region tags (<code>{(current.preferred_regions ?? []).join(", ")}</code>
+              ). Pick a choice above to replace them.
+            </>
+          ) : (
+            <>
+              Soft affinity among healthy sites. Tag runners with{" "}
+              <code>PORTUNUS_REGIONS</code> including <code>domestic</code> or{" "}
+              <code>overseas</code>.
+            </>
+          )}
         </p>
       </div>
       <div className="apps-actions">
