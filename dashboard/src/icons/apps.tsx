@@ -58,7 +58,7 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "vultr") return "vultr";
   if (slug === "vercel") return "vercel";
   if (slug === "tencentcloud") return "tencentcloud";
-  if (slug === "flyai" || slug === "fliggy") return "flyai";
+  if (slug === "flyai" || slug === "fliggy" || slug === "feizhu") return "flyai";
   if (slug === "youdaonote" || slug === "youdao") return "youdaonote";
   if (slug === "ima") return "ima";
   if (slug === "weknora") return "weknora";
@@ -88,9 +88,10 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   github: "github.svg",
   cloudflare: "cloudflare.svg",
   aliyun: "aliyun.svg",
-  vultr: "vultr.svg",
+  vultr: "vultr.png",
   vercel: "vercel.svg",
-  // tencentcloud / flyai: no redistributable mark sourced yet — AppBrandMark falls back to initials.
+  tencentcloud: "tencentcloud.png",
+  flyai: "flyai.png",
   youdaonote: "youdaonote.png",
   ima: "ima.svg",
   weknora: "weknora.png",
