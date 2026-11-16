@@ -604,9 +604,7 @@ class Runner:
             if isinstance(timing, dict) and timing:
                 extra["timing"] = timing
             # Propagate exit evidence so the gateway can free the slot and retry safely.
-            if getattr(e, "child_exited", False) or (
-                isinstance(getattr(e, "data", None), dict) and e.data.get("cause") == "child_exited"
-            ):
+            if getattr(e, "child_exited", False):
                 extra["reason"] = "child_exited"
                 with contextlib.suppress(ProcessLookupError):
                     rec.handle.kill()
