@@ -770,11 +770,12 @@ async def test_invoke_timeout_default_is_60s(stack):
     assert stack.omni.invoke_timeout_s == 60
 
 
-async def test_invoke_retries_once_on_upstream_timeout(stack, monkeypatch):
+@pytest.mark.parametrize("fail_code", ["upstream_timeout", "upstream_crash"])
+async def test_invoke_retries_once_on_transient_network_failure(stack, monkeypatch, fail_code):
     from portunus_shared import PortunusError
 
-    monkeypatch.setattr("portunus_gateway.omni._INVOKE_TIMEOUT_RETRY_DELAY_S", 0)
-    sid = await stack.add_server("retryme")
+    monkeypatch.setattr("portunus_gateway.omni._INVOKE_TRANSIENT_RETRY_DELAY_S", 0)
+    sid = await stack.add_server(f"retry-{fail_code}")
     token, _ = await stack.add_key(sid)
     async with async_session() as s:
         tool = (
@@ -790,17 +791,82 @@ async def test_invoke_retries_once_on_upstream_timeout(stack, monkeypatch):
     async def flaky(*args, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise PortunusError("upstream_timeout", "slow once")
+            raise PortunusError(
+                fail_code,
+                f"{fail_code} once",
+                child_exited=fail_code == "upstream_crash",
+            )
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(stack.omni, "_run_invoke", flaky)
     async with stack.client(token) as c:
         ok = await c.call_tool(
             "portunus_invoke_tool",
-            {"server": "retryme", "tool": "alpha", "arguments": {"q": "z"}},
+            {
+                "server": f"retry-{fail_code}",
+                "tool": "alpha",
+                "arguments": {"q": "z"},
+            },
         )
         assert not ok.is_error, payload(ok)
     assert calls["n"] == 2
+
+
+async def test_invoke_does_not_retry_crash_without_safe_hints(stack, monkeypatch):
+    from portunus_shared import PortunusError
+
+    monkeypatch.setattr("portunus_gateway.omni._INVOKE_TRANSIENT_RETRY_DELAY_S", 0)
+    sid = await stack.add_server("crash-nosafety")
+    token, _ = await stack.add_key(sid)
+    calls = {"n": 0}
+
+    async def always_crash(*args, **kwargs):
+        calls["n"] += 1
+        raise PortunusError(
+            "upstream_crash",
+            "child exited before answering",
+            child_exited=True,
+        )
+
+    monkeypatch.setattr(stack.omni, "_run_invoke", always_crash)
+    async with stack.client(token) as c:
+        res = await c.call_tool(
+            "portunus_invoke_tool",
+            {"server": "crash-nosafety", "tool": "alpha", "arguments": {"q": "z"}},
+        )
+        assert error_code(res) == "upstream_crash"
+    assert calls["n"] == 1
+
+
+async def test_invoke_does_not_retry_protocol_upstream_crash(stack, monkeypatch):
+    """JSON-RPC tool errors reuse upstream_crash without child-exit evidence — no retry."""
+    from portunus_shared import PortunusError
+
+    monkeypatch.setattr("portunus_gateway.omni._INVOKE_TRANSIENT_RETRY_DELAY_S", 0)
+    sid = await stack.add_server("crash-rpc")
+    token, _ = await stack.add_key(sid)
+    async with async_session() as s:
+        tool = (
+            await s.execute(
+                select(Tool).where(Tool.server_id == sid, Tool.upstream_name == "alpha")
+            )
+        ).scalar_one()
+        tool.annotations = {"readOnlyHint": True}
+        await s.commit()
+    calls = {"n": 0}
+
+    async def always_crash(*args, **kwargs):
+        calls["n"] += 1
+        raise PortunusError("upstream_crash", "tools/call failed: -32602")
+
+    monkeypatch.setattr(stack.omni, "_run_invoke", always_crash)
+    async with stack.client(token) as c:
+        res = await c.call_tool(
+            "portunus_invoke_tool",
+            {"server": "crash-rpc", "tool": "alpha", "arguments": {"q": "z"}},
+        )
+        assert error_code(res) == "upstream_crash"
+    assert calls["n"] == 1
 
 
 async def test_schema_override_used_for_omni_validation(stack):

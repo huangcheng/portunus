@@ -600,7 +600,16 @@ class Runner:
                 with contextlib.suppress(ProcessLookupError):
                     rec.handle.kill()
             timing = getattr(rec.rpc, "last_timing", None)
-            extra = {"timing": timing} if isinstance(timing, dict) and timing else {}
+            extra: dict[str, Any] = {}
+            if isinstance(timing, dict) and timing:
+                extra["timing"] = timing
+            # Propagate exit evidence so the gateway can free the slot and retry safely.
+            if getattr(e, "child_exited", False) or (
+                isinstance(getattr(e, "data", None), dict) and e.data.get("cause") == "child_exited"
+            ):
+                extra["reason"] = "child_exited"
+                with contextlib.suppress(ProcessLookupError):
+                    rec.handle.kill()
             await self._error(
                 sess, msg, e.code, e.message or "rpc failed", with_token=True, **extra
             )

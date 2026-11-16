@@ -307,6 +307,7 @@ async def test_child_exit_during_start_is_crash(slot_manager, fake_runner, authz
     with pytest.raises(PortunusError) as ei:
         await task
     assert ei.value.code == "upstream_crash"
+    assert ei.value.child_exited is True
     assert slot_manager.slots == {}
 
 

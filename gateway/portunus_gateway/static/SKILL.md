@@ -70,6 +70,7 @@ Meta-tool JSON Schema fields use **`input_schema`** (snake_case), not MCP wire `
 | `auth_required` | Server needs operator Connect / re-auth |
 | `schema_drift` | Re-fetch schema; update arguments / `schema_hash` |
 | `upstream_timeout` | Read-only / idempotent tools may be retried once by the gateway |
+| `upstream_crash` | Retried once only when the stdio child actually exited; JSON-RPC/tool errors are not auto-retried |
 | `payload_too_large` | Lower result size or set `truncate: true` on invoke |
 
 ## Operator boundary

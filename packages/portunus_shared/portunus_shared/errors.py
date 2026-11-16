@@ -33,11 +33,18 @@ class PortunusError(Exception):
     """Base error carrying a spec §6.4 code."""
 
     def __init__(
-        self, code: str, message: str = "", *, data: dict | None = None
+        self,
+        code: str,
+        message: str = "",
+        *,
+        data: dict | None = None,
+        child_exited: bool = False,
     ) -> None:
         if code not in ERROR_CODES:
             raise ValueError(f"unknown error code: {code!r}")
         self.code = code
         self.message = message
         self.data = data
+        # Internal invoke bookkeeping (stdio child death). Not serialized to agents.
+        self.child_exited = child_exited
         super().__init__(f"{code}: {message}" if message else code)

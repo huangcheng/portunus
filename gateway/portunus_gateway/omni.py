@@ -34,7 +34,11 @@ Invariants
 * Limits: 60 ``portunus_invoke_tool`` calls/min/key (``rate_limited``; discovery / schema
   reads are free), 8 concurrent invokes/key (``rate_limited``), invoke timeout default 60s
   (an agent may only shorten it). A timed-out or cancelled call retires its child (it may be
-  wedged mid-call). ``rate_limited`` includes ``retry_after_s`` in ``error.data`` and
+  wedged mid-call); a crashed call retires it only with exit evidence (a runner-forwarded
+  JSON-RPC tool error reuses ``upstream_crash`` and leaves a healthy child). Read-only /
+  idempotent tools get one automatic retry on ``upstream_timeout`` (unless the caller
+  shortened the timeout) or stdio ``upstream_crash`` with child-exit evidence.
+  ``rate_limited`` includes ``retry_after_s`` in ``error.data`` and
   ``_meta.io.portunus.gateway``.
 """
 
@@ -79,8 +83,8 @@ from .registry import RegistryError, effective_schema
 from .runner_client import RunnerRequestError
 from .runner_pool import RunnerPool
 
-# One automatic retry after a transient upstream timeout (read-only / idempotent only).
-_INVOKE_TIMEOUT_RETRY_DELAY_S = 0.3
+# One automatic retry after a transient network-class failure (read-only / idempotent only).
+_INVOKE_TRANSIENT_RETRY_DELAY_S = 0.3
 _SAFE_WEBDAV_RETRY_TOOLS = frozenset(
     {
         "webdav_list_remote_directory",
@@ -91,13 +95,42 @@ _SAFE_WEBDAV_RETRY_TOOLS = frozenset(
 )
 
 
-def _timeout_retryable(tool: ToolRow) -> bool:
+def _invoke_retryable(tool: ToolRow) -> bool:
     """Only retry when a duplicate call cannot create a second side effect."""
     ann = tool.annotations if isinstance(tool.annotations, dict) else {}
     if ann.get("readOnlyHint") is True or ann.get("idempotentHint") is True:
         return True
     name = (tool.upstream_name or "").casefold()
     return name in _SAFE_WEBDAV_RETRY_TOOLS
+
+
+def _transient_invoke_retryable(
+    server: ServerRow,
+    tool: ToolRow,
+    err: BaseException,
+) -> bool:
+    """Decide whether a failed invoke may be attempted once more.
+
+    ``upstream_timeout`` is always eligible for safe tools (stdio + remote).
+    ``upstream_crash`` is only retried when we have exit evidence
+    (``err.child_exited``): the same code is also used for deterministic
+    JSON-RPC tool errors and remote HTTP failures, which must not be
+    double-hit or counted twice toward site health.
+    """
+    code = getattr(err, "code", None)
+    if not isinstance(code, str) or not _invoke_retryable(tool):
+        return False
+    if code == "upstream_timeout":
+        return True
+    if code == "upstream_crash" and server.kind == "stdio" and getattr(err, "child_exited", False):
+        return True
+    return False
+
+
+def _child_exited_error(message: str) -> PortunusError:
+    """Raise-ready crash with internal exit evidence (not part of agent-visible error.data)."""
+    return PortunusError("upstream_crash", message, child_exited=True)
+
 
 # Prefixed _meta key (MCP naming MUST). Legacy ``portunus`` is dual-written for one release.
 META_PORTUNUS = "io.portunus.gateway"
@@ -1134,14 +1167,15 @@ class Omni:
                     truncate=truncate,
                 )
             except (PortunusError, RegistryError) as e:
-                # One retry for transient timeouts on read-only/idempotent tools only.
+                # One retry for transient failures on safe tools only. stdio
+                # upstream_crash (dead child) is treated like timeout: record the site,
+                # clear first-attempt attrs, and cold-start on the next placement.
                 can_retry = (
-                    e.code == "upstream_timeout"
-                    and not caller_shortened_timeout
-                    and _timeout_retryable(tool)
+                    (e.code != "upstream_timeout" or not caller_shortened_timeout)
+                    and _transient_invoke_retryable(server, tool, e)
                 )
                 if can_retry:
-                    # Record the first timeout so site health / last_error stay honest.
+                    # Record the first failure so site health / last_error stay honest.
                     await self.registry.record_outcome(
                         server.id,
                         e.code,
@@ -1163,7 +1197,7 @@ class Omni:
                             "upstream_ms",
                         ):
                             bag.pop(key, None)
-                    await asyncio.sleep(_INVOKE_TIMEOUT_RETRY_DELAY_S)
+                    await asyncio.sleep(_INVOKE_TRANSIENT_RETRY_DELAY_S)
                     try:
                         result = await self._run_invoke(
                             key_id,
@@ -1193,9 +1227,9 @@ class Omni:
                         # SlotManager attaches it to the error (slot.site_id).
                         site_id=self._invoke_site() or getattr(e, "site_id", None),
                     )
-                    # Failover needs no extra push here: upstream_timeout already retires the
-                    # pair in _run_invoke and link loss reconciles via reconnect; the learned
-                    # streak recorded above is what moves the *next* placement.
+                    # Failover needs no extra push here: timeout and child-exit paths
+                    # already retire/free in _run_invoke; link loss reconciles via reconnect;
+                    # the learned streak recorded above is what moves the *next* placement.
                     raise
             code = _error_code_from_result(result)
             bag = _invoke_attrs.get() or {}
@@ -1305,7 +1339,8 @@ class Omni:
             preferred_miss=preferred_miss,
         )
         if site_id is None:
-            raise PortunusError("upstream_crash", "child exited before the call")
+            # Slot already freed when the child exited during start — nothing to retire.
+            raise _child_exited_error("child exited before the call")
         rpc_attrs = {
             **child_attrs,
             tel.ATTR_SITE_ID: site_id,
@@ -1330,14 +1365,26 @@ class Omni:
                 self.slots.stop_pair(key_id, server.id)  # caller left mid-call: child may be wedged
                 raise
             except RunnerRequestError as e:
-                if e.code == "upstream_timeout":
+                child_exited = e.reason in ("unknown_child", "child_exited")
+                if child_exited:
+                    # Exit evidence: free immediately so a retry can respawn.
+                    self.slots.on_child_exited(child_id, site_id=site_id)
+                elif e.code == "upstream_timeout":
+                    # Maybe-wedged: mark pending_stop and kill asynchronously.
                     self.slots.stop_pair(key_id, server.id)
+                # Runner-forwarded JSON-RPC tool errors also use upstream_crash but leave
+                # a healthy child — do not stop_pair those.
                 # Runner may still have attached timing on an error reply.
                 err_timing = e.reply.get("timing") if isinstance(e.reply, dict) else None
                 self._apply_rpc_timing(rpc_span, err_timing, fallback_ms=_ms_since(t_rpc))
                 tel.set_span_error(rpc_span, e.code)
-                if e.reason == "unknown_child":
-                    raise PortunusError("upstream_crash", "child exited during the call") from None
+                if child_exited:
+                    msg = (
+                        e.message
+                        if e.reason == "child_exited" and e.message
+                        else "child exited during the call"
+                    )
+                    raise _child_exited_error(msg) from None
                 raise PortunusError(e.code, e.message) from None
             self._apply_rpc_timing(
                 rpc_span,

@@ -25,8 +25,14 @@ MAX_TOOLS = 2000
 MAX_RESULT_BYTES = 4 * 1024 * 1024  # stays under the 5MiB wire frame with envelope room
 
 
-def _crash(message: str) -> PortunusError:
-    return PortunusError("upstream_crash", message)
+def _crash(message: str, *, cause: str | None = None) -> PortunusError:
+    data = {"cause": cause} if cause else None
+    return PortunusError(
+        "upstream_crash",
+        message,
+        data=data,
+        child_exited=cause == "child_exited",
+    )
 
 
 class MethodError(PortunusError):
@@ -60,7 +66,7 @@ class _Stdio:
             self._proc.stdin.write(data)
             await self._proc.stdin.drain()
         except (ConnectionError, OSError):
-            raise _crash("child closed stdin") from None
+            raise _crash("child closed stdin", cause="child_exited") from None
 
     async def notify(self, method: str, params: dict | None = None) -> None:
         msg: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
@@ -87,7 +93,7 @@ class _Stdio:
             except (ValueError, asyncio.LimitOverrunError):
                 raise PortunusError(self.OVERSIZE_CODE, "child sent an oversize line") from None
             if not line:
-                raise _crash("child exited before answering")
+                raise _crash("child exited before answering", cause="child_exited")
             try:
                 reply = json.loads(line)
             except ValueError:

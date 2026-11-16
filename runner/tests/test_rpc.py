@@ -1,5 +1,6 @@
 """Runner ``rpc`` op: bridge one ``tools/call`` to a tracked child's stdio (spec §6.2)."""
 
+import asyncio
 import json
 import textwrap
 import uuid
@@ -127,4 +128,31 @@ async def test_rpc_oversize_result_is_payload_too_large_and_child_is_killed(read
     rep = await c.call(_rpc(c, "big"), timeout=20)
     assert rep["ok"] is False and rep["error"]["code"] == "payload_too_large"
     # The child's stdout is desynchronised mid-line: it must not be reused.
+    assert await wait_until(s.children.empty, timeout=5)
+
+
+async def test_rpc_child_death_mid_call_tags_child_exited(ready):
+    import os
+    import signal
+
+    from portunus_shared import read_frame
+
+    s, c = ready
+    req = _rpc(c, "sleep", timeout_s=30)
+    await c.send(req)
+    await asyncio.sleep(0.3)  # let tools/call block on the sleeping child
+    rec = s.children.get("c1")
+    assert rec is not None
+    os.kill(rec.handle.pid, signal.SIGKILL)
+    # child_exited notify and the rpc error may arrive in either order
+    frames = []
+    for _ in range(3):
+        frames.append(await asyncio.wait_for(read_frame(c.r), 5))
+        if any(f.get("request_id") == req["request_id"] for f in frames):
+            break
+    assert any(f.get("op") == "child_exited" for f in frames)
+    rep = next(f for f in frames if f.get("request_id") == req["request_id"])
+    assert rep["ok"] is False
+    assert rep["error"]["code"] == "upstream_crash"
+    assert rep.get("reason") == "child_exited"
     assert await wait_until(s.children.empty, timeout=5)

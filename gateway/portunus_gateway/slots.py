@@ -429,7 +429,11 @@ class SlotManager:
             raise
 
         if self._slots.get(slot.child_id) is not slot:
-            raise PortunusError("upstream_crash", "child exited before start completed")
+            raise PortunusError(
+                "upstream_crash",
+                "child exited before start completed",
+                child_exited=True,
+            )
         # Commit gate: authz may have changed while the start was in flight. No await from here
         # to the return, so nothing can interleave between this check and the commit.
         reason = self._deny_reason(slot.key_id, slot.server_id)
