@@ -26,11 +26,9 @@ MAX_RESULT_BYTES = 4 * 1024 * 1024  # stays under the 5MiB wire frame with envel
 
 
 def _crash(message: str, *, cause: str | None = None) -> PortunusError:
-    data = {"cause": cause} if cause else None
     return PortunusError(
         "upstream_crash",
         message,
-        data=data,
         child_exited=cause == "child_exited",
     )
 
