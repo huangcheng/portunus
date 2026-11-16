@@ -228,8 +228,9 @@ def test_gdrive_oauth_drive_mcp_seed_shape():
     assert "access_type=offline" in spec["authorize_url"]
     assert spec["token_url"] == "https://oauth2.googleapis.com/token"
     assert spec["token_endpoint_auth_method"] == "client_secret_post"
-    # Google advertises authorization_response_iss_parameter_supported=true.
-    assert spec["issuer"] == "https://accounts.google.com"
+    # accounts.google.com does not return RFC 9207 ``iss``; configuring issuer
+    # would make the callback require it and break Connect.
+    assert "issuer" not in spec
     assert "https://www.googleapis.com/auth/drive.file" in spec["scopes"]
     assert preferred_regions_for_slug("gdrive") == ["overseas"]
 

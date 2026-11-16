@@ -406,13 +406,9 @@ export const api = {
     return call<CatalogAppRow>("POST", "/apps", b, headers);
   },
   updateApp: async (id: string, b: Partial<CatalogAppRow>, password?: string) => {
-    // Server gates step-up on existing connection; client cannot know it here, so only
-    // prompt when the patch clearly targets an executable catalog shape.
-    const conn = b.connection;
-    const needsStep =
-      b.spec != null &&
-      (conn === "skill_bridge" || conn === "stdio" || conn === "webdav");
-    const headers = needsStep ? await stepUpHeaders(password) : undefined;
+    // Server gates on existing connection when spec is patched; PATCH bodies omit
+    // connection, so always step-up when sending spec.
+    const headers = b.spec != null ? await stepUpHeaders(password) : undefined;
     return call<CatalogAppRow>("PATCH", `/apps/${encodeURIComponent(id)}`, b, headers);
   },
   deleteApp: (id: string) => call<void>("DELETE", `/apps/${encodeURIComponent(id)}`),
