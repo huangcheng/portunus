@@ -300,6 +300,27 @@ async def test_uvx_gets_uv_no_build_not_overridable(srv_factory, sock_path, env_
     c.close()
 
 
+async def test_uvx_symlink_to_uv_rewrites_as_tool_run(srv_factory, sock_path, env_dir, policy_file):
+    """When uvx → uv (uv 0.9 layout), spawn must exec ``uv tool run …`` not bare args."""
+    bindir = env_dir / "bin"
+    out = env_dir / "out"
+    (bindir / "uvx").unlink()
+    _exe(
+        bindir / "uv",
+        f'#!/bin/sh\necho "$@" > {out}/uv.args\nenv > {out}/uv.env\nexec /bin/sleep 30\n',
+    )
+    (bindir / "uvx").symlink_to(bindir / "uv")
+    srv, c = await _client(srv_factory, sock_path, policy_path=policy_file)
+    rep = await c.call(
+        _start(c, "u", ["uvx", "--with", "mcp==1.1.2", "demo==1.2.3"])
+    )
+    assert rep["ok"] is True, rep
+    args_file = out / "uv.args"
+    assert await wait_until(lambda: args_file.exists() and args_file.stat().st_size)
+    assert args_file.read_text().strip() == "tool run --with mcp==1.1.2 demo==1.2.3"
+    c.close()
+
+
 # ---- fd hygiene / process hygiene --------------------------------------------------------------
 
 

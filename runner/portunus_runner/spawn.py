@@ -215,8 +215,8 @@ class Spawner:
         # resolved binary is (or links to) ``uv``.
         real = os.path.realpath(exe)
         if os.path.basename(command) == "uvx" and os.path.basename(real) == "uv":
-            uv = shutil.which("uv", path=os.pathsep.join(policy.trusted_path)) or real
-            exe, args = uv, ["tool", "run", *args]
+            # Use the realpath of the validated uvx lookup — do not re-which "uv".
+            exe, args = real, ["tool", "run", *args]
         try:
             proc = await asyncio.create_subprocess_exec(
                 exe,

@@ -36,8 +36,8 @@ export function validateStdioArgs(command: string, args: string[]): string | nul
   }
   if (base === "uvx") {
     let i = 0;
-    while (i + 1 < args.length && args[i] === "--with") {
-      if (!UVX_PKG.test(args[i + 1])) {
+    while (i < args.length && args[i] === "--with") {
+      if (i + 1 >= args.length || !UVX_PKG.test(args[i + 1])) {
         return "uvx --with requires name==MAJOR.MINOR.PATCH";
       }
       i += 2;

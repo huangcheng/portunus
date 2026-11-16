@@ -83,8 +83,8 @@ def _validate_uvx(args: list[str], trailing_allowlist: list[str]) -> None:
     older server package). The primary tool package remains required and pinned.
     """
     i = 0
-    while i + 1 < len(args) and args[i] == "--with":
-        if not _UVX_PKG.fullmatch(args[i + 1]):
+    while i < len(args) and args[i] == "--with":
+        if i + 1 >= len(args) or not _UVX_PKG.fullmatch(args[i + 1]):
             raise _reject("uvx --with requires name==MAJOR.MINOR.PATCH")
         i += 2
     if i >= len(args) or not _UVX_PKG.fullmatch(args[i]):

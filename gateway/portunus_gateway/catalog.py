@@ -1594,6 +1594,9 @@ class CatalogStore:
 
         # tencentcloud: refresh uvx args when the seed pin/with-list changes
         # (e.g. --with mcp==1.1.2 for Server.list_tools compatibility).
+        # Narrow: only the known-stale pin (no --with mcp) so operator argv edits survive.
+        # Server repair is independent of the catalog-row diff (row may already be fixed).
+        _STALE_TENCENT_ARGS = ((), ("mcp-server-cvm==0.1.12",))
         async with self._sf() as s:
             seed = next((a for a in DEFAULT_APPS if a["slug"] == "tencentcloud"), None)
             row = (
@@ -1601,45 +1604,48 @@ class CatalogStore:
             ).scalar_one_or_none()
             if (
                 seed is not None
-                and row is not None
                 and seed.get("connection") == "stdio"
-                and row.connection == "stdio"
                 and isinstance(seed.get("spec"), dict)
-                and isinstance(row.spec, dict)
             ):
                 want_args = list(seed["spec"].get("args") or [])
-                live_args = list((row.spec or {}).get("args") or [])
-                # Narrow: only the known-stale pin (no --with mcp) so operator argv edits survive.
-                if (
-                    want_args
-                    and want_args != live_args
-                    and row.spec.get("command") == seed["spec"].get("command")
-                    and live_args in ([], ["mcp-server-cvm==0.1.12"])
-                ):
-                    try:
-                        row.spec = validate_spec(
-                            "stdio", {**dict(row.spec), "args": want_args}
-                        )
-                    except RegistryError:
-                        log.warning(
-                            "tencentcloud uvx args backfill skipped (invalid)",
-                            exc_info=True,
-                        )
-                    else:
-                        linked = (
-                            await s.execute(
-                                select(Server).where(
-                                    Server.slug == "tencentcloud", Server.kind == "stdio"
-                                )
+                want_command = seed["spec"].get("command")
+                if want_args and want_command:
+                    dirty = False
+                    if (
+                        row is not None
+                        and row.connection == "stdio"
+                        and isinstance(row.spec, dict)
+                        and row.spec.get("command") == want_command
+                        and tuple(row.spec.get("args") or ()) in _STALE_TENCENT_ARGS
+                    ):
+                        try:
+                            row.spec = validate_spec(
+                                "stdio", {**dict(row.spec), "args": want_args}
                             )
-                        ).scalars().all()
-                        for srv in linked:
-                            prev = list(srv.args or [])
-                            if prev == want_args:
-                                continue
-                            srv.args = list(want_args)
-                            await s.execute(delete(Tool).where(Tool.server_id == srv.id))
-                            srv.vault_version = int(srv.vault_version or 0) + 1
+                            dirty = True
+                        except RegistryError:
+                            log.warning(
+                                "tencentcloud uvx args backfill skipped (invalid)",
+                                exc_info=True,
+                            )
+                    linked = (
+                        await s.execute(
+                            select(Server).where(
+                                Server.slug == "tencentcloud", Server.kind == "stdio"
+                            )
+                        )
+                    ).scalars().all()
+                    for srv in linked:
+                        if srv.command != want_command:
+                            continue
+                        prev = tuple(srv.args or ())
+                        if prev not in _STALE_TENCENT_ARGS:
+                            continue
+                        srv.args = list(want_args)
+                        await s.execute(delete(Tool).where(Tool.server_id == srv.id))
+                        srv.vault_version = int(srv.vault_version or 0) + 1
+                        dirty = True
+                    if dirty:
                         await s.commit()
                         log.info("tencentcloud uvx args: aligned to seed pin")
 
