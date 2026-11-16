@@ -158,20 +158,14 @@ function toolsLabel(n: number | undefined | null): string | null {
   return `${n} tool${n === 1 ? "" : "s"}`;
 }
 
-/**
- * Card badge count: prefer discovered tools from GET /tools (includes disabled pending
- * approval) over health `tool_count` (enabled-only). New probes seed tools as disabled,
- * so enabled-only counts wrongly hide the indicator on custom MCPs.
- */
+/** Prefer GET /tools length; fall back to health tool_count when the fetch failed/yielded 0. */
 function resolvedToolCount(
   toolCount: number | undefined,
   serverToolCount: number | null | undefined,
 ): number | null {
-  if (typeof toolCount === "number" && typeof serverToolCount === "number") {
-    return Math.max(toolCount, serverToolCount);
-  }
-  if (typeof toolCount === "number") return toolCount;
+  if (typeof toolCount === "number" && toolCount > 0) return toolCount;
   if (typeof serverToolCount === "number") return serverToolCount;
+  if (typeof toolCount === "number") return toolCount;
   return null;
 }
 

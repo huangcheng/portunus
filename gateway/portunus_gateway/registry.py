@@ -2,17 +2,17 @@
 
 Invariants
 ----------
-* Everything new is **disabled**: servers, and every tool a probe discovers. Only an explicit
-  operator action enables either.
+* New **servers** are created disabled; only an explicit operator enable turns them on.
+* Newly discovered **tools** from probe start enabled. Enablement flips only via
+  ``POST /tools/{id}/enable`` — reprobes update schema/description/annotations but never
+  enablement. Operator-disabled tools stay disabled across unchanged and changed reprobes.
 * The closed argv grammar is validated on create *and again at probe time* (policy can change
   between the two); the runner re-validates before ``exec`` and stays authoritative.
 * Env literals live only in the vault (AES-GCM, AAD-bound to the entry id). They are decrypted
   just-in-time for a probe and never returned by any API or written to the audit log.
 * A probe is an ephemeral runner child in the ``probe`` pool: at most ``max_probes`` at once,
-  one per server, outside the invoke slot FSM and its caps. A re-probe that finds a tool's
-  schema, description, or annotations changed disables that tool again (it must be re-approved);
-  an unchanged tool keeps its operator enablement, including disabled. Tools that disappeared
-  are kept (invoke reports ``tool_missing``).
+  one per server, outside the invoke slot FSM and its caps. Tools that disappeared from the
+  upstream catalog are kept (invoke reports ``tool_missing``).
 """
 
 from __future__ import annotations
