@@ -77,6 +77,15 @@ def test_uvx_trailing(with_which):
     _v("uvx", ["pkg==1.0.0", "--flag"], trailing=["--flag"])
 
 
+def test_uvx_with_pins(with_which):
+    _v("uvx", ["--with", "mcp==1.1.2", "mcp-server-cvm==0.1.12"])
+    _v("uvx", ["--with", "a==1.0.0", "--with", "b==2.0.0", "tool==3.0.0"])
+    with pytest.raises(ArgvError):
+        _v("uvx", ["--with", "mcp", "tool==1.0.0"])
+    with pytest.raises(ArgvError):
+        _v("uvx", ["--with", "mcp==1.1.2"])
+
+
 def test_basename_not_found_in_trusted_path(monkeypatch):
     monkeypatch.setattr(NPX, lambda c, path=None: None)
     with pytest.raises(ArgvError):

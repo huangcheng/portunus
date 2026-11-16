@@ -77,9 +77,19 @@ def _validate_npx(args: list[str], trailing_allowlist: list[str]) -> None:
 
 
 def _validate_uvx(args: list[str], trailing_allowlist: list[str]) -> None:
-    if not args or not _UVX_PKG.fullmatch(args[0]):
+    """``uvx [--with name==semver]… name==semver [trailing…]``.
+
+    Leading ``--with`` pins are for transitive deps (e.g. pin ``mcp`` for an
+    older server package). The primary tool package remains required and pinned.
+    """
+    i = 0
+    while i + 1 < len(args) and args[i] == "--with":
+        if not _UVX_PKG.fullmatch(args[i + 1]):
+            raise _reject("uvx --with requires name==MAJOR.MINOR.PATCH")
+        i += 2
+    if i >= len(args) or not _UVX_PKG.fullmatch(args[i]):
         raise _reject("uvx requires exactly one package pinned as name==MAJOR.MINOR.PATCH")
-    _check_trailing(args[1:], trailing_allowlist)
+    _check_trailing(args[i + 1 :], trailing_allowlist)
 
 
 def validate_stdio_command(

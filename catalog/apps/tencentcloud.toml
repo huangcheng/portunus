@@ -10,7 +10,8 @@ sort_order = 12
 
 [spec]
 command = "uvx"
-args = ["mcp-server-cvm==0.1.12"]
+# mcp-server-cvm 0.1.12 needs the pre-FastMCP Server.list_tools API.
+args = ["--with", "mcp==1.1.2", "mcp-server-cvm==0.1.12"]
 setup_hints = [
   "Create API keys in [CAM → API Keys](https://console.cloud.tencent.com/cam/capi). Package: [mcp-server-cvm](https://github.com/TencentCloudCommunity/mcp-server/tree/main/src/mcp-server-cvm). Default region is ap-guangzhou (override via TENCENTCLOUD_REGION after Connect if needed).",
 ]

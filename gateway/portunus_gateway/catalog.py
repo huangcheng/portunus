@@ -205,7 +205,9 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "sort_order": 12,
         "spec": {
             "command": "uvx",
-            "args": ["mcp-server-cvm==0.1.12"],
+            # mcp-server-cvm 0.1.12 uses the pre-FastMCP Server.list_tools API;
+            # pin mcp so uv does not pull a breaking SDK.
+            "args": ["--with", "mcp==1.1.2", "mcp-server-cvm==0.1.12"],
             "env": [
                 {
                     "name": "TENCENTCLOUD_SECRET_ID",
@@ -1589,6 +1591,58 @@ class CatalogStore:
                     if dirty:
                         await s.commit()
                         log.info("vultr oauth metadata: repaired resource / dropped issuer")
+
+        # tencentcloud: refresh uvx args when the seed pin/with-list changes
+        # (e.g. --with mcp==1.1.2 for Server.list_tools compatibility).
+        async with self._sf() as s:
+            seed = next((a for a in DEFAULT_APPS if a["slug"] == "tencentcloud"), None)
+            row = (
+                await s.execute(select(CatalogApp).where(CatalogApp.slug == "tencentcloud"))
+            ).scalar_one_or_none()
+            if (
+                seed is not None
+                and row is not None
+                and seed.get("connection") == "stdio"
+                and row.connection == "stdio"
+                and isinstance(seed.get("spec"), dict)
+                and isinstance(row.spec, dict)
+            ):
+                want_args = list(seed["spec"].get("args") or [])
+                live_args = list((row.spec or {}).get("args") or [])
+                # Narrow: only the known-stale pin (no --with mcp) so operator argv edits survive.
+                if (
+                    want_args
+                    and want_args != live_args
+                    and row.spec.get("command") == seed["spec"].get("command")
+                    and live_args in ([], ["mcp-server-cvm==0.1.12"])
+                ):
+                    try:
+                        row.spec = validate_spec(
+                            "stdio", {**dict(row.spec), "args": want_args}
+                        )
+                    except RegistryError:
+                        log.warning(
+                            "tencentcloud uvx args backfill skipped (invalid)",
+                            exc_info=True,
+                        )
+                    else:
+                        linked = (
+                            await s.execute(
+                                select(Server).where(
+                                    Server.slug == "tencentcloud", Server.kind == "stdio"
+                                )
+                            )
+                        ).scalars().all()
+                        for srv in linked:
+                            prev = list(srv.args or [])
+                            if prev == want_args:
+                                continue
+                            srv.args = list(want_args)
+                            await s.execute(delete(Tool).where(Tool.server_id == srv.id))
+                            srv.vault_version = int(srv.vault_version or 0) + 1
+                        await s.commit()
+                        log.info("tencentcloud uvx args: aligned to seed pin")
+
         # Idempotent: add new skill_bridge seeds (e.g. weread) on existing deploys,
         # and refresh skill_bridge manifests when the packaged seed grows (tool list).
         # Also insert missing rclone-shim stdio seeds (yandex/drime/…) and http

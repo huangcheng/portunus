@@ -35,10 +35,17 @@ export function validateStdioArgs(command: string, args: string[]): string | nul
     return null;
   }
   if (base === "uvx") {
-    if (!args[0] || !UVX_PKG.test(args[0])) {
+    let i = 0;
+    while (i + 1 < args.length && args[i] === "--with") {
+      if (!UVX_PKG.test(args[i + 1])) {
+        return "uvx --with requires name==MAJOR.MINOR.PATCH";
+      }
+      i += 2;
+    }
+    if (!args[i] || !UVX_PKG.test(args[i])) {
       return "uvx requires exactly one package pinned as name==MAJOR.MINOR.PATCH";
     }
-    const extra = args.slice(1).find((a) => a.startsWith("-"));
+    const extra = args.slice(i + 1).find((a) => a.startsWith("-"));
     if (extra) return `unexpected uvx flag: ${extra}`;
     return null;
   }
@@ -62,7 +69,7 @@ export function stdioArgsHint(command: string): string | null {
     return "npx must be: -y --ignore-scripts name@1.2.3 (exact semver; scripts are blocked)";
   }
   if (base === "uvx") {
-    return "uvx must be: name==1.2.3 (exact semver)";
+    return "uvx must be: [--with dep==1.2.3]… name==1.2.3 (exact semver)";
   }
   return null;
 }

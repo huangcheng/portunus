@@ -44,6 +44,16 @@ describe("validateStdioArgs", () => {
   it("accepts pinned uvx", () => {
     assert.equal(validateStdioArgs("uvx", ["demo==1.2.3"]), null);
   });
+  it("accepts uvx --with pins", () => {
+    assert.equal(
+      validateStdioArgs("uvx", ["--with", "mcp==1.1.2", "mcp-server-cvm==0.1.12"]),
+      null,
+    );
+  });
+  it("rejects bare uvx --with", () => {
+    const err = validateStdioArgs("uvx", ["--with", "mcp==1.1.2"]);
+    assert.match(err ?? "", /exactly one package/);
+  });
   it("rejects trailing uvx flags", () => {
     const err = validateStdioArgs("uvx", ["demo==1.2.3", "--index-url=http://evil"]);
     assert.match(err ?? "", /unexpected uvx flag/);

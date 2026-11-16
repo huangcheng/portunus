@@ -208,6 +208,15 @@ class Spawner:
         exe = resolve_exec(command, policy)
         env = build_env(command, policy, literals)
         extra = drop_privs_kwargs(self.mcp_user) if self.drop_privs else {}
+        # uv ≥0.9 often ships ``uvx`` as a symlink to ``uv``. Some builds no longer
+        # honor argv0-as-uvx, so ``uvx pkg==1.2.3`` is parsed as an unknown uv
+        # subcommand and the child exits before answering. Rewrite to the stable
+        # ``uv tool run`` form when the command is uvx (basename or path) and the
+        # resolved binary is (or links to) ``uv``.
+        real = os.path.realpath(exe)
+        if os.path.basename(command) == "uvx" and os.path.basename(real) == "uv":
+            uv = shutil.which("uv", path=os.pathsep.join(policy.trusted_path)) or real
+            exe, args = uv, ["tool", "run", *args]
         try:
             proc = await asyncio.create_subprocess_exec(
                 exe,
