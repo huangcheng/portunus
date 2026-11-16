@@ -12,5 +12,5 @@ sort_order = 77
 manifest = "flyai.example.yaml"
 secrets = []
 setup_hints = [
-  "Works without a key (CLI default). To use your own key later, set FLYAI_API_KEY on the server env. Skill: [alibaba-flyai/flyai-skill](https://github.com/alibaba-flyai/flyai-skill).",
+  "Connect to enable; the CLI works with its built-in default credentials. Skill: [alibaba-flyai/flyai-skill](https://github.com/alibaba-flyai/flyai-skill).",
 ]

@@ -15,7 +15,6 @@ token_url = "https://oauth.aliyun.com/v1/token"
 registration_endpoint = "https://openapi-mcp.cn-hangzhou.aliyuncs.com/register"
 token_endpoint_auth_method = "none"
 resource = "https://openapi-mcp.cn-hangzhou.aliyuncs.com/mcp"
-issuer = "https://openapi-mcp.cn-hangzhou.aliyuncs.com"
 scopes = [
   "openid",
   "/acs/mcp-server",

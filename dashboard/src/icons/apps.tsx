@@ -90,8 +90,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   aliyun: "aliyun.svg",
   vultr: "vultr.svg",
   vercel: "vercel.svg",
-  tencentcloud: "tencentcloud.svg",
-  flyai: "flyai.svg",
+  // tencentcloud / flyai: no redistributable mark sourced yet — AppBrandMark falls back to initials.
   youdaonote: "youdaonote.png",
   ima: "ima.svg",
   weknora: "weknora.png",

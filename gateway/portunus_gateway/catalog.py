@@ -317,7 +317,6 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "registration_endpoint": "https://openapi-mcp.cn-hangzhou.aliyuncs.com/register",
             "token_endpoint_auth_method": "none",
             "resource": "https://openapi-mcp.cn-hangzhou.aliyuncs.com/mcp",
-            "issuer": "https://openapi-mcp.cn-hangzhou.aliyuncs.com",
             "scopes": ["openid", "/acs/mcp-server"],
             "setup_hints": [
                 (
@@ -349,7 +348,7 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "registration_endpoint": "https://mcp.vultr.com/register",
             "token_endpoint_auth_method": "none",
             "resource": "https://mcp.vultr.com/mcp",
-            "issuer": "https://mcp.vultr.com/",
+            "issuer": "https://mcp.vultr.com",
             "scopes": [],
             "setup_hints": [
                 (
@@ -378,7 +377,7 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "token_url": "https://vercel.com/api/login/oauth/token",
             "registration_endpoint": "https://vercel.com/api/login/oauth/register",
             "token_endpoint_auth_method": "none",
-            "resource": "https://mcp.vercel.com/",
+            "resource": "https://mcp.vercel.com",
             "issuer": "https://vercel.com",
             "scopes": ["openid"],
             "setup_hints": [
@@ -723,9 +722,8 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "secrets": [],
             "setup_hints": [
                 (
-                    "Works without a key (CLI default). To use your own key later, set "
-                    "FLYAI_API_KEY on the server env. Skill: "
-                    "[alibaba-flyai/flyai-skill]"
+                    "Connect to enable; the CLI works with its built-in default credentials. "
+                    "Skill: [alibaba-flyai/flyai-skill]"
                     "(https://github.com/alibaba-flyai/flyai-skill)."
                 ),
             ],

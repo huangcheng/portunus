@@ -646,6 +646,7 @@ th.text-right { text-align: right; }
 .app-card-mark { grid-column: 1; grid-row: 1; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 13px; background: var(--secondary); color: var(--secondary-foreground); font-weight: 650; font-size: 14px; box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--foreground) 4%, transparent); }
 .app-card-mark.is-official { background: transparent; box-shadow: none; }
 .app-card-mark.dropbox.is-official { background: oklch(0.95 0.025 255); }
+.app-card-mark.vercel.is-official { background: oklch(0.96 0 0); }
 .app-card-mark.nutstore.is-official { background: oklch(0.95 0.025 85); }
 .app-card-mark.is-initial {
   --app-initial-hue: 220;
