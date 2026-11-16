@@ -272,7 +272,7 @@ async def test_patch_stdio_env_upserts_vault(real):
     client, _registry, _srv = real
     created = await client.post(
         "/api/servers",
-        json=_body(slug="nutstore", env={"WEBDAV_ROOT_URL": "https://dav.example/dav/"}),
+        json=_body(slug="nutstore-custom", env={"WEBDAV_ROOT_URL": "https://dav.example/dav/"}),
     )
     assert created.status_code == 201, created.text
     sid = created.json()["id"]

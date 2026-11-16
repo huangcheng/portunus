@@ -900,7 +900,8 @@ class Registry:
     # ---- servers -----------------------------------------------------------------
 
     @staticmethod
-    def _catalog_has_slug(slug: str) -> bool:
+    def _static_catalog_has_slug(slug: str) -> bool:
+        """TOML (when loaded) or DEFAULT_APPS — sync, no DB."""
         key = slug.casefold()
         try:
             from .toml_catalog import get_loaded
@@ -909,16 +910,16 @@ class Registry:
         except Exception:  # noqa: BLE001 — catalog optional
             loaded = None
         if loaded is not None:
-            for recipe in loaded.recipes:
-                if recipe.slug.casefold() == key and recipe.enabled:
-                    return True
+            return any(
+                recipe.slug.casefold() == key and recipe.enabled for recipe in loaded.recipes
+            )
         from .catalog import DEFAULT_APPS
 
         return any(str(a.get("slug", "")).casefold() == key for a in DEFAULT_APPS)
 
     @staticmethod
-    def _recipe_url_from_operator(recipe_slug: str) -> bool:
-        """True when the catalog recipe lets the operator set the MCP URL (e.g. WeKnora)."""
+    def _recipe_url_from_operator_static(recipe_slug: str) -> bool | None:
+        """Return True/False from TOML/DEFAULT_APPS, or None if the slug is unknown there."""
         key = recipe_slug.casefold()
         try:
             from .toml_catalog import get_loaded
@@ -931,13 +932,39 @@ class Registry:
                 if recipe.slug.casefold() == key and recipe.enabled:
                     spec = recipe.spec if isinstance(recipe.spec, dict) else {}
                     return bool(spec.get("url_from_operator"))
+            return None
         from .catalog import DEFAULT_APPS
 
         for app in DEFAULT_APPS:
             if str(app.get("slug", "")).casefold() == key:
                 spec = app.get("spec") if isinstance(app.get("spec"), dict) else {}
                 return bool(spec.get("url_from_operator"))
-        return False
+        return None
+
+    async def _catalog_has_slug(self, slug: str) -> bool:
+        if self._static_catalog_has_slug(slug):
+            return True
+        key = slug.casefold()
+        async with self._sf() as s:
+            hit = (
+                await s.execute(select(CatalogApp.id).where(CatalogApp.slug == key))
+            ).scalar_one_or_none()
+        return hit is not None
+
+    async def _recipe_url_from_operator(self, recipe_slug: str) -> bool:
+        """True when the catalog recipe lets the operator set the MCP URL (e.g. WeKnora)."""
+        static = self._recipe_url_from_operator_static(recipe_slug)
+        if static is not None:
+            return static
+        key = recipe_slug.casefold()
+        async with self._sf() as s:
+            row = (
+                await s.execute(select(CatalogApp).where(CatalogApp.slug == key))
+            ).scalar_one_or_none()
+        if row is None:
+            return False
+        spec = row.spec if isinstance(row.spec, dict) else {}
+        return bool(spec.get("url_from_operator"))
 
     async def create_server(
         self,
@@ -962,9 +989,11 @@ class Registry:
             key = recipe_slug.casefold()
             if key != slug.casefold():
                 raise RegistryError(422, "invalid_request", "recipe_slug must match slug")
-            if not self._catalog_has_slug(key):
+            if not await self._catalog_has_slug(key):
                 raise RegistryError(400, "unknown_recipe", "recipe_slug is not a catalog app")
             bound_recipe = key
+        elif await self._catalog_has_slug(slug):
+            raise RegistryError(400, "reserved_slug", "slug is reserved by the catalog")
         regions = validate_regions(preferred_regions or [])
         if not regions:
             # Catalog overseas-egress seeds default to preferred_regions=["overseas"]
@@ -1149,7 +1178,9 @@ class Registry:
                 audit["preferred_regions"] = regions
             if remote_url is not None:
                 # Catalog recipes freeze URL unless the recipe opts into operator-supplied URLs.
-                if not custom and not self._recipe_url_from_operator(server.recipe_slug or ""):
+                if not custom and not await self._recipe_url_from_operator(
+                    server.recipe_slug or ""
+                ):
                     raise RegistryError(
                         422, "invalid_request", "catalog servers freeze url to the recipe"
                     )
