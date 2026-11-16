@@ -345,6 +345,7 @@ export type TemporalWorkflowDetail = {
   stats?: Record<string, unknown> | null;
   tasks?: TemporalWorkflowTask[];
   events: TemporalWorkflowEvent[];
+  history_truncated?: boolean;
   failure?: string | null;
   error?: string;
 };

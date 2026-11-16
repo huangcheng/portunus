@@ -102,3 +102,38 @@ def test_tasks_from_history_failed():
     tasks = tasks_from_history_events(events)
     assert tasks[0]["status"] == "failed"
     assert tasks[0]["error"] == "token expired"
+
+
+def test_tasks_retry_clears_prior_failure():
+    events = [
+        _ev(
+            1,
+            "ActivityTaskScheduled",
+            activity_task_scheduled_event_attributes=SimpleNamespace(
+                activity_id="1",
+                activity_type=SimpleNamespace(name="probe_server"),
+                input=None,
+            ),
+        ),
+        _ev(
+            2,
+            "ActivityTaskFailed",
+            activity_task_failed_event_attributes=SimpleNamespace(
+                scheduled_event_id=1,
+                failure=SimpleNamespace(message="timeout"),
+            ),
+        ),
+        _ev(
+            3,
+            "ActivityTaskStarted",
+            activity_task_started_event_attributes=SimpleNamespace(
+                scheduled_event_id=1,
+                attempt=2,
+            ),
+        ),
+    ]
+    tasks = tasks_from_history_events(events)
+    assert tasks[0]["status"] == "running"
+    assert tasks[0]["attempt"] == 2
+    assert tasks[0]["error"] is None
+    assert tasks[0]["completed_at"] is None

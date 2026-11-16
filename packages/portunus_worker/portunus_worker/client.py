@@ -180,6 +180,15 @@ def humanize_query_status(status: str | None) -> str | None:
     return raw
 
 
+_ACTIVITY_ATTRS = {
+    "activitytaskstarted": "activity_task_started_event_attributes",
+    "activitytaskcompleted": "activity_task_completed_event_attributes",
+    "activitytaskfailed": "activity_task_failed_event_attributes",
+    "activitytasktimedout": "activity_task_timed_out_event_attributes",
+    "activitytaskcanceled": "activity_task_canceled_event_attributes",
+}
+
+
 def tasks_from_history_events(raw_events: list[Any]) -> list[dict[str, Any]]:
     """Collapse activity lifecycle events into operator-facing task rows."""
     by_sched: dict[int, dict[str, Any]] = {}
@@ -209,30 +218,27 @@ def tasks_from_history_events(raw_events: list[Any]) -> list[dict[str, Any]]:
             by_sched[sched_id] = task
             ordered.append(task)
             continue
-        attrs_map = {
-            "activitytaskstarted": "activity_task_started_event_attributes",
-            "activitytaskcompleted": "activity_task_completed_event_attributes",
-            "activitytaskfailed": "activity_task_failed_event_attributes",
-            "activitytasktimedout": "activity_task_timed_out_event_attributes",
-            "activitytaskcanceled": "activity_task_canceled_event_attributes",
-        }
-        matched = next((k for k in attrs_map if k in key), None)
+        matched = next((k for k in _ACTIVITY_ATTRS if k in key), None)
         if not matched:
             continue
-        attrs = getattr(event, attrs_map[matched], None)
+        attrs = getattr(event, _ACTIVITY_ATTRS[matched], None)
         sched_id = int(getattr(attrs, "scheduled_event_id", 0) or 0) if attrs else 0
         task = by_sched.get(sched_id)
         if task is None:
             continue
         if matched == "activitytaskstarted":
+            # A new attempt replaces the previous attempt's terminal state.
             task["status"] = "running"
             task["started_at"] = when
+            task["error"] = None
+            task["completed_at"] = None
             attempt = getattr(attrs, "attempt", None)
             if attempt is not None:
                 task["attempt"] = int(attempt)
         elif matched == "activitytaskcompleted":
             task["status"] = "completed"
             task["completed_at"] = when
+            task["error"] = None
         elif matched == "activitytaskfailed":
             task["status"] = "failed"
             task["completed_at"] = when
@@ -627,6 +633,7 @@ async def describe_workflow(
 
     events: list[dict[str, Any]] = []
     tasks: list[dict[str, Any]] = []
+    history_truncated = False
     try:
         from collections import deque
 
@@ -634,12 +641,22 @@ async def describe_workflow(
         # for the raw history panel (long-lived loops can have large histories).
         recent_raw: deque[Any] = deque(maxlen=max(history_limit, 1))
         all_raw: list[Any] = []
+        total_events = 0
         async for event in handle.fetch_history_events():
+            total_events += 1
             recent_raw.append(event)
             all_raw.append(event)
-            # Cap memory on pathological histories; task rollup still uses what we have.
+            # Cap memory on pathological histories without splitting an activity
+            # lifecycle (keep from a Scheduled event boundary when trimming).
             if len(all_raw) > 5000:
-                all_raw = all_raw[-4000:]
+                cut = len(all_raw) - 4000
+                while cut < len(all_raw):
+                    et = getattr(all_raw[cut], "event_type", None)
+                    if "activitytaskscheduled" in _norm_event_key(_event_type_label(et)):
+                        break
+                    cut += 1
+                all_raw = all_raw[cut:]
+        history_truncated = total_events > len(recent_raw)
         for event in recent_raw:
             et = getattr(event, "event_type", None)
             label = _event_type_label(et)
@@ -663,6 +680,7 @@ async def describe_workflow(
             "stats": stats,
             "tasks": tasks,
             "events": events,
+            "history_truncated": history_truncated,
             "error": str(e),
         }
 
@@ -691,5 +709,6 @@ async def describe_workflow(
         "stats": stats,
         "tasks": tasks,
         "events": events,
+        "history_truncated": history_truncated,
         "failure": failure,
     }

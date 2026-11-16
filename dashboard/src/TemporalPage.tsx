@@ -16,16 +16,9 @@ const PAGE_SIZE = 50;
 function statusKind(status: string | null | undefined): "ok" | "warn" | "bad" | "" {
   if (!status) return "";
   const u = status.toUpperCase();
-  if (u.includes("COMPLETED") || u.includes("RUNNING") || u === "SCHEDULED") return "ok";
-  if (
-    u.includes("FAILED") ||
-    u.includes("TERMINATED") ||
-    u.includes("TIMED") ||
-    u === "TIMED_OUT"
-  ) {
-    return "bad";
-  }
-  if (u.includes("CANCELED") || u.includes("CONTINUED") || u === "CANCELED") return "warn";
+  if (u.includes("COMPLETED") || u.includes("RUNNING")) return "ok";
+  if (u.includes("FAILED") || u.includes("TERMINATED") || u.includes("TIMED")) return "bad";
+  if (u.includes("CANCELED") || u.includes("CONTINUED")) return "warn";
   return "";
 }
 
@@ -43,6 +36,15 @@ function taskStatusKind(status: string | null | undefined): "ok" | "warn" | "bad
   return "";
 }
 
+function taskStatusLabel(status: string | null | undefined): string {
+  if (!status) return "Unknown";
+  return status
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 function taskWhen(task: TemporalWorkflowTask): string | null {
   return task.completed_at || task.started_at || task.scheduled_at;
 }
@@ -50,11 +52,11 @@ function taskWhen(task: TemporalWorkflowTask): string | null {
 function statsLine(stats: Record<string, unknown> | null | undefined): string | null {
   if (!stats) return null;
   const bits: string[] = [];
-  if (typeof stats.last_due === "number") bits.push(`last due ${stats.last_due}`);
-  if (typeof stats.last_failed === "number") bits.push(`failed ${stats.last_failed}`);
+  if (typeof stats.last_due === "number") bits.push(`${stats.last_due} due`);
+  if (typeof stats.last_failed === "number") bits.push(`${stats.last_failed} failed`);
   if (typeof stats.paused === "boolean") bits.push(stats.paused ? "paused" : "active");
   if (Array.isArray(stats.priority) && stats.priority.length) {
-    bits.push(`priority ${stats.priority.length}`);
+    bits.push(`${stats.priority.length} priority`);
   }
   return bits.length ? bits.join(" · ") : null;
 }
@@ -422,9 +424,12 @@ export function TemporalPage() {
                     <p className="temporal-phase-text">
                       {selected.phase || selected.query_status || "No live phase reported"}
                     </p>
-                    {statsLine(selected.stats) ? (
-                      <p className="muted temporal-phase-stats">{statsLine(selected.stats)}</p>
-                    ) : null}
+                    {(() => {
+                      const phaseStats = statsLine(selected.stats);
+                      return phaseStats ? (
+                        <p className="muted temporal-phase-stats">{phaseStats}</p>
+                      ) : null;
+                    })()}
                     {selected.query_status && selected.phase !== selected.query_status ? (
                       <p className="muted mono temporal-phase-raw" title="Raw workflow status query">
                         {selected.query_status}
@@ -462,7 +467,7 @@ export function TemporalPage() {
                     <p className="section-kicker">Tasks</p>
                     <p className="muted temporal-tasks-hint">
                       Recent activities in this run (latest {selected.tasks?.length ?? 0}
-                      {selected.events.length >= 80 ? ", truncated history window" : ""}).
+                      {selected.history_truncated ? ", history window truncated" : ""}).
                     </p>
                     {(selected.tasks?.length ?? 0) === 0 ? (
                       <p className="muted">No activity tasks in the loaded history window.</p>
@@ -481,13 +486,15 @@ export function TemporalPage() {
                             {[...(selected.tasks ?? [])].reverse().map((task) => (
                               <tr key={`${task.scheduled_event_id}:${task.activity_id}`}>
                                 <td data-label="Activity">
-                                  <strong className="mono">{task.name}</strong>
-                                  {task.attempt && task.attempt > 1 ? (
-                                    <span className="muted"> · attempt {task.attempt}</span>
-                                  ) : null}
-                                  {task.error ? (
-                                    <div className="temporal-task-error">{task.error}</div>
-                                  ) : null}
+                                  <div className="temporal-task-activity">
+                                    <strong className="mono">{task.name}</strong>
+                                    {task.attempt && task.attempt > 1 ? (
+                                      <span className="muted"> · attempt {task.attempt}</span>
+                                    ) : null}
+                                    {task.error ? (
+                                      <div className="temporal-task-error">{task.error}</div>
+                                    ) : null}
+                                  </div>
                                 </td>
                                 <td data-label="Input" className="mono">
                                   {task.input ?? "—"}
@@ -495,7 +502,7 @@ export function TemporalPage() {
                                 <td data-label="Status">
                                   <span className={`health on-card ${taskStatusKind(task.status)}`}>
                                     <span className="dot" aria-hidden />
-                                    {statusLabel(task.status)}
+                                    {taskStatusLabel(task.status)}
                                   </span>
                                 </td>
                                 <td data-label="When">{fmtTimestamp(taskWhen(task))}</td>
