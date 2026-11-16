@@ -1450,6 +1450,9 @@ class CatalogStore:
                         srv.has_oauth_refresh = False
                         srv.token_expires_at = None
                         srv.enabled = False
+                        # Transport changed: drop cached remote tools so agents do
+                        # not discover/invoke tools the new stdio child does not expose.
+                        await s.execute(delete(Tool).where(Tool.server_id == srv.id))
                     srv.vault_version = int(srv.vault_version or 0) + 1
                 migrated += 1
             if migrated:
