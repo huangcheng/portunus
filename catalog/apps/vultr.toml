@@ -14,8 +14,11 @@ authorize_url = "https://mcp.vultr.com/authorize"
 token_url = "https://mcp.vultr.com/token"
 registration_endpoint = "https://mcp.vultr.com/register"
 token_endpoint_auth_method = "none"
-resource = "https://mcp.vultr.com/mcp"
-issuer = "https://mcp.vultr.com"
+# RFC 8707 resource must match Vultr's protected-resource metadata exactly
+# (trailing slash, no /mcp). Sending …/mcp makes authorize return server_error.
+resource = "https://mcp.vultr.com/"
+# AS metadata issuer identifier (exact RFC 9207 iss match).
+issuer = "https://mcp.vultr.com/"
 scopes = []
 setup_hints = [
   "Org admin must enable MCP and attach the Use MCP policy. Docs: [Vultr MCP overview](https://docs.vultr.com/reference/mcp-server/overview).",

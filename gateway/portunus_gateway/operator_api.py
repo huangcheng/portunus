@@ -484,6 +484,7 @@ async def _oauth_callback_result(
     state: str,
     error: str,
     iss: str = "",
+    error_description: str = "",
 ) -> Response:
     """Shared GET/POST callback handler (query + form_post response modes)."""
     if _is_prefetch(request):
@@ -496,9 +497,10 @@ async def _oauth_callback_result(
         pending = store.get(state)
     except OAuthError:
         pending = None
-    # RFC 9207 §2.4: validate the response issuer before trusting anything else in it —
-    # on mismatch the code must not be exchanged and the error params must not be shown.
-    if pending is not None and not iss_matches(iss, pending):
+    # RFC 9207 §2.4: validate iss before trusting the response. Some ASes omit iss on
+    # error-only redirects; when iss is absent and there is no code, surface the AS
+    # error (state still binds the flow). A present but wrong iss still masks errors.
+    if pending is not None and (iss or code) and not iss_matches(iss, pending):
         logger.warning(
             "oauth callback iss mismatch server=%s expected=%r got=%r",
             pending.server_id,
@@ -509,7 +511,10 @@ async def _oauth_callback_result(
         return _oauth_fail_html("authorization response issuer (iss) mismatch", status=400)
     if error:
         store.discard(state)
-        return _oauth_fail_html(f"authorization server: {error}", status=400)
+        detail = error
+        if error_description:
+            detail = f"{error}: {error_description}"
+        return _oauth_fail_html(f"authorization server: {detail}", status=400)
     if pending is None:
         # Public unauthenticated endpoint: this warning is the only probe/replay signal.
         logger.warning("oauth callback with unknown or expired state")
@@ -563,9 +568,17 @@ async def oauth_callback_get(
     state: str = "",
     error: str = "",
     iss: str = "",
+    error_description: str = "",
 ) -> Response:
     """Browser redirect target after the upstream IdP (``response_mode=query``)."""
-    return await _oauth_callback_result(request, code=code, state=state, error=error, iss=iss)
+    return await _oauth_callback_result(
+        request,
+        code=code,
+        state=state,
+        error=error,
+        iss=iss,
+        error_description=error_description,
+    )
 
 
 @router.post("/oauth/callback")
@@ -578,6 +591,7 @@ async def oauth_callback_post(request: Request) -> Response:
         state=str(form.get("state") or ""),
         error=str(form.get("error") or ""),
         iss=str(form.get("iss") or ""),
+        error_description=str(form.get("error_description") or ""),
     )
 
 
