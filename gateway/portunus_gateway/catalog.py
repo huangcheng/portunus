@@ -1525,52 +1525,69 @@ class CatalogStore:
                 await s.commit()
                 log.info("gdrive migration: switched catalog row to Drive MCP oauth")
 
-        # vultr: align oauth resource/issuer with AS + protected-resource metadata.
-        # Prior seed used …/mcp as resource (authorize → server_error) and issuer
-        # without the trailing slash AS metadata advertises.
+        # vultr: repair known-bad oauth resource/issuer from the first seed.
+        # …/mcp as resource makes Vultr authorize return server_error; issuer
+        # without the trailing slash fails exact RFC 9207 iss match. Only those
+        # stale values are rewritten so intentional customizations are left alone.
+        # Server.oauth is repaired independently of the catalog row (authorize
+        # reads the server row, not CatalogApp.spec).
+        _STALE_VULTR_RESOURCE = "https://mcp.vultr.com/mcp"
+        _STALE_VULTR_ISSUER = "https://mcp.vultr.com"
         async with self._sf() as s:
             seed = next((a for a in DEFAULT_APPS if a["slug"] == "vultr"), None)
-            row = (
-                await s.execute(select(CatalogApp).where(CatalogApp.slug == "vultr"))
-            ).scalar_one_or_none()
             if (
                 seed is not None
-                and row is not None
                 and seed.get("connection") == "oauth"
-                and row.connection == "oauth"
-                and isinstance(row.spec, dict)
                 and isinstance(seed.get("spec"), dict)
             ):
                 want_resource = seed["spec"].get("resource")
                 want_issuer = seed["spec"].get("issuer")
-                live = dict(row.spec or {})
-                needs = live.get("resource") != want_resource or live.get("issuer") != want_issuer
-                if needs and want_resource and want_issuer:
-                    try:
-                        row.spec = validate_spec(
-                            "oauth", {**live, "resource": want_resource, "issuer": want_issuer}
-                        )
-                    except RegistryError:
-                        log.warning("vultr oauth metadata backfill skipped (invalid)", exc_info=True)
-                    else:
-                        linked = (
-                            await s.execute(select(Server).where(Server.slug == "vultr"))
-                        ).scalars().all()
-                        for srv in linked:
-                            if srv.kind != "remote" or not isinstance(srv.oauth, dict):
-                                continue
-                            oauth = dict(srv.oauth)
-                            if (
-                                oauth.get("resource") == want_resource
-                                and oauth.get("issuer") == want_issuer
-                            ):
-                                continue
+                if want_resource and want_issuer:
+                    dirty = False
+                    row = (
+                        await s.execute(select(CatalogApp).where(CatalogApp.slug == "vultr"))
+                    ).scalar_one_or_none()
+                    if (
+                        row is not None
+                        and row.connection == "oauth"
+                        and isinstance(row.spec, dict)
+                    ):
+                        live = dict(row.spec)
+                        patched_spec = dict(live)
+                        if patched_spec.get("resource") == _STALE_VULTR_RESOURCE:
+                            patched_spec["resource"] = want_resource
+                        if patched_spec.get("issuer") == _STALE_VULTR_ISSUER:
+                            patched_spec["issuer"] = want_issuer
+                        if patched_spec != live:
+                            try:
+                                row.spec = validate_spec("oauth", patched_spec)
+                                dirty = True
+                            except RegistryError:
+                                log.warning(
+                                    "vultr catalog oauth metadata backfill skipped (invalid)",
+                                    exc_info=True,
+                                )
+                    linked = (
+                        await s.execute(select(Server).where(Server.slug == "vultr"))
+                    ).scalars().all()
+                    for srv in linked:
+                        if srv.kind != "remote" or not isinstance(srv.oauth, dict):
+                            continue
+                        oauth = dict(srv.oauth)
+                        patched = False
+                        if oauth.get("resource") == _STALE_VULTR_RESOURCE:
                             oauth["resource"] = want_resource
+                            patched = True
+                        if oauth.get("issuer") == _STALE_VULTR_ISSUER:
                             oauth["issuer"] = want_issuer
+                            patched = True
+                        if patched:
                             # Keep DCR client_id if already registered; operator re-Authorize.
                             srv.oauth = oauth
+                            dirty = True
+                    if dirty:
                         await s.commit()
-                        log.info("vultr oauth metadata: resource/issuer aligned to AS")
+                        log.info("vultr oauth metadata: repaired stale resource/issuer")
 
         # Idempotent: add new skill_bridge seeds (e.g. weread) on existing deploys,
         # and refresh skill_bridge manifests when the packaged seed grows (tool list).
