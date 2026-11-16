@@ -40,7 +40,8 @@ def upgrade() -> None:
             SELECT 1
             FROM audit_events AS a
             WHERE a.action = 'tool.disable'
-              AND a.target = t.id::text
+              AND lower(replace(a.target, '-', ''))
+                  = lower(replace(CAST(t.id AS TEXT), '-', ''))
           )
         """
     )
