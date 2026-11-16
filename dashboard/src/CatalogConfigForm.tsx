@@ -158,8 +158,12 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
   }
 
   function withSetupHints(out: Record<string, unknown>): Record<string, unknown> {
-    // Always round-trip: empty textarea clears hints; typing newlines stays editable.
-    out.setup_hints = setupHintsFromText();
+    // Only persist the key when there are hints or the entry already had them, so a
+    // dashboard save does not inject setup_hints: [] (which blocks gateway seed backfills).
+    const hints = setupHintsFromText();
+    if (hints.length > 0 || Array.isArray(initial?.spec?.setup_hints)) {
+      out.setup_hints = hints;
+    }
     return out;
   }
 

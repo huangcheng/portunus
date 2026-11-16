@@ -899,6 +899,46 @@ class Registry:
 
     # ---- servers -----------------------------------------------------------------
 
+    @staticmethod
+    def _catalog_has_slug(slug: str) -> bool:
+        key = slug.casefold()
+        try:
+            from .toml_catalog import get_loaded
+
+            loaded = get_loaded()
+        except Exception:  # noqa: BLE001 — catalog optional
+            loaded = None
+        if loaded is not None:
+            for recipe in loaded.recipes:
+                if recipe.slug.casefold() == key and recipe.enabled:
+                    return True
+        from .catalog import DEFAULT_APPS
+
+        return any(str(a.get("slug", "")).casefold() == key for a in DEFAULT_APPS)
+
+    @staticmethod
+    def _recipe_url_from_operator(recipe_slug: str) -> bool:
+        """True when the catalog recipe lets the operator set the MCP URL (e.g. WeKnora)."""
+        key = recipe_slug.casefold()
+        try:
+            from .toml_catalog import get_loaded
+
+            loaded = get_loaded()
+        except Exception:  # noqa: BLE001
+            loaded = None
+        if loaded is not None:
+            for recipe in loaded.recipes:
+                if recipe.slug.casefold() == key and recipe.enabled:
+                    spec = recipe.spec if isinstance(recipe.spec, dict) else {}
+                    return bool(spec.get("url_from_operator"))
+        from .catalog import DEFAULT_APPS
+
+        for app in DEFAULT_APPS:
+            if str(app.get("slug", "")).casefold() == key:
+                spec = app.get("spec") if isinstance(app.get("spec"), dict) else {}
+                return bool(spec.get("url_from_operator"))
+        return False
+
     async def create_server(
         self,
         *,
@@ -913,9 +953,18 @@ class Registry:
         url: str | None = None,
         oauth: dict[str, Any] | None = None,
         oauth_client_secret: str | None = None,
+        recipe_slug: str | None = None,
     ) -> dict[str, Any]:
         if kind not in ("stdio", "remote"):
             raise RegistryError(400, "unsupported", f"server kind {kind!r} is not supported")
+        bound_recipe: str | None = None
+        if recipe_slug is not None:
+            key = recipe_slug.casefold()
+            if key != slug.casefold():
+                raise RegistryError(422, "invalid_request", "recipe_slug must match slug")
+            if not self._catalog_has_slug(key):
+                raise RegistryError(400, "unknown_recipe", "recipe_slug is not a catalog app")
+            bound_recipe = key
         regions = validate_regions(preferred_regions or [])
         if not regions:
             # Catalog overseas-egress seeds default to preferred_regions=["overseas"]
@@ -942,6 +991,7 @@ class Registry:
                 command=command,
                 args=list(args),
                 preferred_regions=regions,
+                recipe_slug=bound_recipe,
                 vault_version=1 if secrets else 0,
             )
         else:
@@ -963,17 +1013,12 @@ class Registry:
                 url=remote_url,
                 oauth=oauth_cfg,
                 preferred_regions=regions,
+                recipe_slug=bound_recipe,
                 vault_version=1 if secrets else 0,
             )
         entries = [self._seal_entry(server.id, key, value) for key, value in secrets.items()]
         async with self._sf() as s:
             try:
-                # Bind catalog Connect to the recipe so slug/argv freezes work.
-                catalog_row = (
-                    await s.execute(select(CatalogApp.id).where(CatalogApp.slug == slug.casefold()))
-                ).scalar_one_or_none()
-                if catalog_row is not None:
-                    server.recipe_slug = slug.casefold()
                 s.add(server)
                 await s.flush()  # server row first: vault entries reference it
                 s.add_all(entries)
@@ -1103,7 +1148,8 @@ class Registry:
                 server.preferred_regions = regions
                 audit["preferred_regions"] = regions
             if remote_url is not None:
-                if not custom:
+                # Catalog recipes freeze URL unless the recipe opts into operator-supplied URLs.
+                if not custom and not self._recipe_url_from_operator(server.recipe_slug or ""):
                     raise RegistryError(
                         422, "invalid_request", "catalog servers freeze url to the recipe"
                     )

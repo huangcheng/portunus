@@ -31,7 +31,7 @@ def _load_skill_md() -> str | None:
         if not _SKILL_MD.is_file():
             return None
         return _SKILL_MD.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
 
 

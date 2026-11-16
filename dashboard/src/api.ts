@@ -230,6 +230,8 @@ export type CreateServerBody = {
   preferred_regions?: string[];
   oauth?: OAuthBody | null;
   oauth_client_secret?: string | null;
+  /** Catalog Connect only — freezes slug/argv to the recipe. */
+  recipe_slug?: string;
 };
 
 export type FleetResponse = {

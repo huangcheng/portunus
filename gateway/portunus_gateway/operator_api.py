@@ -130,6 +130,8 @@ class CreateServer(BaseModel):
     preferred_regions: list[str] = Field(default_factory=list)
     oauth: dict[str, Any] | None = None
     oauth_client_secret: str | None = Field(default=None, max_length=4096)
+    # Catalog Connect only: must equal slug; freezes identity to the recipe.
+    recipe_slug: str | None = Field(default=None, pattern=SLUG_PATTERN)
 
 
 class UpdateServer(BaseModel):
@@ -295,6 +297,7 @@ async def create_server(
         url=body.url,
         oauth=body.oauth,
         oauth_client_secret=body.oauth_client_secret,
+        recipe_slug=body.recipe_slug,
     )
     await authz.ensure_full_grants()
     return view

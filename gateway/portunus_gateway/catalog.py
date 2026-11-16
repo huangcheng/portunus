@@ -1279,17 +1279,14 @@ class CatalogStore:
         # Normalize legacy host-specific overseas-* tags to portable egress tags.
         # Do NOT refill empty preferred_regions: empty means operator chose "Any"
         # (create_server already applies catalog defaults when regions are omitted).
+        # recipe_slug is set only by explicit catalog Connect — never inferred by slug.
         regions_fixed = 0
-        recipe_bound = 0
         affinity_slugs = sorted(OVERSEAS_EGRESS_SLUGS | DOMESTIC_EGRESS_SLUGS)
         async with self._sf() as s:
             linked = (
                 await s.execute(select(Server).where(Server.slug.in_(affinity_slugs)))
             ).scalars().all()
             for srv in linked:
-                if srv.recipe_slug is None:
-                    srv.recipe_slug = srv.slug.casefold()
-                    recipe_bound += 1
                 hint = preferred_regions_for_slug(srv.slug)
                 if not hint:
                     continue
@@ -1300,26 +1297,11 @@ class CatalogStore:
                     continue
                 srv.preferred_regions = hint
                 regions_fixed += 1
-            # Also bind recipe_slug for any other catalog-linked rows (non-affinity).
-            unbound = (
-                await s.execute(
-                    select(Server).where(
-                        Server.recipe_slug.is_(None),
-                        Server.slug.in_(select(CatalogApp.slug)),
-                    )
-                )
-            ).scalars().all()
-            for srv in unbound:
-                srv.recipe_slug = srv.slug.casefold()
-                recipe_bound += 1
-            if regions_fixed or recipe_bound:
+            if regions_fixed:
                 await s.commit()
-                if regions_fixed:
-                    log.info(
-                        "egress preferred_regions backfill: %d server(s)", regions_fixed
-                    )
-                if recipe_bound:
-                    log.info("recipe_slug backfill: %d server(s)", recipe_bound)
+                log.info(
+                    "egress preferred_regions backfill: %d server(s)", regions_fixed
+                )
 
         return inserted + added + refreshed
 

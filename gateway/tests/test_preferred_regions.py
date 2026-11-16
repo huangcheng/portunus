@@ -262,6 +262,55 @@ async def test_update_catalog_server_rejects_slug_and_argv(http, db):
     assert ok.json()["slug"] == "catalogish"
 
 
+async def test_create_with_recipe_slug_binds(http):
+    r = await http.post(
+        "/api/servers",
+        json={
+            "name": "Raindrop",
+            "slug": "raindrop",
+            "kind": "remote",
+            "url": "https://api.raindrop.io/rest/v2/ai/mcp",
+            "recipe_slug": "raindrop",
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["recipe_slug"] == "raindrop"
+    # Custom create must not auto-bind just because the slug looks catalog-like.
+    custom = await http.post(
+        "/api/servers",
+        json={
+            "name": "Custom raindrop-ish",
+            "slug": "raindrop-custom",
+            "kind": "remote",
+            "url": "https://example.com/mcp",
+        },
+    )
+    assert custom.status_code == 201, custom.text
+    assert custom.json()["recipe_slug"] is None
+
+
+async def test_url_from_operator_recipe_allows_url_patch(http, db):
+    r = await http.post(
+        "/api/servers",
+        json={
+            "name": "WeKnora",
+            "slug": "weknora",
+            "kind": "remote",
+            "url": "https://example.com/mcp/old",
+            "recipe_slug": "weknora",
+        },
+    )
+    assert r.status_code == 201, r.text
+    sid = r.json()["id"]
+    assert r.json()["recipe_slug"] == "weknora"
+    patched = await http.patch(
+        f"/api/servers/{sid}",
+        json={"url": "https://example.com/mcp/new"},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["url"] == "https://example.com/mcp/new"
+
+
 # ---- probe ----------------------------------------------------------------------------
 
 

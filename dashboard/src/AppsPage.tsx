@@ -38,7 +38,12 @@ import {
   regionsToChoice,
   type RoutingChoice,
 } from "./routingPreference";
-import { prepareStdioArgv, stdioArgsHint } from "./stdioArgv";
+import {
+  normalizeStdioArgs,
+  prepareStdioArgv,
+  stdioArgsHint,
+  validateStdioArgs,
+} from "./stdioArgv";
 
 type Tab = "all" | "connected";
 
@@ -789,6 +794,7 @@ function OAuthManagePanel({
       url: specString(app.spec, "url"),
       oauth,
       oauth_client_secret: secret,
+      recipe_slug: app.slug,
     });
     setCurrent(created);
     return created;
@@ -1026,6 +1032,7 @@ function SkillBridgeManagePanel({
         ? args
         : ["-m", "portunus_skill_bridge", "--manifest-env", "PORTUNUS_MANIFEST"],
       env: { ...envDefaults },
+      recipe_slug: app.slug,
     });
     setCurrent(created);
     return created;
@@ -1227,6 +1234,7 @@ function SkillBridgeManagePanel({
             ? args
             : ["-m", "portunus_skill_bridge", "--manifest-env", "PORTUNUS_MANIFEST"],
           env: { ...envDefaults, ...env },
+          recipe_slug: app.slug,
         });
         setCurrent(created);
       }
@@ -1474,6 +1482,7 @@ function WebDavManagePanel({
       command: "npx",
       args: webdavArgs.length ? webdavArgs : [...WEBDAV_MCP_ARGS],
       env,
+      recipe_slug: app.slug,
     });
     setCurrent(created);
     return created;
@@ -1666,6 +1675,7 @@ function StdioManagePanel({
           command,
           args,
           env,
+          recipe_slug: app.slug,
         });
         setCurrent(created);
       }
@@ -1773,6 +1783,7 @@ function HttpManagePanel({
       slug: app.slug,
       kind: "remote",
       url,
+      recipe_slug: app.slug,
     });
     setCurrent(created);
     return created;
@@ -1960,12 +1971,16 @@ function GenericManagePanel({
         const cmdChanged = cmd !== (current.command || "");
         // Only re-parse argv text when the operator edited it — join/split is lossy
         // for args that contain whitespace.
-        if (argsDirty || cmdChanged) {
-          const source = argsDirty ? args : (current.args ?? []).join(" ");
-          const { argv, error: argvError } = prepareStdioArgv(cmd, source);
+        if (argsDirty) {
+          const { argv, error: argvError } = prepareStdioArgv(cmd, args);
           if (argvError) throw new Error(argvError);
           setArgs(argv.join(" "));
-          setArgsDirty(false);
+          patch.command = cmd;
+          patch.args = argv;
+        } else if (cmdChanged) {
+          const argv = normalizeStdioArgs(cmd, current.args ?? []);
+          const argvError = validateStdioArgs(cmd, argv);
+          if (argvError) throw new Error(argvError);
           patch.command = cmd;
           patch.args = argv;
         }
