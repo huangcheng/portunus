@@ -34,30 +34,217 @@ def _event_type_label(et: Any) -> str:
     return raw
 
 
+def _norm_event_key(label: str) -> str:
+    return label.lower().replace("_", "")
+
+
+def _payload_preview(payloads: Any, *, limit: int = 120) -> str | None:
+    """Decode Temporal payloads into a short operator-facing string."""
+    if payloads is None:
+        return None
+    # History attrs expose a Payloads message; the converter wants the repeated field.
+    if hasattr(payloads, "payloads"):
+        payloads = list(payloads.payloads)
+    if not payloads:
+        return None
+    try:
+        from temporalio.converter import DataConverter
+
+        values = DataConverter.default.payload_converter.from_payloads(payloads)
+    except Exception:  # noqa: BLE001
+        return None
+    if not values:
+        return None
+    if len(values) == 1:
+        raw = values[0]
+    else:
+        raw = values
+    try:
+        text = raw if isinstance(raw, str) else repr(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    text = " ".join(str(text).split())
+    if len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
+
+
+def _failure_message(failure: Any) -> str | None:
+    if failure is None:
+        return None
+    # Prefer the protobuf/API message field (sync). decode_failure is async and
+    # not worth awaiting on the history walk path.
+    msg = getattr(failure, "message", None)
+    if msg:
+        return " ".join(str(msg).split())[:240] or None
+    try:
+        return " ".join(str(failure).split())[:240] or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _event_summary(event: Any, label: str) -> str | None:
     """Short secondary line: signal name, activity type, timer id, etc."""
-    lower = label.lower()
+    key = _norm_event_key(label)
     try:
-        if "signaled" in lower:
+        if "signaled" in key:
             attrs = getattr(event, "workflow_execution_signaled_event_attributes", None)
             name = getattr(attrs, "signal_name", None) if attrs else None
             return f"signal {name}" if name else None
-        if "activitytaskscheduled" in lower.replace("_", ""):
+        if "activitytaskscheduled" in key:
             attrs = getattr(event, "activity_task_scheduled_event_attributes", None)
             at = getattr(attrs, "activity_type", None) if attrs else None
             name = getattr(at, "name", None) if at else None
+            preview = _payload_preview(getattr(attrs, "input", None)) if attrs else None
+            if name and preview:
+                return f"{name} · {preview}"
             return name
-        if "timerstarted" in lower.replace("_", ""):
+        if "activitytaskstarted" in key:
+            attrs = getattr(event, "activity_task_started_event_attributes", None)
+            attempt = getattr(attrs, "attempt", None) if attrs else None
+            return f"attempt {attempt}" if attempt else "started"
+        if "activitytaskcompleted" in key:
+            return "completed"
+        if "activitytaskfailed" in key:
+            attrs = getattr(event, "activity_task_failed_event_attributes", None)
+            return _failure_message(getattr(attrs, "failure", None) if attrs else None) or "failed"
+        if "activitytasktimedout" in key:
+            return "timed out"
+        if "timerstarted" in key:
             attrs = getattr(event, "timer_started_event_attributes", None)
             tid = getattr(attrs, "timer_id", None) if attrs else None
             return f"timer {tid}" if tid else None
-        if "markerrecorded" in lower.replace("_", ""):
+        if "markerrecorded" in key:
             attrs = getattr(event, "marker_recorded_event_attributes", None)
             name = getattr(attrs, "marker_name", None) if attrs else None
             return name
+        if "workflowexecutioncompleted" in key:
+            return "workflow completed"
+        if "workflowexecutionfailed" in key:
+            attrs = getattr(event, "workflow_execution_failed_event_attributes", None)
+            return _failure_message(getattr(attrs, "failure", None) if attrs else None)
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+def humanize_query_status(status: str | None) -> str | None:
+    """Turn workflow query status strings into a short operator sentence."""
+    if not status:
+        return None
+    raw = status.strip()
+    if not raw:
+        return None
+    if raw == "init":
+        return "Starting"
+    if raw == "scanning":
+        return "Scanning for due work"
+    if raw == "paused":
+        return "Paused"
+    if raw == "probing":
+        return "Probing server"
+    if raw == "enabling":
+        return "Enabling server and tools"
+    if raw == "await_oauth":
+        return "Waiting for OAuth"
+    if raw == "auth_required":
+        return "Stopped — auth required"
+    if raw == "starting_children":
+        return "Starting child workflows"
+    if raw == "done":
+        return "Finished"
+    if raw.startswith("probing:"):
+        return f"Probing {raw.split(':', 1)[1]}"
+    if raw.startswith("refreshing:"):
+        return f"Refreshing OAuth for {raw.split(':', 1)[1]}"
+    if raw.startswith("sleep:"):
+        # sleep:300 due=2 fail=0
+        rest = raw[len("sleep:") :]
+        parts = rest.split()
+        seconds = parts[0] if parts else "?"
+        due = fail = None
+        for part in parts[1:]:
+            if part.startswith("due="):
+                due = part[4:]
+            elif part.startswith("fail="):
+                fail = part[5:]
+        out = f"Sleeping {seconds}s until next wave"
+        bits = []
+        if due is not None:
+            bits.append(f"{due} due")
+        if fail is not None:
+            bits.append(f"{fail} failed")
+        if bits:
+            out += " · last wave: " + ", ".join(bits)
+        return out
+    return raw
+
+
+def tasks_from_history_events(raw_events: list[Any]) -> list[dict[str, Any]]:
+    """Collapse activity lifecycle events into operator-facing task rows."""
+    by_sched: dict[int, dict[str, Any]] = {}
+    ordered: list[dict[str, Any]] = []
+    for event in raw_events:
+        et = getattr(event, "event_type", None)
+        label = _event_type_label(et)
+        key = _norm_event_key(label)
+        when = _dt(getattr(event, "event_time", None))
+        if "activitytaskscheduled" in key:
+            attrs = getattr(event, "activity_task_scheduled_event_attributes", None)
+            at = getattr(attrs, "activity_type", None) if attrs else None
+            name = getattr(at, "name", None) if at else None
+            sched_id = int(getattr(event, "event_id", 0) or 0)
+            task = {
+                "scheduled_event_id": sched_id,
+                "activity_id": getattr(attrs, "activity_id", None) if attrs else None,
+                "name": name or "activity",
+                "status": "scheduled",
+                "attempt": None,
+                "input": _payload_preview(getattr(attrs, "input", None)) if attrs else None,
+                "error": None,
+                "scheduled_at": when,
+                "started_at": None,
+                "completed_at": None,
+            }
+            by_sched[sched_id] = task
+            ordered.append(task)
+            continue
+        attrs_map = {
+            "activitytaskstarted": "activity_task_started_event_attributes",
+            "activitytaskcompleted": "activity_task_completed_event_attributes",
+            "activitytaskfailed": "activity_task_failed_event_attributes",
+            "activitytasktimedout": "activity_task_timed_out_event_attributes",
+            "activitytaskcanceled": "activity_task_canceled_event_attributes",
+        }
+        matched = next((k for k in attrs_map if k in key), None)
+        if not matched:
+            continue
+        attrs = getattr(event, attrs_map[matched], None)
+        sched_id = int(getattr(attrs, "scheduled_event_id", 0) or 0) if attrs else 0
+        task = by_sched.get(sched_id)
+        if task is None:
+            continue
+        if matched == "activitytaskstarted":
+            task["status"] = "running"
+            task["started_at"] = when
+            attempt = getattr(attrs, "attempt", None)
+            if attempt is not None:
+                task["attempt"] = int(attempt)
+        elif matched == "activitytaskcompleted":
+            task["status"] = "completed"
+            task["completed_at"] = when
+        elif matched == "activitytaskfailed":
+            task["status"] = "failed"
+            task["completed_at"] = when
+            task["error"] = _failure_message(getattr(attrs, "failure", None))
+        elif matched == "activitytasktimedout":
+            task["status"] = "timed_out"
+            task["completed_at"] = when
+            task["error"] = _failure_message(getattr(attrs, "failure", None)) or "timed out"
+        elif matched == "activitytaskcanceled":
+            task["status"] = "canceled"
+            task["completed_at"] = when
+    return ordered
 
 
 async def _client():
@@ -415,26 +602,45 @@ async def describe_workflow(
     run_id: str | None = None,
     history_limit: int = 80,
 ) -> dict[str, Any]:
-    """Describe one workflow and return a truncated event history for the drawer."""
+    """Describe one workflow and return tasks + truncated event history for the drawer."""
     client = await _client()
     if client is None:
         raise RuntimeError("TEMPORAL_HOST is not configured")
     handle = client.get_workflow_handle(workflow_id, run_id=run_id)
     desc = await handle.describe()
     summary = _workflow_summary(desc)
-    # Query status when the workflow exposes it (OAuth / probe / connect).
+    # Query status / stats when the workflow exposes them (OAuth / probe / connect).
     query_status: str | None = None
     try:
-        query_status = await handle.query("status")
-        if query_status is not None:
-            query_status = str(query_status)
+        raw_status = await handle.query("status")
+        if raw_status is not None:
+            query_status = str(raw_status)
     except Exception:  # noqa: BLE001 — workflow may not define status
         query_status = None
+    stats: dict[str, Any] | None = None
+    try:
+        raw_stats = await handle.query("stats")
+        if isinstance(raw_stats, dict):
+            stats = raw_stats
+    except Exception:  # noqa: BLE001 — workflow may not define stats
+        stats = None
 
     events: list[dict[str, Any]] = []
+    tasks: list[dict[str, Any]] = []
     try:
-        count = 0
+        from collections import deque
+
+        # Walk the full run so task status is current; only keep the newest events
+        # for the raw history panel (long-lived loops can have large histories).
+        recent_raw: deque[Any] = deque(maxlen=max(history_limit, 1))
+        all_raw: list[Any] = []
         async for event in handle.fetch_history_events():
+            recent_raw.append(event)
+            all_raw.append(event)
+            # Cap memory on pathological histories; task rollup still uses what we have.
+            if len(all_raw) > 5000:
+                all_raw = all_raw[-4000:]
+        for event in recent_raw:
             et = getattr(event, "event_type", None)
             label = _event_type_label(et)
             events.append(
@@ -445,33 +651,45 @@ async def describe_workflow(
                     "event_time": _dt(getattr(event, "event_time", None)),
                 }
             )
-            count += 1
-            if count >= history_limit:
-                break
+        # Keep the most recent activity tasks (long-running loops schedule many).
+        all_tasks = tasks_from_history_events(all_raw)
+        tasks = all_tasks[-40:]
     except Exception as e:  # noqa: BLE001
         return {
             "enabled": True,
             "workflow": summary,
             "query_status": query_status,
+            "phase": humanize_query_status(query_status),
+            "stats": stats,
+            "tasks": tasks,
             "events": events,
             "error": str(e),
         }
 
     # Surface failure message from describe when closed as failed.
     failure: str | None = None
-    try:
-        raw_fail = getattr(desc, "raw_description", None)
-        # Prefer close failure attributes when available on description
-        close_status = summary.get("status")
-        if close_status and "FAILED" in str(close_status).upper():
-            failure = "Workflow failed — see history events"
-    except Exception:  # noqa: BLE001
-        failure = None
+    close_status = summary.get("status")
+    if close_status and "FAILED" in str(close_status).upper():
+        # Prefer the latest failed activity error when we have one.
+        for task in reversed(tasks):
+            if task.get("status") == "failed" and task.get("error"):
+                failure = str(task["error"])
+                break
+        if failure is None:
+            for ev in reversed(events):
+                if "Failed" in str(ev.get("event_type") or "") and ev.get("summary"):
+                    failure = str(ev["summary"])
+                    break
+        if failure is None:
+            failure = "Workflow failed — see tasks / history"
 
     return {
         "enabled": True,
         "workflow": summary,
         "query_status": query_status,
+        "phase": humanize_query_status(query_status),
+        "stats": stats,
+        "tasks": tasks,
         "events": events,
         "failure": failure,
     }

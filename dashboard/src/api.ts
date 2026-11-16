@@ -323,10 +323,27 @@ export type TemporalWorkflowEvent = {
   event_time: string | null;
 };
 
+export type TemporalWorkflowTask = {
+  scheduled_event_id: number | null;
+  activity_id: string | null;
+  name: string;
+  status: string;
+  attempt: number | null;
+  input: string | null;
+  error: string | null;
+  scheduled_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
 export type TemporalWorkflowDetail = {
   enabled: boolean;
   workflow: TemporalWorkflowSummary;
   query_status: string | null;
+  /** Humanized current phase from the workflow status query. */
+  phase?: string | null;
+  stats?: Record<string, unknown> | null;
+  tasks?: TemporalWorkflowTask[];
   events: TemporalWorkflowEvent[];
   failure?: string | null;
   error?: string;

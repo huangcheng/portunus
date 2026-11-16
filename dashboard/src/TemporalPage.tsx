@@ -4,6 +4,7 @@ import {
   type TemporalStatus,
   type TemporalWorkflowDetail,
   type TemporalWorkflowSummary,
+  type TemporalWorkflowTask,
 } from "./api";
 import { fmtTimestamp } from "./format";
 import { Icon } from "./icons/ui";
@@ -15,15 +16,47 @@ const PAGE_SIZE = 50;
 function statusKind(status: string | null | undefined): "ok" | "warn" | "bad" | "" {
   if (!status) return "";
   const u = status.toUpperCase();
-  if (u.includes("COMPLETED") || u.includes("RUNNING")) return "ok";
-  if (u.includes("FAILED") || u.includes("TERMINATED") || u.includes("TIMED")) return "bad";
-  if (u.includes("CANCELED") || u.includes("CONTINUED")) return "warn";
+  if (u.includes("COMPLETED") || u.includes("RUNNING") || u === "SCHEDULED") return "ok";
+  if (
+    u.includes("FAILED") ||
+    u.includes("TERMINATED") ||
+    u.includes("TIMED") ||
+    u === "TIMED_OUT"
+  ) {
+    return "bad";
+  }
+  if (u.includes("CANCELED") || u.includes("CONTINUED") || u === "CANCELED") return "warn";
   return "";
 }
 
 function statusLabel(status: string | null | undefined): string {
   if (!status) return "Unknown";
   return status.replace(/^WORKFLOW_EXECUTION_STATUS_/, "").replace(/_/g, " ");
+}
+
+function taskStatusKind(status: string | null | undefined): "ok" | "warn" | "bad" | "" {
+  if (!status) return "";
+  const u = status.toLowerCase();
+  if (u === "completed" || u === "running") return "ok";
+  if (u === "failed" || u === "timed_out") return "bad";
+  if (u === "canceled" || u === "scheduled") return "warn";
+  return "";
+}
+
+function taskWhen(task: TemporalWorkflowTask): string | null {
+  return task.completed_at || task.started_at || task.scheduled_at;
+}
+
+function statsLine(stats: Record<string, unknown> | null | undefined): string | null {
+  if (!stats) return null;
+  const bits: string[] = [];
+  if (typeof stats.last_due === "number") bits.push(`last due ${stats.last_due}`);
+  if (typeof stats.last_failed === "number") bits.push(`failed ${stats.last_failed}`);
+  if (typeof stats.paused === "boolean") bits.push(stats.paused ? "paused" : "active");
+  if (Array.isArray(stats.priority) && stats.priority.length) {
+    bits.push(`priority ${stats.priority.length}`);
+  }
+  return bits.length ? bits.join(" · ") : null;
 }
 
 function buildQuery(filter: StatusFilter, custom: string): string {
@@ -381,9 +414,23 @@ export function TemporalPage() {
               </button>
             </div>
             <div className="stack drawer-section temporal-drawer-body">
-              {detailBusy && <p className="muted">Loading history…</p>}
+              {detailBusy && <p className="muted">Loading tasks…</p>}
               {selected && !detailBusy && (
                 <>
+                  <div className="temporal-phase">
+                    <p className="section-kicker">Now</p>
+                    <p className="temporal-phase-text">
+                      {selected.phase || selected.query_status || "No live phase reported"}
+                    </p>
+                    {statsLine(selected.stats) ? (
+                      <p className="muted temporal-phase-stats">{statsLine(selected.stats)}</p>
+                    ) : null}
+                    {selected.query_status && selected.phase !== selected.query_status ? (
+                      <p className="muted mono temporal-phase-raw" title="Raw workflow status query">
+                        {selected.query_status}
+                      </p>
+                    ) : null}
+                  </div>
                   <dl className="temporal-meta">
                     <div>
                       <dt>Status</dt>
@@ -393,10 +440,6 @@ export function TemporalPage() {
                           {statusLabel(selected.workflow.status)}
                         </span>
                       </dd>
-                    </div>
-                    <div>
-                      <dt>Query status</dt>
-                      <dd className="mono">{selected.query_status ?? "—"}</dd>
                     </div>
                     <div>
                       <dt>Run ID</dt>
@@ -415,27 +458,80 @@ export function TemporalPage() {
                   </dl>
                   {selected.failure && <div className="notice error">{selected.failure}</div>}
                   {selected.error && <div className="notice warn">{selected.error}</div>}
-                  <p className="section-kicker">History</p>
-                  <ol className="temporal-events">
-                    {selected.events.length === 0 ? (
-                      <li className="muted">No events</li>
+                  <div className="temporal-tasks-block">
+                    <p className="section-kicker">Tasks</p>
+                    <p className="muted temporal-tasks-hint">
+                      Recent activities in this run (latest {selected.tasks?.length ?? 0}
+                      {selected.events.length >= 80 ? ", truncated history window" : ""}).
+                    </p>
+                    {(selected.tasks?.length ?? 0) === 0 ? (
+                      <p className="muted">No activity tasks in the loaded history window.</p>
                     ) : (
-                      selected.events.map((ev) => (
-                        <li key={String(ev.event_id)}>
-                          <span className="mono temporal-event-id" title={`Event #${ev.event_id}`}>
-                            {ev.event_id}
-                          </span>
-                          <span className="temporal-event-type">
-                            {ev.event_type || "Unknown"}
-                            {ev.summary ? (
-                              <span className="muted temporal-event-summary"> · {ev.summary}</span>
-                            ) : null}
-                          </span>
-                          <span className="muted mono">{fmtTimestamp(ev.event_time)}</span>
-                        </li>
-                      ))
+                      <div className="table-wrap temporal-tasks-table">
+                        <table className="flush">
+                          <thead>
+                            <tr>
+                              <th>Activity</th>
+                              <th>Input</th>
+                              <th>Status</th>
+                              <th>When</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {[...(selected.tasks ?? [])].reverse().map((task) => (
+                              <tr key={`${task.scheduled_event_id}:${task.activity_id}`}>
+                                <td data-label="Activity">
+                                  <strong className="mono">{task.name}</strong>
+                                  {task.attempt && task.attempt > 1 ? (
+                                    <span className="muted"> · attempt {task.attempt}</span>
+                                  ) : null}
+                                  {task.error ? (
+                                    <div className="temporal-task-error">{task.error}</div>
+                                  ) : null}
+                                </td>
+                                <td data-label="Input" className="mono">
+                                  {task.input ?? "—"}
+                                </td>
+                                <td data-label="Status">
+                                  <span className={`health on-card ${taskStatusKind(task.status)}`}>
+                                    <span className="dot" aria-hidden />
+                                    {statusLabel(task.status)}
+                                  </span>
+                                </td>
+                                <td data-label="When">{fmtTimestamp(taskWhen(task))}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     )}
-                  </ol>
+                  </div>
+                  <details className="temporal-history-details">
+                    <summary>Raw history ({selected.events.length} events)</summary>
+                    <ol className="temporal-events">
+                      {selected.events.length === 0 ? (
+                        <li className="muted">No events</li>
+                      ) : (
+                        selected.events.map((ev) => (
+                          <li key={String(ev.event_id)}>
+                            <span
+                              className="mono temporal-event-id"
+                              title={`Event #${ev.event_id}`}
+                            >
+                              {ev.event_id}
+                            </span>
+                            <span className="temporal-event-type">
+                              {ev.event_type || "Unknown"}
+                              {ev.summary ? (
+                                <span className="muted temporal-event-summary"> · {ev.summary}</span>
+                              ) : null}
+                            </span>
+                            <span className="muted mono">{fmtTimestamp(ev.event_time)}</span>
+                          </li>
+                        ))
+                      )}
+                    </ol>
+                  </details>
                 </>
               )}
             </div>
