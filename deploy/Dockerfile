@@ -29,6 +29,11 @@ COPY --from=dashboard /usr/local/bin/node /usr/local/bin/node
 COPY --from=dashboard /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+# Fleet provider updates (rclone provision + skill rsync) need these on the worker.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      ca-certificates curl openssh-client rsync unzip \
+    && rm -rf /var/lib/apt/lists/*
 # Install uv via pip (avoids ghcr.io, which is slow/unreliable on some networks).
 ARG PIP_INDEX
 RUN pip install --no-cache-dir ${PIP_INDEX:+-i ${PIP_INDEX}} "uv==0.9.30" \
@@ -45,6 +50,11 @@ COPY packages/portunus_worker packages/portunus_worker
 COPY runner runner
 COPY gateway gateway
 COPY deploy/fleet-skills.sh deploy/fleet-skills.sh
+COPY deploy/fleet-providers-update.sh deploy/fleet-providers-update.sh
+COPY deploy/provision-rclone-shim.sh deploy/provision-rclone-shim.sh
+COPY deploy/rclone-shim/shim deploy/rclone-shim/shim
+RUN chmod 755 deploy/fleet-skills.sh deploy/fleet-providers-update.sh \
+      deploy/provision-rclone-shim.sh deploy/rclone-shim/shim
 # Re-declare so this layer sees the index (ARG scope is per-stage otherwise).
 ARG PIP_INDEX
 # uv 0.13 reads UV_DEFAULT_INDEX; keep UV_INDEX_URL as a compat alias.

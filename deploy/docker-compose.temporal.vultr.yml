@@ -1,0 +1,102 @@
+# Vultr overlay: Temporal + portunus-worker with fleet SSH + provider update tooling.
+# Usage (from /opt/stacks/portunus):
+#   docker compose -f docker-compose.gateway.yml -f deploy/docker-compose.temporal.vultr.yml \
+#     --profile temporal up -d
+services:
+  temporal-postgres:
+    profiles: [temporal]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal_pgdata:/var/lib/postgresql/data
+
+  temporal:
+    profiles: [temporal]
+    image: temporalio/auto-setup:1.25.2
+    restart: unless-stopped
+    depends_on: [temporal-postgres]
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-postgres
+    ports:
+      - "127.0.0.1:7233:7233"
+
+  temporal-ui:
+    profiles: [temporal]
+    image: temporalio/ui:2.31.2
+    restart: unless-stopped
+    depends_on: [temporal]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "127.0.0.1:8088:8080"
+
+  portunus-worker:
+    image: portunus:local
+    profiles: [temporal]
+    entrypoint: []
+    command:
+      - bash
+      - -lc
+      - |
+        set -euo pipefail
+        export PATH="/usr/local/bin:/app/gateway/.venv/bin:$PATH"
+        # Fleet provider updates need ssh/rsync/curl (image may predate the apt layer).
+        if ! command -v ssh >/dev/null || ! command -v rsync >/dev/null || ! command -v curl >/dev/null; then
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl openssh-client rsync unzip
+          rm -rf /var/lib/apt/lists/*
+        fi
+        cd /app/gateway
+        uv pip install -q --python .venv/bin/python "temporalio>=1.7.0"
+        uv pip install -q --python .venv/bin/python -e /app/packages/portunus_worker
+        exec portunus-worker
+    restart: unless-stopped
+    user: "0:0"
+    depends_on: [temporal]
+    env_file: .env
+    environment:
+      PORTUNUS_DEV: "0"
+      PORTUNUS_PEPPER_FILE: /run/secrets/pepper
+      PORTUNUS_POLICY: /etc/portunus/runner-policy.json
+      PORTUNUS_DATABASE_URL: postgresql+asyncpg://portunus:${POSTGRES_PASSWORD}@postgres:5432/portunus
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-portunus-control}
+      PORTUNUS_REPO_ROOT: /opt/stacks/portunus
+      # SSH Host aliases from /root/.ssh/config (tencent/contabo/aliyun). Local vultr
+      # runner is updated separately on-host (no self-SSH from the worker).
+      PORTUNUS_FLEET_HOSTS: ${PORTUNUS_FLEET_HOSTS:-tencent contabo aliyun}
+      PORTUNUS_RCLONE_CACHE: /var/lib/portunus/cache/rclone
+      PORTUNUS_SKILL_BRIDGE_SRC: /app/packages/portunus_skill_bridge
+      PORTUNUS_RUNNERS: ${PORTUNUS_RUNNERS}
+      PORTUNUS_SOCKET: /run/portunus/runner.sock
+      PORTUNUS_RUNNER_CA: /run/secrets/tls/ca.crt
+    volumes:
+      - data:/var/lib/portunus
+      - ./gateway/portunus_gateway:/app/gateway/portunus_gateway
+      - ./packages/portunus_shared:/app/packages/portunus_shared
+      - ./packages/portunus_worker:/app/packages/portunus_worker
+      - ./packages/portunus_skill_bridge:/app/packages/portunus_skill_bridge
+      - ./third_party:/app/third_party:ro
+      - ./deploy/runner-policy.json:/etc/portunus/runner-policy.json:ro
+      - ./deploy:/opt/stacks/portunus/deploy:ro
+      - ./secrets/pepper:/run/secrets/pepper:ro
+      - ./secrets/tls/ca.crt:/run/secrets/tls/ca.crt:ro
+      - ./secrets/runner-vultr.token:/run/secrets/runner-vultr.token:ro
+      - ./secrets/runner-tencent.token:/run/secrets/runner-tencent.token:ro
+      - ./secrets/runner-contabo.token:/run/secrets/runner-contabo.token:ro
+      - ./secrets/runner-aliyun.token:/run/secrets/runner-aliyun.token:ro
+      - /run/portunus:/run/portunus
+      # Fleet rsync/ssh (Host aliases tencent/contabo/aliyun).
+      - /root/.ssh:/root/.ssh:ro
+
+volumes:
+  temporal_pgdata:

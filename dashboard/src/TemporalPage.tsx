@@ -143,10 +143,24 @@ export function TemporalPage() {
     setNotice(null);
     try {
       const r = await api.fleetSkillsSync();
-      setNotice(`Started fleet sync · ${r.workflow_id}`);
+      setNotice(`Started fleet skills sync · ${r.workflow_id}`);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Fleet sync failed");
+      setError(e instanceof Error ? e.message : "Fleet skills sync failed");
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+
+  async function updateProviders() {
+    setSyncBusy(true);
+    setNotice(null);
+    try {
+      const r = await api.fleetProvidersUpdate();
+      setNotice(`Started providers update · ${r.workflow_id}`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Providers update failed");
     } finally {
       setSyncBusy(false);
     }
@@ -273,11 +287,21 @@ export function TemporalPage() {
               </button>
               <button
                 type="button"
-                className="primary sm"
+                className="outline sm"
                 disabled={syncBusy}
                 onClick={() => void syncFleet()}
+                title="Rsync skill trees only"
               >
-                Sync fleet skills
+                Sync skills
+              </button>
+              <button
+                type="button"
+                className="primary sm"
+                disabled={syncBusy}
+                onClick={() => void updateProviders()}
+                title="rclone + skill trees/CLIs + skill_bridge on PORTUNUS_FLEET_HOSTS"
+              >
+                Update providers
               </button>
             </div>
           </div>

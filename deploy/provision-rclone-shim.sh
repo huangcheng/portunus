@@ -8,31 +8,38 @@
 # The rclone zip is cached under deploy/rclone-shim/ keyed by version.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-RCLONE_VERSION="1.76.0"
+RCLONE_VERSION="${PORTUNUS_RCLONE_VERSION:-1.76.0}"
 SHIM_DIR="/var/lib/portunus/skills/rclone-shim"
 SSH_OPTS=(-o ConnectTimeout=10)
+# Writable cache (deploy/ is often bind-mounted :ro into the Temporal worker).
+CACHE_DIR="${PORTUNUS_RCLONE_CACHE:-$HERE/rclone-shim}"
+mkdir -p "$CACHE_DIR"
 [[ $# -ge 1 ]] || { echo "usage: $0 [user@]host [...]" >&2; exit 2; }
 [[ -f "$HERE/rclone-shim/shim" ]] || { echo "missing $HERE/rclone-shim/shim" >&2; exit 2; }
 
 CACHE_OK=false
-ver_out="$("$HERE/rclone-shim/rclone" version 2>/dev/null || true)"
-if [[ -f "$HERE/rclone-shim/rclone" && "$ver_out" == *"v${RCLONE_VERSION}"* ]]; then
+ver_out="$("$CACHE_DIR/rclone" version 2>/dev/null || true)"
+if [[ -f "$CACHE_DIR/rclone" && "$ver_out" == *"v${RCLONE_VERSION}"* ]]; then
   CACHE_OK=true
 fi
 if [[ "$CACHE_OK" != "true" ]]; then
   curl -fsSL --retry 3 --max-time 300 \
     "https://downloads.rclone.org/rclone-v${RCLONE_VERSION}-linux-amd64.zip" \
-    -o "$HERE/rclone.zip"
+    -o "$CACHE_DIR/rclone.zip"
   curl -fsSL --retry 3 --max-time 60 \
-    "https://downloads.rclone.org/v${RCLONE_VERSION}/SHA256SUMS" -o "$HERE/rclone.SHA256SUMS"
-  expected="$(awk -v f="rclone-v${RCLONE_VERSION}-linux-amd64.zip" '$2 == f {print $1}' "$HERE/rclone.SHA256SUMS")"
-  actual="$(shasum -a 256 "$HERE/rclone.zip" | awk '{print $1}')"
+    "https://downloads.rclone.org/v${RCLONE_VERSION}/SHA256SUMS" -o "$CACHE_DIR/rclone.SHA256SUMS"
+  expected="$(awk -v f="rclone-v${RCLONE_VERSION}-linux-amd64.zip" '$2 == f {print $1}' "$CACHE_DIR/rclone.SHA256SUMS")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$CACHE_DIR/rclone.zip" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "$CACHE_DIR/rclone.zip" | awk '{print $1}')"
+  fi
   [[ -n "$expected" && "$expected" == "$actual" ]] || {
     echo "rclone zip checksum mismatch" >&2; exit 1;
   }
-  unzip -q -o "$HERE/rclone.zip" "rclone-v${RCLONE_VERSION}-linux-amd64/rclone" -d "$HERE"
-  mv "$HERE/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" "$HERE/rclone-shim/rclone"
-  rm -rf "$HERE/rclone.zip" "$HERE/rclone-v${RCLONE_VERSION}-linux-amd64" "$HERE/rclone.SHA256SUMS"
+  unzip -q -o "$CACHE_DIR/rclone.zip" "rclone-v${RCLONE_VERSION}-linux-amd64/rclone" -d "$CACHE_DIR"
+  mv "$CACHE_DIR/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" "$CACHE_DIR/rclone"
+  rm -rf "$CACHE_DIR/rclone.zip" "$CACHE_DIR/rclone-v${RCLONE_VERSION}-linux-amd64" "$CACHE_DIR/rclone.SHA256SUMS"
 fi
 
 for host in "$@"; do
@@ -64,7 +71,7 @@ for host in "$@"; do
   fi
   if [[ "$RARCH" == "amd64" ]]; then
     # amd64 uses the locally downloaded + checksum-verified artifact.
-    rsync -az -e "ssh ${SSH_OPTS[*]}" "$HERE/rclone-shim/rclone" "$host:$SHIM_DIR/rclone"
+    rsync -az -e "ssh ${SSH_OPTS[*]}" "$CACHE_DIR/rclone" "$host:$SHIM_DIR/rclone"
   fi
   rsync -az -e "ssh ${SSH_OPTS[*]}" "$HERE/rclone-shim/shim" "$host:$SHIM_DIR/shim"
   ssh "${SSH_OPTS[@]}" "$host" "chmod 755 $SHIM_DIR/shim $SHIM_DIR/rclone && $SHIM_DIR/rclone version >/dev/null"

@@ -10,6 +10,7 @@ GUANG = ROOT / "manifests" / "guangyapan.example.yaml"
 QUARK = ROOT / "manifests" / "quark.example.yaml"
 CUBOX = ROOT / "manifests" / "cubox.example.yaml"
 IMA = ROOT / "manifests" / "ima.example.yaml"
+QQMUSIC = ROOT / "manifests" / "qqmusic.example.yaml"
 
 
 def test_load_weread_example():
@@ -76,6 +77,25 @@ def test_load_ima_example():
         "import_doc",
         "search_knowledge_base",
         "import_urls",
+    }
+
+
+def test_load_qqmusic_example():
+    m = load_manifest(QQMUSIC)
+    assert m.backend == "http_rpc"
+    assert m.http is not None
+    assert m.http.dispatch_mode == "url_path"
+    assert m.http.body_envelope == "params_comm"
+    assert m.http.const["skill_version"] == "0.0.3"
+    assert m.auth.type == "bearer_env"
+    assert m.auth.env == "QQMUSIC_API_KEY"
+    search = next(t for t in m.tools if t.name == "discover_search")
+    assert search.input["search_type"].wire == "type"
+    assert {t.name for t in m.tools} >= {
+        "discover_search",
+        "discover_daily_mix",
+        "charts",
+        "me_report",
     }
 
 

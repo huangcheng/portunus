@@ -38,6 +38,18 @@ class FieldSpec(BaseModel):
     required: bool = False
     description: str | None = None
     items: dict[str, Any] | None = None  # for array
+    # Wire key in HTTP/CLI payloads when it differs from the MCP parameter name
+    # (e.g. MCP ``search_type`` → JSON ``type``; ``type`` is a Python keyword).
+    wire: str | None = None
+
+    @field_validator("wire")
+    @classmethod
+    def _wire(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("wire must be a non-empty string")
+        return v.strip()
 
 
 class ToolSpec(BaseModel):
@@ -218,6 +230,9 @@ class HttpSpec(BaseModel):
     # url_path: IMA-style — POST to base_url + "/" + tool.dispatch with arguments as body.
     dispatch_mode: Literal["body_field", "url_path"] = "body_field"
     dispatch_field: str = "api_name"
+    # flat: arguments (+ const / dispatch) at the top level (WeRead / IMA).
+    # params_comm: QQ Music-style — {"params": <args>, "comm": <const>}.
+    body_envelope: Literal["flat", "params_comm"] = "flat"
     timeout_s: float = 60.0
 
     @field_validator("timeout_s")

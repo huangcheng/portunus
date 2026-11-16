@@ -206,7 +206,7 @@ def test_rclone_drive_seeds_shape():
     """Box/OneDrive/Yandex/Drime/MEGA ship as rclone-shim stdio apps with a multiline config paste."""
     from portunus_gateway.catalog import DEFAULT_APPS, RCLONE_SHIM, validate_spec
 
-    for slug in ("box", "onedrive", "yandex", "drime", "mega"):
+    for slug in ("box", "onedrive", "gdrive", "yandex", "drime", "mega"):
         raw = next(a for a in DEFAULT_APPS if a["slug"] == slug)
         assert raw["connection"] == "stdio"
         spec = validate_spec("stdio", raw["spec"])
@@ -231,6 +231,7 @@ def test_egress_preferred_regions_for_catalog_slugs():
         "drime",
         "box",
         "onedrive",
+        "gdrive",
         "mega",
         "raindrop",
         "github",
@@ -241,7 +242,7 @@ def test_egress_preferred_regions_for_catalog_slugs():
     ):
         assert preferred_regions_for_slug(slug) == OVERSEAS_PREFERRED_REGIONS
         assert egress_for_slug(slug) == "overseas"
-    for slug in ("nutstore", "weiyun", "guangyapan", "cubox", "ardot"):
+    for slug in ("nutstore", "weiyun", "guangyapan", "cubox", "ardot", "qqmusic"):
         assert preferred_regions_for_slug(slug) == DOMESTIC_PREFERRED_REGIONS
         assert egress_for_slug(slug) == "domestic"
     assert preferred_regions_for_slug("weknora") == []
@@ -335,6 +336,27 @@ def test_validate_ima_skill_bridge_spec():
     names = {s["name"] for s in out["secrets"]}
     assert names == {"IMA_OPENAPI_CLIENTID", "IMA_OPENAPI_APIKEY"}
     assert {t["name"] for t in out["manifest"]["tools"]} >= {"search_note", "import_urls"}
+
+
+def test_validate_qqmusic_skill_bridge_spec():
+    from portunus_gateway.catalog import QQMUSIC_MANIFEST
+
+    out = validate_spec(
+        "skill_bridge",
+        {
+            "manifest": QQMUSIC_MANIFEST,
+            "secrets": [{"name": "QQMUSIC_API_KEY", "label": "QQ Music API key"}],
+        },
+    )
+    assert out["manifest"]["http"]["dispatch_mode"] == "url_path"
+    assert out["manifest"]["http"]["body_envelope"] == "params_comm"
+    assert out["manifest"]["http"]["const"]["skill_version"] == "0.0.3"
+    assert {s["name"] for s in out["secrets"]} == {"QQMUSIC_API_KEY"}
+    assert {t["name"] for t in out["manifest"]["tools"]} >= {
+        "discover_search",
+        "charts",
+        "me_report",
+    }
 
 
 def test_weknora_http_seed_url_from_operator():

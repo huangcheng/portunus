@@ -15,6 +15,7 @@ export type AppIconId =
   | "nutstore"
   | "koofr"
   | "onedrive"
+  | "gdrive"
   | "yandex"
   | "drime"
   | "mega"
@@ -32,6 +33,7 @@ export type AppIconId =
   | "ima"
   | "weknora"
   | "pikpak"
+  | "qqmusic"
   | "generic";
 
 export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
@@ -41,6 +43,7 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "nutstore") return "nutstore";
   if (slug === "koofr") return "koofr";
   if (slug === "onedrive") return "onedrive";
+  if (slug === "gdrive" || slug === "google-drive" || slug === "googledrive") return "gdrive";
   if (slug === "yandex") return "yandex";
   if (slug === "drime") return "drime";
   if (slug === "mega") return "mega";
@@ -58,6 +61,7 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "ima") return "ima";
   if (slug === "weknora") return "weknora";
   if (slug === "pikpak") return "pikpak";
+  if (slug === "qqmusic" || slug === "qq-music") return "qqmusic";
   return "generic";
 }
 
@@ -68,6 +72,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   nutstore: "nutstore.png",
   koofr: "koofr.png",
   onedrive: "onedrive.svg",
+  gdrive: "gdrive.png",
   yandex: "yandex.png",
   drime: "drime.png",
   mega: "mega.svg",
@@ -84,6 +89,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   ima: "ima.svg",
   weknora: "weknora.png",
   pikpak: "pikpak.png",
+  qqmusic: "qqmusic.svg",
 };
 
 export function AppBrandMark({

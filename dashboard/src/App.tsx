@@ -115,7 +115,7 @@ const VIEW_META: Record<
     title: "Workflows",
     eyebrow: "Control plane",
     headline: "Durable work, visible.",
-    description: "Temporal runs for OAuth refresh, probes, Connect, and fleet skill sync.",
+    description: "Temporal runs for OAuth refresh, probes, Connect, and fleet provider updates.",
     index: "04",
   },
   logs: {

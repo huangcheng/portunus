@@ -497,6 +497,8 @@ export const api = {
   },
   fleetSkillsSync: (hosts?: string[]) =>
     call<{ workflow_id: string }>("POST", "/fleet/skills-sync", hosts ? { hosts } : {}),
+  fleetProvidersUpdate: (opts?: { hosts?: string[]; components?: string[] }) =>
+    call<{ workflow_id: string }>("POST", "/fleet/providers-update", opts ?? {}),
   logout: async () => {
     try {
       await call<void>("POST", "/auth/logout");

@@ -38,6 +38,8 @@ done
 
 json_cli skill trees → every runner host at `/var/lib/portunus/skills/<dir>` (and empty state dir under `/var/lib/portunus/skill-state/<slug>`).
 
+Or kick the Temporal **Update providers** action (Workflows page / `POST /api/fleet/providers-update`), which runs `deploy/fleet-providers-update.sh` on `PORTUNUS_FLEET_HOSTS`: rclone binary → skill trees/CLIs (`fleet-skills.sh --also-rclone`) → `portunus_skill_bridge` into each runner container. Components subset: `{"components":["rclone","skills","skill_bridge"]}`.
+
 Dashboard: `cd dashboard && npm run build`, then rsync `dist/` (and `public/icons/apps/` if icons are not already in the build output).
 
 ## Refresh catalog

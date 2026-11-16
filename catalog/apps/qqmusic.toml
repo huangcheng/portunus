@@ -1,0 +1,20 @@
+slug = "qqmusic"
+label = "QQ 音乐"
+description = "QQ Music search, charts, playlists, and listening reports via skill-bridge (API key from y.qq.com)."
+connection = "skill_bridge"
+egress = "domestic"
+popular = true
+categories = ["Music"]
+tags = ["qqmusic", "music", "http_rpc"]
+sort_order = 76
+
+[spec]
+manifest = "qqmusic.example.yaml"
+setup_hints = [
+  "Create an API key at [y.qq.com/n/ryqq_v2/qqmusic_skills](https://y.qq.com/n/ryqq_v2/qqmusic_skills). Docs: [github.com/tencentmusic/qqmusic-skills](https://github.com/tencentmusic/qqmusic-skills).",
+]
+
+[[spec.secrets]]
+name = "QQMUSIC_API_KEY"
+label = "QQ Music API key (qmk-…)"
+secret = true

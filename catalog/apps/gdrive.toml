@@ -1,0 +1,19 @@
+slug = "gdrive"
+label = "Google Drive"
+description = "Google Drive files via rclone (paste your `rclone config show gdrive` output at Connect; authorize first with `rclone authorize \"drive\"`)."
+connection = "stdio"
+egress = "overseas"
+popular = true
+categories = ["Storage"]
+tags = ["gdrive", "google", "drive", "files", "rclone"]
+sort_order = 34
+
+[spec]
+command = "/var/lib/portunus/skills/rclone-shim/shim"
+args = []
+
+[[spec.env]]
+name = "RCLONE_REMOTE_CONFIG"
+label = "rclone remote config — run `rclone config show gdrive` (authorize first with `rclone authorize \"drive\"`)"
+secret = true
+multiline = true

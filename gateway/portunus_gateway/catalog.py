@@ -44,6 +44,7 @@ OVERSEAS_EGRESS_SLUGS = frozenset(
         "drime",
         "box",
         "onedrive",
+        "gdrive",
         "mega",
         "raindrop",
         "github",
@@ -63,6 +64,7 @@ DOMESTIC_EGRESS_SLUGS = frozenset(
         "weread",
         "cubox",
         "ima",
+        "qqmusic",
         "guangyapan",
         "ardot",
     }
@@ -149,6 +151,8 @@ def _load_packaged_manifest(name: str) -> dict[str, Any]:
 WEREAD_MANIFEST: dict[str, Any] = _load_packaged_manifest("weread.example.yaml")
 # Tencent IMA OpenAPI — Client ID + API Key headers (notes + knowledge base).
 IMA_MANIFEST: dict[str, Any] = _load_packaged_manifest("ima.example.yaml")
+# QQ Music Agent Gateway — Bearer QQMUSIC_API_KEY; params+comm body envelope.
+QQMUSIC_MANIFEST: dict[str, Any] = _load_packaged_manifest("qqmusic.example.yaml")
 # Cubox json_cli — wraps official cubox-cli (fixed API Extension token).
 CUBOX_MANIFEST: dict[str, Any] = _load_packaged_manifest("cubox.example.yaml")
 # 光鸭云盘 json_cli — skill tree shipped under third_party/; runners mount/copy it.
@@ -533,6 +537,40 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         },
     },
     {
+        "slug": "qqmusic",
+        "label": "QQ 音乐",
+        "name": "QQ 音乐",
+        "description": (
+            "QQ Music search, charts, playlists, and listening reports via "
+            "skill-bridge (API key from y.qq.com)."
+        ),
+        "connection": "skill_bridge",
+        "popular": True,
+        "categories": ["Music"],
+        "tags": ["qqmusic", "music", "http_rpc"],
+        "sort_order": 76,
+        "spec": {
+            "manifest": QQMUSIC_MANIFEST,
+            "secrets": [
+                {
+                    "name": "QQMUSIC_API_KEY",
+                    "label": "QQ Music API key (qmk-…)",
+                    "secret": True,
+                },
+            ],
+            "setup_hints": [
+                (
+                    "Create an API key at "
+                    "[y.qq.com/n/ryqq_v2/qqmusic_skills]"
+                    "(https://y.qq.com/n/ryqq_v2/qqmusic_skills). "
+                    "Docs: "
+                    "[github.com/tencentmusic/qqmusic-skills]"
+                    "(https://github.com/tencentmusic/qqmusic-skills)."
+                ),
+            ],
+        },
+    },
+    {
         "slug": "box",
         "label": "Box",
         "name": "Box",
@@ -554,6 +592,35 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "label": (
                         "rclone remote config — run `rclone config show box` "
                         "(authorize first with `rclone authorize \"box\"`)"
+                    ),
+                    "secret": True,
+                    "multiline": True,
+                },
+            ],
+        },
+    },
+    {
+        "slug": "gdrive",
+        "label": "Google Drive",
+        "name": "Google Drive",
+        "description": (
+            "Google Drive files via rclone (paste your `rclone config show gdrive` "
+            "output at Connect; authorize first with `rclone authorize \"drive\"`)."
+        ),
+        "connection": "stdio",
+        "popular": True,
+        "categories": ["Storage"],
+        "tags": ["gdrive", "google", "drive", "files", "rclone"],
+        "sort_order": 34,
+        "spec": {
+            "command": RCLONE_SHIM,
+            "args": [],
+            "env": [
+                {
+                    "name": "RCLONE_REMOTE_CONFIG",
+                    "label": (
+                        "rclone remote config — run `rclone config show gdrive` "
+                        "(authorize first with `rclone authorize \"drive\"`)"
                     ),
                     "secret": True,
                     "multiline": True,

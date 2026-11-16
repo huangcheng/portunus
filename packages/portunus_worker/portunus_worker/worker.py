@@ -24,6 +24,7 @@ from .settings import (
     temporal_task_queue,
 )
 from .workflows.connect_ensure import ConnectEnsureWorkflow
+from .workflows.fleet_providers import FleetProvidersUpdateWorkflow
 from .workflows.fleet_skills import FleetSkillsSyncWorkflow
 from .workflows.oauth_refresh import OAuthRefreshWorkflow
 from .workflows.server_probe import ServerProbeWorkflow
@@ -48,6 +49,7 @@ def _standalone_activities():
         probe_acts.ensure_full_grants,
         probe_acts.start_connect_children,
         fleet_acts.sync_skills_host,
+        fleet_acts.update_providers_host,
     ]
 
 
@@ -88,6 +90,7 @@ async def run() -> None:
             ServerProbeWorkflow,
             ConnectEnsureWorkflow,
             FleetSkillsSyncWorkflow,
+            FleetProvidersUpdateWorkflow,
         ],
         activities=_standalone_activities(),
     )

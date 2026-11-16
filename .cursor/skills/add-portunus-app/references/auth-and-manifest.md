@@ -74,6 +74,11 @@ http:
 
 Each tool needs `dispatch` matching the vendor API name.
 
+- `dispatch_mode: body_field` (default) — WeRead: flat JSON + `dispatch_field`.
+- `dispatch_mode: url_path` — IMA / QQ Music: `POST base_url/dispatch`.
+- `body_envelope: params_comm` — QQ Music: `{"params": <args>, "comm": <const>}`.
+- Tool input `wire:` remaps MCP param names to vendor JSON keys (e.g. `search_type` → `type`).
+
 ## Catalog `spec` for skill_bridge
 
 ```yaml

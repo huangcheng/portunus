@@ -1,0 +1,109 @@
+# QQ Music Agent Gateway — surface from tencentmusic/qqmusic-skills v0.0.3.
+# Secrets: QQMUSIC_API_KEY via Portunus vault. Do not put keys in this file.
+# SSE /assistant/ai_interpretation is omitted (skill-bridge is request/response JSON).
+
+name: qqmusic
+version: "0.0.3"
+backend: http_rpc
+
+auth:
+  type: bearer_env
+  env: QQMUSIC_API_KEY
+  header: Authorization
+  prefix: "Bearer "
+  connect_hint: "Paste API key (qmk-…) from https://y.qq.com/n/ryqq_v2/qqmusic_skills"
+
+http:
+  base_url: https://a.y.qq.com
+  method: POST
+  dispatch_mode: url_path
+  body_envelope: params_comm
+  const:
+    skill_version: "0.0.3"
+  timeout_s: 60
+
+tools:
+  - name: discover_search
+    description: >
+      Search songs, albums, playlists, MVs, radios, or singers.
+      Use search_type "0"=songs (default), "1"=albums, "2"=playlists,
+      "3"=MVs, "4"=radios, "5"=singers.
+    dispatch: discover/search
+    input:
+      keyword:
+        type: string
+        required: true
+        description: Search keyword
+      search_type:
+        type: string
+        wire: type
+        description: 'Search type: "0" songs, "1" albums, "2" playlists, "3" MVs, "4" radios, "5" singers'
+      page:
+        type: integer
+        description: Page index from 0 (default 0)
+
+  - name: discover_daily_mix
+    description: Daily personalized mix of ~30 recommended songs
+    dispatch: discover/daily-mix
+    input: {}
+
+  - name: discover_radio
+    description: Personalized "猜你喜欢" radio song list
+    dispatch: discover/radio
+    input: {}
+
+  - name: discover_ai_playlists
+    description: List AI-recommended playlists (reqType must be "all")
+    dispatch: discover/ai-playlists
+    input:
+      reqType:
+        type: string
+        required: true
+        description: 'Playlist request type; pass "all" for the AI playlist list'
+
+  - name: charts
+    description: List music chart groups and topIds for charts_detail
+    dispatch: charts
+    input: {}
+
+  - name: charts_detail
+    description: Songs on a chart by topId (from charts)
+    dispatch: charts/detail
+    input:
+      topId:
+        type: integer
+        required: true
+        description: Chart id from charts.groupList[].groupTopList[].topId
+      page:
+        type: integer
+        description: Page index from 0 (default 0)
+
+  - name: playlists_detail
+    description: Songs in a playlist by dissId
+    dispatch: playlists/detail
+    input:
+      dissId:
+        type: integer
+        required: true
+        description: Playlist id (dissId)
+      page:
+        type: integer
+        description: Page index from 0 (default 0)
+
+  - name: me_report
+    description: >
+      Listening report — timeKey "d"=day, "w"=week, "m"=month (default month).
+      Optional timestamp for a specific day/week start.
+    dispatch: me/report
+    input:
+      timeKey:
+        type: string
+        description: 'Report window: "d" day, "w" week, "m" month'
+      timestamp:
+        type: integer
+        description: Unix seconds for day/week start (ignored for month)
+
+  - name: skill_version
+    description: Check whether a newer QQ Music skill package is available
+    dispatch: skill/version
+    input: {}

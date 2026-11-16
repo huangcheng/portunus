@@ -1293,6 +1293,56 @@ async def fleet_skills_sync(
     return {"workflow_id": wid}
 
 
+@router.post("/fleet/providers-update")
+async def fleet_providers_update(
+    request: Request,
+    actor: str = Depends(require_operator),
+    registry: Registry = Depends(get_registry),
+) -> dict[str, Any]:
+    """Update rclone, skill trees/CLIs, and skill_bridge on fleet hosts."""
+    body: dict[str, Any] = {}
+    try:
+        raw = await request.json()
+        if isinstance(raw, dict):
+            body = raw
+    except Exception:  # noqa: BLE001
+        body = {}
+    hosts = body.get("hosts")
+    if hosts is not None and (
+        not isinstance(hosts, list) or not all(isinstance(h, str) and h.strip() for h in hosts)
+    ):
+        raise RegistryError(422, "invalid_request", "hosts must be a list of strings")
+    components = body.get("components")
+    if components is not None and (
+        not isinstance(components, list)
+        or not all(isinstance(c, str) and c.strip() for c in components)
+    ):
+        raise RegistryError(
+            422,
+            "invalid_request",
+            "components must be a list of strings (rclone, skills, skill_bridge)",
+        )
+    try:
+        from portunus_worker.client import start_fleet_providers_update
+
+        wid = await start_fleet_providers_update(
+            hosts=list(hosts) if hosts else None,
+            components=list(components) if components else None,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise RegistryError(503, "unsupported", f"temporal unavailable: {e}") from e
+    if wid is None:
+        raise RegistryError(503, "unsupported", "TEMPORAL_HOST is not configured")
+    await _audit(
+        registry,
+        actor,
+        "fleet.providers_update",
+        wid,
+        {"hosts": hosts, "components": components},
+    )
+    return {"workflow_id": wid}
+
+
 @router.get("/temporal/status")
 async def temporal_control_status(actor: str = Depends(require_operator)) -> dict[str, Any]:
     """Temporal connectivity for the Workflows console."""

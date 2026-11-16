@@ -153,6 +153,12 @@ def humanize_query_status(status: str | None) -> str | None:
         return "Starting child workflows"
     if raw == "done":
         return "Finished"
+    if raw == "failed":
+        return "Finished with failures"
+    if raw == "no_hosts":
+        return "No fleet hosts configured"
+    if raw.startswith("host:"):
+        return f"Updating providers on {raw.split(':', 1)[1]}"
     if raw.startswith("probing:"):
         return f"Probing {raw.split(':', 1)[1]}"
     if raw.startswith("refreshing:"):
@@ -464,8 +470,34 @@ async def start_fleet_skills_sync(*, hosts: list[str] | None = None) -> str | No
     return wid
 
 
+async def start_fleet_providers_update(
+    *,
+    hosts: list[str] | None = None,
+    components: list[str] | None = None,
+) -> str | None:
+    """Kick FleetProvidersUpdateWorkflow (rclone + skill trees/CLIs + skill_bridge)."""
+    client = await _client()
+    if client is None:
+        return None
+    from .workflows.fleet_providers import FleetProvidersUpdateWorkflow
+
+    wid = f"fleet-providers-update:{uuid.uuid4()}"
+    await client.start_workflow(
+        FleetProvidersUpdateWorkflow.run,
+        args=[hosts or [], components or []],
+        id=wid,
+        task_queue=temporal_task_queue(),
+    )
+    return wid
+
+
 async def ensure_fleet_skills_schedule() -> None:
-    """Create a daily Schedule for fleet skill sync (idempotent create)."""
+    """Create a daily Schedule for fleet provider updates (idempotent create).
+
+    Prefers FleetProvidersUpdateWorkflow; keeps the legacy schedule id so existing
+    installs do not accumulate a second daily job. New installs get the broader
+    providers-update schedule under ``fleet-providers-update-daily``.
+    """
     client = await _client()
     if client is None:
         return
@@ -478,13 +510,13 @@ async def ensure_fleet_skills_schedule() -> None:
         ScheduleSpec,
     )
 
-    from .workflows.fleet_skills import FleetSkillsSyncWorkflow
+    from .workflows.fleet_providers import FleetProvidersUpdateWorkflow
 
-    schedule_id = "fleet-skills-sync-daily"
+    schedule_id = "fleet-providers-update-daily"
     action = ScheduleActionStartWorkflow(
-        FleetSkillsSyncWorkflow.run,
-        args=[[]],
-        id="fleet-skills-sync-scheduled",
+        FleetProvidersUpdateWorkflow.run,
+        args=[[], []],
+        id="fleet-providers-update-scheduled",
         task_queue=temporal_task_queue(),
     )
     spec = ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(days=1))])
@@ -492,7 +524,9 @@ async def ensure_fleet_skills_schedule() -> None:
         await client.create_schedule(schedule_id, Schedule(action=action, spec=spec))
         log.info("created Temporal schedule %s", schedule_id)
     except Exception:  # noqa: BLE001 — already exists
-        log.debug("fleet schedule create skipped", exc_info=True)
+        log.debug("fleet providers schedule create skipped", exc_info=True)
+
+    # Legacy skills-only schedule (pre-providers-update): leave alone if present.
 
 
 async def temporal_status() -> dict[str, Any]:

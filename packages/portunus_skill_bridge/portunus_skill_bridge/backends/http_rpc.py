@@ -10,6 +10,16 @@ from portunus_skill_bridge.backends.base import resolve_auth_headers
 from portunus_skill_bridge.manifest import Manifest, ToolSpec
 
 
+def _wire_arguments(tool: ToolSpec, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Map MCP param names to vendor wire keys via FieldSpec.wire."""
+    out: dict[str, Any] = {}
+    for key, value in arguments.items():
+        spec = tool.input.get(key)
+        wire = spec.wire if spec is not None and spec.wire else key
+        out[wire] = value
+    return out
+
+
 class HttpRpcBackend:
     def __init__(self, manifest: Manifest) -> None:
         if manifest.http is None:
@@ -18,18 +28,24 @@ class HttpRpcBackend:
         self.http = manifest.http
 
     async def call(self, tool: ToolSpec, arguments: dict[str, Any]) -> Any:
+        wired = _wire_arguments(tool, arguments)
         if self.http.dispatch_mode == "url_path":
             path = (tool.dispatch or "").lstrip("/")
             url = f"{self.http.base_url.rstrip('/')}/{path}"
             # Arguments first so manifest const keys cannot be overridden.
-            body: dict[str, Any] = {**arguments, **self.http.const}
+            flat: dict[str, Any] = {**wired, **self.http.const}
         else:
             url = self.http.base_url
-            body = {
-                **arguments,
+            flat = {
+                **wired,
                 **self.http.const,
                 self.http.dispatch_field: tool.dispatch,
             }
+        if self.http.body_envelope == "params_comm":
+            # QQ Music: business args under params; const (skill_version) under comm.
+            body: dict[str, Any] = {"params": dict(wired), "comm": dict(self.http.const)}
+        else:
+            body = flat
         headers = {
             "Content-Type": "application/json",
             **(self.http.headers or {}),
