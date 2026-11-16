@@ -23,14 +23,14 @@ Essential text must remain clearly readable on both light and dark surfaces. Tar
 
 ## Iconography
 
-Use official service brand assets stored locally in `dashboard/public/icons/apps/` and render them through `AppBrandMark` in `dashboard/src/icons/apps.tsx`. Do not substitute generated approximations for known service logos. Preserve each asset's aspect ratio and transparent background; use a neutral backing only when needed for legibility. Unknown or custom MCP services use the generic MCP glyph rather than an invented brand.
+Use official service brand assets stored locally in `dashboard/public/icons/apps/` and render them through `AppBrandMark` in `dashboard/src/icons/apps.tsx`. Do not substitute generated approximations for known service logos. Preserve each asset's aspect ratio and transparent background; use a neutral backing only when needed for legibility. Unknown or custom MCP services use an initial-letter mark (first Latin or CJK grapheme of the display name on a stable slug/label-hashed hue) rather than inventing a logo.
 
 ## Components and Layout
 
 - Dark desktop sidebar with geometric brand mark, clear selected navigation, and framed gateway status.
 - Compact utility breadcrumb plus a large in-content page introduction; avoid duplicate page headers.
 - Apps uses a data-driven dark gateway overview, a distinct Popular composition, then the complete working catalog. Show only values available from existing APIs.
-- Popular uses a horizontal card rail with chartreuse emphasis on the first card and deep-ink companion cards. The complete catalog uses near-white working cards with official brand marks and clearer supporting copy.
+- Popular uses a horizontal card rail with chartreuse emphasis on the first card and deep-ink companion cards. The complete catalog uses near-white working cards with official brand marks (or initial-letter marks when no asset exists) and clearer supporting copy.
 - Use asymmetric or varied compositions instead of repeating identical cards and section treatments. Controls remain familiar: primary, outline, ghost, and destructive.
 - Drawers have dark identity headers and readable light working content. Forms use numbered sections and consistent 40–44px controls.
 - Keys uses a substantial inventory table on desktop and labeled cards on narrow screens, with intentional loading and empty states.

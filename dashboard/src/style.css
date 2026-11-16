@@ -647,7 +647,28 @@ th.text-right { text-align: right; }
 .app-card-mark.is-official { background: transparent; box-shadow: none; }
 .app-card-mark.dropbox.is-official { background: oklch(0.95 0.025 255); }
 .app-card-mark.nutstore.is-official { background: oklch(0.95 0.025 85); }
-.app-card-mark.generic { background: var(--secondary); color: var(--foreground); }
+.app-card-mark.is-initial {
+  --app-initial-hue: 220;
+  background: oklch(0.86 0.07 var(--app-initial-hue));
+  color: oklch(0.34 0.08 var(--app-initial-hue));
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, oklch(0.34 0.08 var(--app-initial-hue)) 14%, transparent);
+}
+.app-initial {
+  font-size: 21px;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0;
+  font-variant-east-asian: proportional-width;
+  user-select: none;
+}
+.featured .app-card-mark.is-initial {
+  background: color-mix(in oklch, oklch(0.62 0.09 var(--app-initial-hue)) 70%, var(--sidebar-accent));
+  color: color-mix(in oklch, oklch(0.92 0.02 var(--app-initial-hue)) 55%, var(--sidebar-foreground));
+}
+.featured .app-card:first-child .app-card-mark.is-initial {
+  background: color-mix(in oklch, var(--primary-foreground) 16%, transparent);
+  color: var(--primary-foreground);
+}
 .app-brand-image { display: block; width: 30px; height: 30px; object-fit: contain; }
 .app-brand-image.ardot, .app-brand-image.flomo, .app-brand-image.dida365, .app-brand-image.weread, .app-brand-image.guangyapan, .app-brand-image.weiyun, .app-brand-image.raindrop, .app-brand-image.cubox, .app-brand-image.github, .app-brand-image.cloudflare, .app-brand-image.youdaonote, .app-brand-image.ima, .app-brand-image.weknora, .app-brand-image.pikpak, .app-brand-image.yandex, .app-brand-image.drime, .app-brand-image.mega, .app-brand-image.gdrive, .app-brand-image.qqmusic { width: 48px; height: 48px; border-radius: inherit; }
 .app-brand-image.koofr { width: 32px; height: 32px; border-radius: 8px; }

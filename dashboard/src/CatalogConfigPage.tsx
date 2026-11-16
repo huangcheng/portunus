@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { api } from "./api";
 import { CatalogConfigForm } from "./CatalogConfigForm";
-import { AppBrandMark, appIconIdForSlug } from "./icons/apps";
+import { AppBrandMark } from "./icons/apps";
 import { Icon } from "./icons/ui";
 import type { CatalogApp } from "./providers";
 
@@ -98,7 +98,7 @@ export function CatalogConfigPage({ catalog, onChanged }: Props) {
               {filtered.map((app) => (
                 <li key={app.id} className="catalog-config-row">
                   <div className="catalog-config-row-main">
-                    <AppBrandMark id={appIconIdForSlug(app.slug)} />
+                    <AppBrandMark id={app.slug} label={app.label} />
                     <div>
                       <div className="catalog-config-row-title">
                         {app.label}

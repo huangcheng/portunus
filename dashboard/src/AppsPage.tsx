@@ -6,7 +6,7 @@ import { EnvFields } from "./EnvFields";
 import { parseEnvRows } from "./envRows";
 import { CreateMcpForm } from "./CreateMcpForm";
 import { GatewayOverview } from "./GatewayOverview";
-import { AppBrandMark, appIconIdForSlug } from "./icons/apps";
+import { AppBrandMark } from "./icons/apps";
 import { Icon } from "./icons/ui";
 import {
   WEBDAV_MCP_ARGS,
@@ -662,7 +662,7 @@ function CatalogCard({
       role="button"
       tabIndex={0}
     >
-      <AppBrandMark id={app.slug} />
+      <AppBrandMark id={app.slug} label={app.label} />
       <div className="app-card-body">
         <div className="app-card-title-row">
           <span className="app-card-title">{app.label}</span>
@@ -754,7 +754,7 @@ function ConnectedCard({
       role="button"
       tabIndex={0}
     >
-      <AppBrandMark id={catalog?.slug ?? appIconIdForSlug(server.slug)} />
+      <AppBrandMark id={catalog?.slug ?? server.slug} label={title} />
       <div className="app-card-body">
         <div className="app-card-title-row">
           <span className="app-card-title">{title}</span>
@@ -2132,7 +2132,7 @@ function GenericManagePanel({
     <DrawerShell
       title={current.name}
       description={subtitle}
-      iconId={appIconIdForSlug(current.slug)}
+      iconId={current.slug}
       onClose={onClose}
       current={current}
       active={current.has_auth || current.env_names.length > 0}
@@ -2310,7 +2310,7 @@ function DrawerShell({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="apps-drawer-header">
-          <AppBrandMark id={iconId} />
+          <AppBrandMark id={iconId} label={title} />
           <div className="apps-drawer-heading">
             <p className="drawer-kicker">App connection</p>
             <div className="apps-drawer-title-row">
