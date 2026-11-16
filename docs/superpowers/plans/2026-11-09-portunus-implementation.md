@@ -503,7 +503,7 @@ git commit -m "feat(gateway): runner client and child slot FSM"
 - Consumes: slots/runner for `probe`; argv validate on create; vault for env literals
 - Produces: REST `POST /api/servers`, `POST /api/servers/{id}/probe`, `POST /api/servers/{id}/enable`, `POST /api/tools/{id}/enable`
 
-Probe uses runner `probe` op; stores tools with `enabled=False`; new tools stay disabled.
+Probe uses runner `probe` op; stores newly discovered tools with `enabled=True`. Reprobes update schema/description but never flip enablement — only the operator disable/enable API does.
 
 - [ ] **Step 1: Failing test with fake MCP stdio fixture that speaks minimal JSON-RPC `tools/list`**
 

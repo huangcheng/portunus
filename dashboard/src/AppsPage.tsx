@@ -158,6 +158,23 @@ function toolsLabel(n: number | undefined | null): string | null {
   return `${n} tool${n === 1 ? "" : "s"}`;
 }
 
+/**
+ * Card badge count: prefer discovered tools from GET /tools (includes disabled pending
+ * approval) over health `tool_count` (enabled-only). New probes seed tools as disabled,
+ * so enabled-only counts wrongly hide the indicator on custom MCPs.
+ */
+function resolvedToolCount(
+  toolCount: number | undefined,
+  serverToolCount: number | null | undefined,
+): number | null {
+  if (typeof toolCount === "number" && typeof serverToolCount === "number") {
+    return Math.max(toolCount, serverToolCount);
+  }
+  if (typeof toolCount === "number") return toolCount;
+  if (typeof serverToolCount === "number") return serverToolCount;
+  return null;
+}
+
 function healthPill(status: Server["status"] | undefined): { label: string; kind: string } | null {
   if (status === "auth_required") return { label: "Needs auth", kind: "warn" };
   if (status === "unreachable") return { label: "Unreachable", kind: "warn" };
@@ -644,7 +661,7 @@ function CatalogCard({
   onOpen: () => void;
 }) {
   const { active, configured } = appStatus(app, server);
-  const count = server?.tool_count ?? toolCount;
+  const count = resolvedToolCount(toolCount, server?.tool_count);
   const label = toolsLabel(count);
   const paused = !!server && !server.enabled && (active || configured);
   const health = !paused ? healthPill(server?.status) : null;
@@ -731,7 +748,7 @@ function ConnectedCard({
   toolCount?: number;
   onOpen: () => void;
 }) {
-  const count = server.tool_count ?? toolCount;
+  const count = resolvedToolCount(toolCount, server.tool_count);
   const label = toolsLabel(count);
   const title = catalog?.label ?? server.name;
   const desc =

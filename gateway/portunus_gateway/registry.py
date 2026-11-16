@@ -2070,7 +2070,9 @@ class Registry:
                             schema_hash=schema_hash(probed),
                             schema_override=None,
                             annotations=annotations,
-                            enabled=False,
+                            # Live until the operator disables. Reprobes never flip
+                            # enablement — only POST /tools/{id}/enable does.
+                            enabled=True,
                         )
                     )
                     added += 1
@@ -2086,8 +2088,6 @@ class Registry:
                 # Override survives probe; hash always tracks the effective schema.
                 tool.schema_hash = schema_hash(effective_schema(tool))
                 if probed_changed:
-                    # Contract changed: the previous operator approval no longer applies.
-                    tool.enabled = False
                     changed.append(tool.upstream_name)
             seen = {i["name"] for i in incoming}
             missing = sorted(n for n in existing if n not in seen)
