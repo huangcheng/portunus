@@ -24,6 +24,20 @@ OAUTH_REFRESH_TOKEN_NAME = "portunus.oauth_refresh_token"
 AUTH_HEADER_NAME = "Authorization"
 
 
+def canonicalize_authorization(value: str) -> str:
+    """Normalize ``Authorization`` for strict upstreams.
+
+    RFC 6750 treats the Bearer scheme as case-insensitive, but some MCP hosts
+    (notably Linear's ``mcp.linear.app``) reject lowercase ``bearer`` with 401.
+    Token endpoints often return ``token_type: "bearer"``; rewrite that to the
+    conventional ``Bearer`` spelling when building/storing the header.
+    """
+    parts = value.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return f"Bearer {parts[1]}"
+    return value
+
+
 @dataclass(frozen=True)
 class TokenBundle:
     """Access token (as Authorization header value) plus optional refresh material."""
@@ -415,7 +429,7 @@ def _parse_token_response(body: Any) -> TokenBundle:
     elif isinstance(expires_raw, float) and expires_raw > 0:
         expires_in = int(expires_raw)
     return TokenBundle(
-        authorization=f"{token_type} {token}",
+        authorization=canonicalize_authorization(f"{token_type} {token}"),
         refresh_token=refresh_token,
         expires_in=expires_in,
     )

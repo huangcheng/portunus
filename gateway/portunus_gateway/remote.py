@@ -58,6 +58,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db.models import Server, VaultEntry
+from .oauth import AUTH_HEADER_NAME, canonicalize_authorization
 from .registry import RegistryError
 from .vault import Vault, VaultError
 
@@ -1194,7 +1195,12 @@ class RemoteProxy:
                         vault_entry_id=str(row.id),
                         key_version=row.key_version,
                     )
-                    headers[row.name] = plain.decode()
+                    value = plain.decode()
+                    # Linear (and similar) reject lowercase ``bearer``; normalize on read
+                    # so vault entries sealed before canonicalize_authorization still work.
+                    if row.name.lower() == AUTH_HEADER_NAME.lower():
+                        value = canonicalize_authorization(value)
+                    headers[row.name] = value
             except (VaultError, UnicodeDecodeError):
                 raise RegistryError(500, "vault_error", "cannot decrypt server headers") from None
         return RemoteClient(

@@ -50,6 +50,7 @@ from .oauth import (
     OAUTH_REFRESH_TOKEN_NAME,
     OAuthError,
     TokenBundle,
+    canonicalize_authorization,
     oauth_public_view,
     refresh_access_token,
     validate_oauth_config,
@@ -1848,7 +1849,9 @@ class Registry:
         if not isinstance(token, str) or not token.strip() or "\x00" in token:
             raise RegistryError(422, "invalid_request", "token required")
         token = token.strip()
-        value = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+        value = canonicalize_authorization(
+            token if token.lower().startswith("bearer ") else f"Bearer {token}"
+        )
         async with self._sf() as s:
             server = await self._get_server(s, server_id)
             if server.kind != "remote":

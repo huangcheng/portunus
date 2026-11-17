@@ -18,6 +18,7 @@ from portunus_gateway.oauth import (
     OAuthError,
     OAuthPending,
     OAuthStore,
+    canonicalize_authorization,
     exchange_code,
     new_pkce,
     refresh_access_token,
@@ -686,6 +687,33 @@ def test_catalog_oauth_endpoints_require_https():
         with pytest.raises(RegistryError) as exc:
             validate_spec("oauth", bad)
         assert "https" in exc.value.message
+
+
+def test_canonicalize_authorization_rewrites_lowercase_bearer():
+    # Linear's token endpoint returns token_type "bearer"; mcp.linear.app 401s on that spelling.
+    assert canonicalize_authorization("bearer abc") == "Bearer abc"
+    assert canonicalize_authorization("BEARER abc") == "Bearer abc"
+    assert canonicalize_authorization("Bearer abc") == "Bearer abc"
+    assert canonicalize_authorization("Basic abc") == "Basic abc"
+
+
+async def test_exchange_code_canonicalizes_lowercase_token_type():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"access_token": "lin-tok", "token_type": "bearer", "expires_in": 3600},
+        )
+
+    pending = OAuthPending(
+        server_id=uuid.uuid4(),
+        code_verifier="verifier",
+        token_url="https://idp.example/token",
+        client_id="cid",
+        redirect_uri="https://portunus.example/cb",
+        created_at=0.0,
+    )
+    bundle = await exchange_code(pending, "the-code", transport=httpx.MockTransport(handler))
+    assert bundle.authorization == "Bearer lin-tok"
 
 
 async def test_token_endpoint_auth_method_selects_basic_or_post():
