@@ -54,6 +54,7 @@ OVERSEAS_EGRESS_SLUGS = frozenset(
         "koofr",
         "vultr",
         "vercel",
+        "fastmail",
     }
 )
 DOMESTIC_EGRESS_SLUGS = frozenset(
@@ -310,36 +311,32 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "label": "阿里云",
         "name": "阿里云",
         "description": (
-            "Alibaba Cloud OpenAPI MCP via local mcp-proxy — paste AccessKey ID and Secret "
-            "at Connect (no OAuth)."
+            "Alibaba Cloud OpenAPI MCP (remote) — paste Core Streamable HTTP from "
+            "api.aliyun.com/mcp, then Authorize (no local mcp-proxy)."
         ),
-        "connection": "stdio",
+        "connection": "oauth",
         "popular": True,
         "categories": ["Developer Tools"],
-        "tags": ["aliyun", "alibaba", "stdio", "mcp", "openapi"],
+        "tags": ["aliyun", "alibaba", "oauth", "mcp", "openapi"],
         "sort_order": 17,
         "spec": {
-            "command": "uvx",
-            "args": ["alibabacloud.mcp-proxy==0.2.17"],
-            "env": [
-                {
-                    "name": "ALIBABA_CLOUD_ACCESS_KEY_ID",
-                    "label": "AccessKey ID",
-                    "secret": True,
-                },
-                {
-                    "name": "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
-                    "label": "AccessKey Secret",
-                    "secret": True,
-                },
-            ],
+            # Console is api.aliyun.com/mcp; each account gets its own Streamable HTTP URL.
+            "url_from_operator": True,
+            "authorize_url": "https://signin.aliyun.com/oauth2/v1/auth",
+            "token_url": "https://oauth.aliyun.com/v1/token",
+            "registration_endpoint": (
+                "https://openapi-mcp.cn-hangzhou.aliyuncs.com/register"
+            ),
+            "token_endpoint_auth_method": "none",
+            "resource": "https://openapi-mcp.cn-hangzhou.aliyuncs.com",
+            # AS metadata issuer (authorize host is signin.aliyun.com).
+            "issuer": "https://openapi-mcp.cn-hangzhou.aliyuncs.com",
+            "scopes": ["openid", "/internal/acs/openapi"],
             "setup_hints": [
                 (
-                    "Create an AccessKey for a RAM user with "
-                    "AliyunOpenAPIMCPServerStaticCredentialAccess "
-                    "(or ram:GenerateAccessToken + openapiexplorer:*). Docs: "
-                    "[alibabacloud-api-mcp-server]"
-                    "(https://github.com/aliyun/alibabacloud-api-mcp-server)."
+                    "Open [api.aliyun.com/mcp](https://api.aliyun.com/mcp) → **Core** → "
+                    "copy **Streamable HTTP**, paste below, then Authorize. "
+                    "Enable public access on the Core endpoint if Probe cannot reach it."
                 ),
             ],
         },
@@ -391,19 +388,61 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "tags": ["vercel", "oauth", "mcp", "deploy"],
         "sort_order": 19,
         "spec": {
-            "url": "https://mcp.vercel.com",
+            "url": "https://mcp.vercel.com/",
             "authorize_url": "https://vercel.com/oauth/authorize",
             "token_url": "https://vercel.com/api/login/oauth/token",
-            "registration_endpoint": "https://vercel.com/api/login/oauth/register",
+            # Vercel rejects unapproved DCR redirect URIs; use Client ID Metadata Document.
+            "use_cimd": True,
             "token_endpoint_auth_method": "none",
-            "resource": "https://mcp.vercel.com",
-            "issuer": "https://vercel.com",
+            # Protected-resource metadata advertises the trailing slash.
+            "resource": "https://mcp.vercel.com/",
+            # No issuer: Vercel omits RFC 9207 iss on the authorize redirect
+            # (callback got=''), so an explicit issuer rejects every success.
             "scopes": ["openid"],
             "setup_hints": [
                 (
-                    "Vercel may require an approved MCP client or CIMD client_id. Docs: "
+                    "Authorize uses Portunus CIMD (no Vercel client review). Docs: "
                     "[vercel.com/docs/agent-resources/vercel-mcp]"
                     "(https://vercel.com/docs/agent-resources/vercel-mcp)."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "fastmail",
+        "label": "Fastmail",
+        "name": "Fastmail",
+        "description": (
+            "Fastmail official remote MCP (mail, contacts, calendars). "
+            "Connect with an MCP API token."
+        ),
+        "connection": "oauth",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["fastmail", "email", "oauth", "mcp"],
+        "sort_order": 21,
+        "spec": {
+            "url": "https://api.fastmail.com/mcp",
+            "authorize_url": "https://api.fastmail.com/oauth/authorize",
+            # Fastmail's token endpoint path is /oauth/refresh (AS metadata).
+            "token_url": "https://api.fastmail.com/oauth/refresh",
+            # Public https redirect URIs are not accepted via CIMD/DCR; Connect
+            # is MCP API token only (Fastmail partnerships for registered clients).
+            "allow_bearer_token": True,
+            "token_endpoint_auth_method": "none",
+            "resource": "https://api.fastmail.com/mcp",
+            "scopes": [
+                "https://www.fastmail.com/dev/mcp",
+                "offline_access",
+            ],
+            "setup_hints": [
+                (
+                    "Paste an MCP API token from Settings → Privacy & Security → "
+                    "Manage API tokens → Type **MCP**, then Save token. "
+                    "Docs: "
+                    "[Connecting AI tools via Fastmail's MCP server]"
+                    "(https://www.fastmail.help/hc/en-us/articles/"
+                    "15869557281295-Connecting-AI-tools-via-Fastmail-s-MCP-server)."
                 ),
             ],
         },
@@ -1100,10 +1139,18 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
         raise RegistryError(422, "invalid_request", "spec must be an object")
     if connection == "oauth":
         out: dict[str, Any] = {
-            "url": _require_https(spec, "url"),
             "authorize_url": _require_https(spec, "authorize_url"),
             "token_url": _require_https(spec, "token_url"),
         }
+        # Aliyun-style: account-specific Streamable HTTP URL pasted at Connect.
+        url_from_operator = bool(spec.get("url_from_operator"))
+        if url_from_operator:
+            out["url_from_operator"] = True
+            url_hint = spec.get("url")
+            if url_hint is not None and url_hint != "":
+                out["url"] = _require_https({"url": url_hint}, "url")
+        else:
+            out["url"] = _require_https(spec, "url")
         scopes = spec.get("scopes", [])
         if not isinstance(scopes, list) or not all(isinstance(s, str) and s for s in scopes):
             raise RegistryError(422, "invalid_request", "spec.scopes must be a list of strings")
@@ -1120,11 +1167,18 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
             if not isinstance(raw, str) or not raw.startswith("https://"):
                 raise RegistryError(422, "invalid_request", f"spec.{opt} must be an https URL")
             out[opt] = raw.strip()
+        if spec.get("use_cimd") is True:
+            out["use_cimd"] = True
+        if spec.get("allow_bearer_token") is True:
+            # Connect may paste an API token; empty → OAuth Authorize instead.
+            out["allow_bearer_token"] = True
         method = spec.get("token_endpoint_auth_method")
         if method is not None:
             if method not in ("none", "client_secret_basic", "client_secret_post"):
                 raise RegistryError(422, "invalid_request", "invalid token_endpoint_auth_method")
             out["token_endpoint_auth_method"] = method
+        # client_id may be omitted: DCR (registration_endpoint), CIMD (use_cimd), or
+        # paste-at-Connect apps (GitHub / Dropbox / Drive) supply it later.
         return _with_setup_hints(out, spec)
     if connection == "http":
         # Self-hosted MCP (e.g. WeKnora): operator pastes endpoint URL at Connect.
@@ -1396,7 +1450,7 @@ class CatalogStore:
                 a["slug"]: a
                 for a in DEFAULT_APPS
                 if a.get("connection") == "stdio"
-                and a["slug"] in ("box", "onedrive", "aliyun", "tencentcloud")
+                and a["slug"] in ("box", "onedrive", "tencentcloud")
             }
             rows = (
                 await s.execute(select(CatalogApp).where(CatalogApp.slug.in_(list(seed_by_slug))))
@@ -1406,7 +1460,7 @@ class CatalogStore:
                 seed = seed_by_slug[row.slug]
                 # Narrow: only migrate rows still on a retired connector shape.
                 # The ms-365 marker lives in spec.args (command was bare `npx`);
-                # oauth seeds (box / aliyun / tencentcloud) are caught by connection.
+                # oauth→stdio seeds (box / tencentcloud) are caught by connection.
                 stale = row.connection == "oauth" or "ms-365-mcp-server" in str(
                     row.spec.get("args") or ""
                 )
@@ -1609,8 +1663,8 @@ class CatalogStore:
             ):
                 want_args = list(seed["spec"].get("args") or [])
                 want_command = seed["spec"].get("command")
+                dirty = False
                 if want_args and want_command:
-                    dirty = False
                     if (
                         row is not None
                         and row.connection == "stdio"
@@ -1645,9 +1699,221 @@ class CatalogStore:
                         await s.execute(delete(Tool).where(Tool.server_id == srv.id))
                         srv.vault_version = int(srv.vault_version or 0) + 1
                         dirty = True
-                    if dirty:
-                        await s.commit()
-                        log.info("tencentcloud uvx args: aligned to seed pin")
+                if dirty:
+                    await s.commit()
+                    log.info("tencentcloud uvx args: aligned to seed pin")
+
+        # aliyun: stdio mcp-proxy → remote OpenAPI MCP OAuth (no local CLI).
+        async with self._sf() as s:
+            seed = next((a for a in DEFAULT_APPS if a["slug"] == "aliyun"), None)
+            row = (
+                await s.execute(select(CatalogApp).where(CatalogApp.slug == "aliyun"))
+            ).scalar_one_or_none()
+            if (
+                seed is not None
+                and row is not None
+                and seed.get("connection") == "oauth"
+                and isinstance(seed.get("spec"), dict)
+                and (
+                    row.connection == "stdio"
+                    or (
+                        row.connection == "oauth"
+                        and isinstance(row.spec, dict)
+                        and row.spec.get("command")
+                    )
+                )
+            ):
+                row.connection = "oauth"
+                row.description = seed["description"]
+                row.tags = _normalize_labels(seed.get("tags"), field="tags")
+                row.spec = validate_spec("oauth", seed["spec"])
+                linked = (
+                    await s.execute(select(Server).where(Server.slug == "aliyun"))
+                ).scalars().all()
+                for srv in linked:
+                    if srv.kind not in ("stdio", "remote"):
+                        continue
+                    # Drop AccessKey / proxy env; operator re-Connects via OAuth.
+                    stale_env = (
+                        await s.execute(
+                            select(VaultEntry).where(
+                                VaultEntry.server_id == srv.id,
+                                VaultEntry.name.in_(
+                                    sorted(
+                                        {
+                                            "ALIBABA_CLOUD_ACCESS_KEY_ID",
+                                            "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+                                            "ALIBABACLOUD_MCP_SERVER_URL",
+                                            "Authorization",
+                                            "portunus.oauth_client_secret",
+                                            "portunus.oauth_refresh_token",
+                                        }
+                                    )
+                                ),
+                            )
+                        )
+                    ).scalars().all()
+                    for entry in stale_env:
+                        await s.delete(entry)
+                    await s.execute(delete(Tool).where(Tool.server_id == srv.id))
+                    srv.kind = "remote"
+                    srv.command = None
+                    srv.args = []
+                    # URL comes from Connect (url_from_operator).
+                    srv.url = None
+                    srv.oauth = {
+                        k: v
+                        for k, v in row.spec.items()
+                        if k not in {"url", "url_from_operator", "setup_hints"}
+                    }
+                    srv.has_oauth_refresh = False
+                    srv.token_expires_at = None
+                    srv.enabled = False
+                    srv.vault_version = int(srv.vault_version or 0) + 1
+                await s.commit()
+                log.info("aliyun migration: stdio mcp-proxy → remote OAuth MCP")
+
+        # vercel: CIMD + resource slash; drop issuer (Vercel omits RFC 9207 iss).
+        _STALE_VERCEL_ISSUERS = frozenset({"https://vercel.com", "https://vercel.com/"})
+        async with self._sf() as s:
+            seed = next((a for a in DEFAULT_APPS if a["slug"] == "vercel"), None)
+            row = (
+                await s.execute(select(CatalogApp).where(CatalogApp.slug == "vercel"))
+            ).scalar_one_or_none()
+            if (
+                seed is not None
+                and seed.get("connection") == "oauth"
+                and isinstance(seed.get("spec"), dict)
+            ):
+                want = seed["spec"]
+                dirty = False
+                if (
+                    row is not None
+                    and row.connection == "oauth"
+                    and isinstance(row.spec, dict)
+                ):
+                    live = dict(row.spec)
+                    patched = dict(live)
+                    if want.get("use_cimd") is True:
+                        patched["use_cimd"] = True
+                        patched.pop("registration_endpoint", None)
+                    if want.get("resource") and live.get("resource") != want["resource"]:
+                        patched["resource"] = want["resource"]
+                    if want.get("url") and live.get("url") != want["url"]:
+                        patched["url"] = want["url"]
+                    if "issuer" not in want and patched.get("issuer") in _STALE_VERCEL_ISSUERS:
+                        patched.pop("issuer", None)
+                    if patched != live:
+                        try:
+                            row.spec = validate_spec("oauth", patched)
+                            dirty = True
+                        except RegistryError:
+                            log.warning(
+                                "vercel oauth metadata backfill skipped (invalid)",
+                                exc_info=True,
+                            )
+                linked = (
+                    await s.execute(select(Server).where(Server.slug == "vercel"))
+                ).scalars().all()
+                for srv in linked:
+                    if srv.kind != "remote" or not isinstance(srv.oauth, dict):
+                        continue
+                    oauth = dict(srv.oauth)
+                    patched_o = False
+                    if want.get("use_cimd") is True and not oauth.get("use_cimd"):
+                        oauth["use_cimd"] = True
+                        oauth.pop("registration_endpoint", None)
+                        # Drop a non-URL client_id so oauth/start re-binds to CIMD.
+                        cid = oauth.get("client_id")
+                        if isinstance(cid, str) and not cid.startswith("https://"):
+                            oauth.pop("client_id", None)
+                        patched_o = True
+                    if want.get("resource") and oauth.get("resource") != want["resource"]:
+                        oauth["resource"] = want["resource"]
+                        patched_o = True
+                    if want.get("url") and srv.url != want["url"]:
+                        srv.url = want["url"]
+                        patched_o = True
+                    if "issuer" not in want and oauth.get("issuer") in _STALE_VERCEL_ISSUERS:
+                        oauth.pop("issuer", None)
+                        patched_o = True
+                    if patched_o:
+                        srv.oauth = oauth
+                        dirty = True
+                if dirty:
+                    await s.commit()
+                    log.info("vercel oauth metadata: CIMD + drop issuer (omits iss)")
+
+        # fastmail: drop CIMD (public https redirects rejected); prefer API token.
+        async with self._sf() as s:
+            seed = next((a for a in DEFAULT_APPS if a["slug"] == "fastmail"), None)
+            row = (
+                await s.execute(
+                    select(CatalogApp).where(CatalogApp.slug == "fastmail")
+                )
+            ).scalar_one_or_none()
+            if (
+                seed is not None
+                and seed.get("connection") == "oauth"
+                and isinstance(seed.get("spec"), dict)
+            ):
+                want = seed["spec"]
+                dirty = False
+                if (
+                    row is not None
+                    and row.connection == "oauth"
+                    and isinstance(row.spec, dict)
+                ):
+                    live = dict(row.spec)
+                    patched = dict(live)
+                    patched.pop("use_cimd", None)
+                    if want.get("allow_bearer_token") is True:
+                        patched["allow_bearer_token"] = True
+                    if seed.get("description") and row.description != seed.get(
+                        "description"
+                    ):
+                        row.description = seed["description"]
+                        dirty = True
+                    if want.get("setup_hints") and live.get("setup_hints") != want.get(
+                        "setup_hints"
+                    ):
+                        patched["setup_hints"] = list(want["setup_hints"])
+                    if patched != live:
+                        try:
+                            row.spec = validate_spec("oauth", patched)
+                            dirty = True
+                        except RegistryError:
+                            log.warning(
+                                "fastmail oauth metadata backfill skipped (invalid)",
+                                exc_info=True,
+                            )
+                linked = (
+                    await s.execute(select(Server).where(Server.slug == "fastmail"))
+                ).scalars().all()
+                for srv in linked:
+                    if srv.kind != "remote" or not isinstance(srv.oauth, dict):
+                        continue
+                    oauth = dict(srv.oauth)
+                    patched_o = False
+                    if oauth.pop("use_cimd", None):
+                        patched_o = True
+                    # CIMD client_id was the metadata URL — drop so Connect
+                    # expects a token or a Fastmail-registered client_id.
+                    cid = oauth.get("client_id")
+                    if isinstance(cid, str) and cid.startswith("https://"):
+                        oauth.pop("client_id", None)
+                        patched_o = True
+                    if want.get("allow_bearer_token") is True and oauth.get(
+                        "allow_bearer_token"
+                    ) is not True:
+                        oauth["allow_bearer_token"] = True
+                        patched_o = True
+                    if patched_o:
+                        srv.oauth = oauth
+                        dirty = True
+                if dirty:
+                    await s.commit()
+                    log.info("fastmail oauth metadata: drop CIMD, prefer API token")
 
         # Idempotent: add new skill_bridge seeds (e.g. weread) on existing deploys,
         # and refresh skill_bridge manifests when the packaged seed grows (tool list).

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+log = logging.getLogger(__name__)
 
 
 class ChildHandle(Protocol):
@@ -25,10 +28,36 @@ class ChildHandle(Protocol):
 class ProcessHandle:
     """Wraps an asyncio subprocess started in its own session (so we can signal the group)."""
 
+    _STDERR_KEEP = 4 * 1024
+
     def __init__(self, proc: asyncio.subprocess.Process) -> None:
         self._proc = proc
         self.pid = proc.pid
         self._swept = False
+        self._stderr_tail = bytearray()
+        self._stderr_task: asyncio.Task[None] | None = None
+        if proc.stderr is not None:
+            self._stderr_task = asyncio.create_task(self._drain_stderr())
+
+    async def _drain_stderr(self) -> None:
+        """Keep the PIPE drained (avoid child deadlock) and retain a short tail for crashes."""
+        assert self._proc.stderr is not None
+        try:
+            while True:
+                chunk = await self._proc.stderr.read(512)
+                if not chunk:
+                    return
+                self._stderr_tail.extend(chunk)
+                if len(self._stderr_tail) > self._STDERR_KEEP:
+                    del self._stderr_tail[: len(self._stderr_tail) - self._STDERR_KEEP]
+        except Exception:
+            # Leaving stderr undrained with PIPE can deadlock the child; log once.
+            log.exception("stderr drain stopped early for child pid=%s", self.pid)
+            return
+
+    @property
+    def stderr_tail(self) -> str:
+        return bytes(self._stderr_tail).decode(errors="replace").strip()
 
     @property
     def returncode(self) -> int | None:
@@ -62,6 +91,11 @@ class ProcessHandle:
             self._swept = True
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(self.pid, signal.SIGKILL)
+        task = self._stderr_task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         return code
 
 

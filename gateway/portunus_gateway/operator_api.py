@@ -425,24 +425,73 @@ async def oauth_start(
     cfg = await registry.remote_oauth_config(server_id)
     redirect_uri = body.redirect_uri.strip()
     client_id = cfg.get("client_id")
+    # Stale non-URL client_id with use_cimd → rebind to the CIMD document URL.
+    if (
+        isinstance(client_id, str)
+        and cfg.get("use_cimd")
+        and not client_id.startswith("https://")
+    ):
+        client_id = None
     if not client_id:
+        from .cimd import cimd_client_id
+
+        # Prefer CIMD when asked (Vercel rejects unapproved DCR redirect URIs).
+        # Also fall back to CIMD when DCR returns invalid_redirect_uri.
+        prefer_cimd = bool(cfg.get("use_cimd"))
         reg = cfg.get("registration_endpoint")
-        if not isinstance(reg, str) or not reg:
-            raise RegistryError(422, "invalid_oauth", "oauth client_id is not configured")
-        registered = await register_oauth_client(
-            registration_endpoint=reg,
-            redirect_uri=redirect_uri,
-            scopes=list(cfg.get("scopes") or []),
-            token_endpoint_auth_method=str(cfg.get("token_endpoint_auth_method") or "none"),
-        )
-        client_id = registered["client_id"]
-        raw_secret = registered.get("client_secret")
-        await registry.update_server(
-            server_id,
-            actor=actor,
-            oauth={**cfg, "client_id": client_id},
-            oauth_client_secret=raw_secret if isinstance(raw_secret, str) else None,
-        )
+
+        async def _bind_cimd() -> str:
+            cid = cimd_client_id()
+            if not cid:
+                raise RegistryError(
+                    422,
+                    "invalid_oauth",
+                    "CIMD requires PORTUNUS_PUBLIC_URL (https)",
+                )
+            await registry.update_server(
+                server_id,
+                actor=actor,
+                oauth={
+                    **{k: v for k, v in cfg.items() if k != "registration_endpoint"},
+                    "client_id": cid,
+                    "use_cimd": True,
+                },
+            )
+            return cid
+
+        if prefer_cimd:
+            client_id = await _bind_cimd()
+        elif isinstance(reg, str) and reg:
+            try:
+                registered = await register_oauth_client(
+                    registration_endpoint=reg,
+                    redirect_uri=redirect_uri,
+                    scopes=list(cfg.get("scopes") or []),
+                    token_endpoint_auth_method=str(
+                        cfg.get("token_endpoint_auth_method") or "none"
+                    ),
+                )
+            except OAuthError as e:
+                # Vercel (and similar) advertise DCR then reject our redirect — use CIMD.
+                if "invalid_redirect_uri" in (e.message or "") and cimd_client_id():
+                    client_id = await _bind_cimd()
+                else:
+                    raise RegistryError(e.status, e.code, e.message) from e
+            else:
+                client_id = registered["client_id"]
+                raw_secret = registered.get("client_secret")
+                await registry.update_server(
+                    server_id,
+                    actor=actor,
+                    oauth={**cfg, "client_id": client_id},
+                    oauth_client_secret=raw_secret if isinstance(raw_secret, str) else None,
+                )
+        else:
+            # Last resort: CIMD-capable gateway with no DCR endpoint on the server.
+            if cimd_client_id():
+                client_id = await _bind_cimd()
+            else:
+                raise RegistryError(422, "invalid_oauth", "oauth client_id is not configured")
     store: OAuthStore = request.app.state.oauth
     started = store.start(
         server_id=server_id,
@@ -1762,6 +1811,12 @@ def create_app(registry: Registry, auth: OperatorAuth | None = None) -> FastAPI:
 
     @app.exception_handler(RegistryError)
     async def _registry_error(_request: Request, exc: RegistryError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status, content={"code": exc.code, "message": exc.message}
+        )
+
+    @app.exception_handler(OAuthError)
+    async def _oauth_error(_request: Request, exc: OAuthError) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status, content={"code": exc.code, "message": exc.message}
         )

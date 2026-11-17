@@ -32,6 +32,9 @@ SERVER_SRC = textwrap.dedent(
                 "protocolVersion": msg["params"]["protocolVersion"], "capabilities": {},
                 "serverInfo": {"name": "t", "version": "1"}}}), flush=True)
         elif m == "server/discover":
+            if mode == "ignore_discover":
+                # Pre-2026 peers often ignore unknown methods instead of -32601.
+                continue
             print(json.dumps({"jsonrpc": "2.0", "id": i,
                               "error": {"code": -32601, "message": "Method not found"}}), flush=True)
         elif m == "tools/list":
@@ -147,6 +150,17 @@ async def test_probe_tolerates_stdout_noise(srv, sock_path, script):
     reply = await c.call(_probe(c, script, env={"MODE": "noise"}), timeout=10)
     assert reply["ok"] is True
     assert len(reply["tools"]) == 2
+
+
+async def test_probe_succeeds_when_discover_would_hang(srv, sock_path, script):
+    """Production connect uses initialize; peers that ignore discover still probe cleanly."""
+    _, c = await _ready(srv, sock_path)
+    reply = await c.call(
+        _probe(c, script, env={"MODE": "ignore_discover"}, timeout_s=8),
+        timeout=15,
+    )
+    assert reply["ok"] is True, reply
+    assert [t["name"] for t in reply["tools"]] == ["a", "b"]
 
 
 async def test_probe_timeout_kills_child(srv, sock_path, script, tmp_path):

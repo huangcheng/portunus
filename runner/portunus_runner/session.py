@@ -548,7 +548,11 @@ class Runner:
             proc = getattr(handle, "proc", None)
             if proc is None:
                 raise PortunusError("spawn_failed", "spawner does not expose stdio")
-            tools = await probe.list_tools(proc, timeout_s)
+            tools = await probe.list_tools(
+                proc,
+                timeout_s,
+                stderr_tail=(lambda: handle.stderr_tail) if hasattr(handle, "stderr_tail") else None,
+            )
             await self._reply(sess, msg, tools=tools)
         except asyncio.CancelledError:
             raise
@@ -585,7 +589,13 @@ class Runner:
             await self._error(sess, msg, "spawn_failed", "child has no stdio", with_token=True)
             return
         if rec.rpc is None:
-            rec.rpc = rpc.ChildRpc(proc)
+            handle = rec.handle
+            rec.rpc = rpc.ChildRpc(
+                proc,
+                stderr_tail=(lambda: handle.stderr_tail)
+                if hasattr(handle, "stderr_tail")
+                else None,
+            )
         timeout_s = rpc.clamp_timeout(msg.get("timeout_s"), float(DEFAULTS.invoke_timeout_s))
         try:
             result, timing = await rec.rpc.call(msg.get("payload"), timeout_s)

@@ -102,9 +102,19 @@ function appStatus(app: CatalogApp, server: Server | null): {
     }
     return { active: !!server?.enabled, configured: !!server };
   }
+  // Catalog CIMD/DCR flags alone must not mark an app "Needs auth" before Connect.
+  const oauthConfigured =
+    !!server &&
+    (!!server.oauth?.configured ||
+      !!server.oauth?.client_id ||
+      !!server.oauth?.registration_endpoint ||
+      !!server.oauth?.use_cimd ||
+      !!server.oauth?.allow_bearer_token ||
+      specBool(app.spec, "allow_bearer_token"));
+  const needsUrl = specBool(app.spec, "url_from_operator");
   return {
     active: !!server?.has_auth,
-    configured: !!server?.oauth?.configured || !!server?.oauth?.registration_endpoint,
+    configured: oauthConfigured && (!needsUrl || !!server?.url),
   };
 }
 
@@ -127,7 +137,7 @@ function oauthBodyFromApp(
     token_url: specString(app.spec, "token_url"),
     scopes: specStringList(app.spec, "scopes"),
   };
-  // Prefer the live server's DCR'd client_id so re-authorize does not wipe it.
+  // Prefer the live server's DCR'd / CIMD client_id so re-authorize does not wipe it.
   const id =
     clientId.trim() ||
     existing?.oauth?.client_id ||
@@ -135,11 +145,16 @@ function oauthBodyFromApp(
   if (id) body.client_id = id;
   const resource = specString(app.spec, "resource") || existing?.oauth?.resource || "";
   if (resource) body.resource = resource;
-  const reg =
-    specString(app.spec, "registration_endpoint") ||
-    existing?.oauth?.registration_endpoint ||
-    "";
-  if (reg) body.registration_endpoint = reg;
+  const useCimd = specBool(app.spec, "use_cimd") || !!existing?.oauth?.use_cimd;
+  if (useCimd) {
+    body.use_cimd = true;
+  } else {
+    const reg =
+      specString(app.spec, "registration_endpoint") ||
+      existing?.oauth?.registration_endpoint ||
+      "";
+    if (reg) body.registration_endpoint = reg;
+  }
   const method =
     specString(app.spec, "token_endpoint_auth_method") ||
     existing?.oauth?.token_endpoint_auth_method ||
@@ -862,11 +877,17 @@ function OAuthManagePanel({
   onClose: () => void;
   onChanged: () => Promise<void>;
 }) {
-  const needsManualClientId = !specString(app.spec, "registration_endpoint");
+  const useCimd = specBool(app.spec, "use_cimd");
+  const allowBearer = specBool(app.spec, "allow_bearer_token");
+  const urlFromOperator = specBool(app.spec, "url_from_operator");
+  const needsManualClientId =
+    !specString(app.spec, "registration_endpoint") && !useCimd;
   const [clientId, setClientId] = useState(
     server?.oauth?.client_id || specString(app.spec, "client_id"),
   );
   const [clientSecret, setClientSecret] = useState("");
+  const [bearerToken, setBearerToken] = useState("");
+  const [mcpUrl, setMcpUrl] = useState(server?.url || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -876,15 +897,57 @@ function OAuthManagePanel({
     setCurrent(server);
     setClientId(server?.oauth?.client_id || specString(app.spec, "client_id"));
     setClientSecret("");
+    setBearerToken("");
+    setMcpUrl(server?.url || "");
     setError("");
     setNotice("");
   }, [server, app]);
 
   const active = !!current?.has_auth;
-  const configured = !!current?.oauth?.configured || !!current?.oauth?.client_id;
+  const configured = allowBearer
+    ? !!current
+    : !!current &&
+      (!!current.oauth?.configured ||
+        !!current.oauth?.client_id ||
+        !!current.oauth?.use_cimd ||
+        useCimd ||
+        !!specString(app.spec, "registration_endpoint")) &&
+      (!urlFromOperator || !!current.url);
 
-  async function ensureServer(): Promise<Server> {
+  function resolveMcpUrl(): string {
+    if (urlFromOperator) {
+      const url = mcpUrl.trim();
+      if (!url) throw new Error("MCP Streamable HTTP endpoint is required");
+      return url;
+    }
+    return specString(app.spec, "url");
+  }
+
+  async function ensureServer(opts?: { forBearer?: boolean }): Promise<Server> {
     const oauth = oauthBodyFromApp(app, clientId, current);
+    const forBearer = !!opts?.forBearer || allowBearer;
+    const url = resolveMcpUrl();
+    // Token paste does not need an OAuth client_id (Fastmail public redirects
+    // are not DCR/CIMD-eligible — API token is the supported path).
+    if (forBearer && !oauth.client_id) {
+      if (current) {
+        if (urlFromOperator && url !== current.url) {
+          const updated = await api.updateServer(current.id, { url });
+          setCurrent(updated);
+          return updated;
+        }
+        return current;
+      }
+      const created = await api.createServer({
+        name: app.name,
+        slug: app.slug,
+        kind: "remote",
+        url,
+        recipe_slug: app.slug,
+      });
+      setCurrent(created);
+      return created;
+    }
     if (needsManualClientId && !oauth.client_id) {
       throw new Error("Client ID is required");
     }
@@ -893,6 +956,7 @@ function OAuthManagePanel({
       const updated = await api.updateServer(current.id, {
         oauth,
         oauth_client_secret: secret,
+        ...(urlFromOperator ? { url } : {}),
       });
       setCurrent(updated);
       return updated;
@@ -901,7 +965,7 @@ function OAuthManagePanel({
       name: app.name,
       slug: app.slug,
       kind: "remote",
-      url: specString(app.spec, "url"),
+      url,
       oauth,
       oauth_client_secret: secret,
       recipe_slug: app.slug,
@@ -916,6 +980,20 @@ function OAuthManagePanel({
     setNotice("");
     setBusy(true);
     try {
+      if (allowBearer) {
+        if (!bearerToken.trim()) {
+          setError(active ? "Enter a new token to replace the current one." : "Paste an MCP API token.");
+          return;
+        }
+        const target = await ensureServer({ forBearer: true });
+        const updated = await api.setBearerToken(target.id, bearerToken.trim());
+        setCurrent(updated);
+        setBearerToken("");
+        setClientSecret("");
+        setNotice("API token saved. Probe tools to go live for agents.");
+        await onChanged();
+        return;
+      }
       await ensureServer();
       setClientSecret("");
       setNotice("Credentials saved. Use Authorize to complete OAuth.");
@@ -938,6 +1016,7 @@ function OAuthManagePanel({
       window.open(authorize_url, "portunus-oauth", "width=560,height=720");
       setNotice("OAuth window opened — finish consent, then this card will show Active.");
       setClientSecret("");
+      setBearerToken("");
       await onChanged();
     } catch (err) {
       setError((err as Error).message);
@@ -957,7 +1036,31 @@ function OAuthManagePanel({
       configured={configured}
     >
       <form className="stack drawer-section" onSubmit={save}>
-        {needsManualClientId ? (
+        {urlFromOperator && (
+          <label className="field">
+            MCP Streamable HTTP endpoint
+            <input
+              type="url"
+              value={mcpUrl}
+              onChange={(e) => setMcpUrl(e.target.value)}
+              required
+              autoComplete="off"
+              placeholder="https://openapi-mcp.cn-hangzhou.aliyuncs.com/…"
+            />
+          </label>
+        )}
+        {allowBearer ? (
+          <label className="field">
+            MCP API token {active ? "(replace)" : ""}
+            <input
+              type="password"
+              value={bearerToken}
+              onChange={(e) => setBearerToken(e.target.value)}
+              autoComplete="off"
+              placeholder={active ? "••••••••" : "Paste MCP API token"}
+            />
+          </label>
+        ) : needsManualClientId ? (
           <>
             <label className="field">
               Client ID
@@ -981,7 +1084,9 @@ function OAuthManagePanel({
           </>
         ) : (
           <p className="provider-hint">
-            Uses dynamic client registration on Authorize
+            {useCimd
+              ? "Authorize uses Portunus client metadata (CIMD)"
+              : "Uses dynamic client registration on Authorize"}
             {current?.oauth?.client_id ? (
               <>
                 {" "}
@@ -992,24 +1097,40 @@ function OAuthManagePanel({
           </p>
         )}
         <SetupHints hints={specStringList(app.spec, "setup_hints")} />
-        <p className="provider-hint">
-          Redirect URI: <code>{`${window.location.origin}/api/oauth/callback`}</code>
-        </p>
+        {!allowBearer && (
+          <p className="provider-hint">
+            Redirect URI: <code>{`${window.location.origin}/api/oauth/callback`}</code>
+          </p>
+        )}
 
         <div className="apps-actions">
-          {needsManualClientId && (
-            <button className="outline sm" type="submit" disabled={busy}>
-              Save
+          {(allowBearer || needsManualClientId || urlFromOperator) && (
+            <button
+              className={allowBearer ? "primary sm" : "outline sm"}
+              type="submit"
+              disabled={
+                busy ||
+                (allowBearer && !bearerToken.trim()) ||
+                (urlFromOperator && !mcpUrl.trim())
+              }
+            >
+              {allowBearer ? "Save token" : "Save"}
             </button>
           )}
-          <button
-            className="primary sm"
-            type="button"
-            disabled={busy || (needsManualClientId && !clientId.trim())}
-            onClick={() => void authorize()}
-          >
-            {active ? "Reauthorize" : "Authorize"}
-          </button>
+          {!allowBearer && (
+            <button
+              className="primary sm"
+              type="button"
+              disabled={
+                busy ||
+                (needsManualClientId && !clientId.trim()) ||
+                (urlFromOperator && !mcpUrl.trim())
+              }
+              onClick={() => void authorize()}
+            >
+              {active ? "Reauthorize" : "Authorize"}
+            </button>
+          )}
         </div>
 
         <details className="apps-tech">
@@ -1019,23 +1140,27 @@ function OAuthManagePanel({
               <span className="muted">MCP</span>
               <code>{specString(app.spec, "url")}</code>
             </div>
-            <div>
-              <span className="muted">Authorize</span>
-              <code>{specString(app.spec, "authorize_url")}</code>
-            </div>
-            <div>
-              <span className="muted">Token</span>
-              <code>{specString(app.spec, "token_url")}</code>
-            </div>
-            <div>
-              <span className="muted">Scopes</span>
-              <code>{specStringList(app.spec, "scopes").join(" ")}</code>
-            </div>
-            {specString(app.spec, "resource") && (
-              <div>
-                <span className="muted">Resource</span>
-                <code>{specString(app.spec, "resource")}</code>
-              </div>
+            {!allowBearer && (
+              <>
+                <div>
+                  <span className="muted">Authorize</span>
+                  <code>{specString(app.spec, "authorize_url")}</code>
+                </div>
+                <div>
+                  <span className="muted">Token</span>
+                  <code>{specString(app.spec, "token_url")}</code>
+                </div>
+                <div>
+                  <span className="muted">Scopes</span>
+                  <code>{specStringList(app.spec, "scopes").join(" ")}</code>
+                </div>
+                {specString(app.spec, "resource") && (
+                  <div>
+                    <span className="muted">Resource</span>
+                    <code>{specString(app.spec, "resource")}</code>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </details>
@@ -1056,6 +1181,7 @@ function OAuthManagePanel({
     </DrawerShell>
   );
 }
+
 
 function skillBridgeSecretDefs(app: SkillBridgeApp) {
   // Shared with CatalogConfigForm via parseEnvRows (bare strings + {name,label,secret}).

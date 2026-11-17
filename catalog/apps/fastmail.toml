@@ -1,0 +1,26 @@
+slug = "fastmail"
+label = "Fastmail"
+description = "Fastmail official remote MCP (mail, contacts, calendars). Connect with an MCP API token."
+connection = "oauth"
+egress = "overseas"
+popular = true
+categories = ["Productivity"]
+tags = ["fastmail", "email", "oauth", "mcp"]
+sort_order = 21
+
+[spec]
+url = "https://api.fastmail.com/mcp"
+authorize_url = "https://api.fastmail.com/oauth/authorize"
+# Fastmail's token endpoint path is /oauth/refresh (AS metadata).
+token_url = "https://api.fastmail.com/oauth/refresh"
+# Public https redirects are not accepted via CIMD/DCR; Connect is MCP API token only.
+allow_bearer_token = true
+token_endpoint_auth_method = "none"
+resource = "https://api.fastmail.com/mcp"
+scopes = [
+  "https://www.fastmail.com/dev/mcp",
+  "offline_access",
+]
+setup_hints = [
+  "Paste an MCP API token from Settings → Privacy & Security → Manage API tokens → Type **MCP**, then Save token. Docs: [Connecting AI tools via Fastmail's MCP server](https://www.fastmail.help/hc/en-us/articles/15869557281295-Connecting-AI-tools-via-Fastmail-s-MCP-server).",
+]

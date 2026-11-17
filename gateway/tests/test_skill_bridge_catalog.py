@@ -267,6 +267,20 @@ def test_egress_preferred_regions_for_catalog_slugs():
     assert preferred_regions_for_slug("") == []
 
 
+def test_fastmail_oauth_seed_shape():
+    from portunus_gateway.catalog import DEFAULT_APPS, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "fastmail")
+    spec = validate_spec("oauth", raw["spec"])
+    assert spec["url"] == "https://api.fastmail.com/mcp"
+    assert spec["token_url"] == "https://api.fastmail.com/oauth/refresh"
+    # Fastmail rejects unregistered public https redirects for CIMD/DCR.
+    assert "use_cimd" not in spec
+    assert spec["allow_bearer_token"] is True
+    assert "https://www.fastmail.com/dev/mcp" in spec["scopes"]
+    assert "offline_access" in spec["scopes"]
+
+
 def test_github_oauth_seed_shape():
     from portunus_gateway.catalog import DEFAULT_APPS, validate_spec
 

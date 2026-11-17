@@ -4,14 +4,18 @@ A probe is dashboard/scheduler-only: the child lives in the ``probe`` namespace 
 child table, the invoke singleton and the per-key/global caps -- and is always killed and reaped
 when the probe ends (result, error, timeout, cancellation or session loss).
 
-Transport is the MCP stdio framing: one JSON-RPC message per line. Prefers MCP ``2026-07-28``
-(``server/discover``) and falls back to the initialize handshake for older servers.
+Transport is the MCP stdio framing: one JSON-RPC message per line. Uses the initialize
+handshake (``2025-11-25`` / peer-chosen version). ``server/discover`` (2026-07-28) is not
+sent first: several shipping servers ignore or crash on unknown methods (e.g.
+``mcp-server-cvm``), which previously burned the whole probe budget as ``upstream_timeout``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+from collections.abc import Callable
 from typing import Any
 
 from portunus_shared import PortunusError
@@ -23,6 +27,10 @@ CLIENT_INFO = {"name": "portunus-probe", "version": "1"}
 MAX_PAGES = 50
 MAX_TOOLS = 2000
 MAX_RESULT_BYTES = 4 * 1024 * 1024  # stays under the 5MiB wire frame with envelope room
+# Many pre-2026 servers ignore unknown methods instead of returning -32601. Cap the
+# discover attempt so those peers fall back to initialize instead of burning the
+# whole probe budget (seen with mcp-server-cvm / alibabacloud.mcp-proxy).
+DISCOVER_BUDGET_S = 2.0
 
 
 def _crash(message: str, *, cause: str | None = None) -> PortunusError:
@@ -44,8 +52,15 @@ class MethodError(PortunusError):
 class _Stdio:
     OVERSIZE_CODE = "upstream_crash"  # code for a child line over the reader limit
 
-    def __init__(self, proc: Any, *, client_info: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        proc: Any,
+        *,
+        client_info: dict[str, str] | None = None,
+        stderr_tail: Callable[[], str] | None = None,
+    ) -> None:
         self._proc = proc
+        self._stderr_tail = stderr_tail
         self._next_id = 0
         self.modern = False
         self.protocol = MODERN_PROTOCOL_VERSION
@@ -91,7 +106,18 @@ class _Stdio:
             except (ValueError, asyncio.LimitOverrunError):
                 raise PortunusError(self.OVERSIZE_CODE, "child sent an oversize line") from None
             if not line:
-                raise _crash("child exited before answering", cause="child_exited")
+                # Prefer ProcessHandle.stderr_tail — never compete with its drain
+                # reader on the same StreamReader.
+                tail = ""
+                if self._stderr_tail is not None:
+                    with contextlib.suppress(Exception):
+                        tail = (self._stderr_tail() or "").strip()
+                detail = (
+                    f"child exited before answering: {tail[-400:]}"
+                    if tail
+                    else "child exited before answering"
+                )
+                raise _crash(detail, cause="child_exited")
             try:
                 reply = json.loads(line)
             except ValueError:
@@ -136,13 +162,28 @@ async def _legacy_handshake(rpc: _Stdio) -> None:
 
 
 async def connect_stdio(rpc: _Stdio) -> None:
-    """Negotiate protocol: ``server/discover`` first, else initialize handshake."""
+    """Negotiate protocol via initialize handshake.
+
+    ``server/discover`` is intentionally not probed first: peers that neither
+    implement it nor return ``-32601`` can hang or crash (see module docstring).
+    """
+    await _legacy_handshake(rpc)
+
+
+async def connect_stdio_prefer_discover(rpc: _Stdio) -> None:
+    """Like ``connect_stdio`` but try ``server/discover`` first (short budget).
+
+    Kept for modern peers / tests; production probe/rpc use ``connect_stdio``.
+    """
     rpc.modern = True
     rpc.protocol = MODERN_PROTOCOL_VERSION
     try:
-        result = await rpc.call("server/discover", {})
+        async with asyncio.timeout(DISCOVER_BUDGET_S):
+            result = await rpc.call("server/discover", {})
+    except TimeoutError:
+        await _legacy_handshake(rpc)
+        return
     except MethodError as e:
-        # Unknown method / invalid request → older peer; anything else is fatal.
         if e.jsonrpc_code not in (-32601, -32600, None):
             raise
         await _legacy_handshake(rpc)
@@ -155,14 +196,19 @@ async def connect_stdio(rpc: _Stdio) -> None:
         return
 
 
-async def list_tools(proc: Any, timeout_s: float) -> list[dict]:
+async def list_tools(
+    proc: Any,
+    timeout_s: float,
+    *,
+    stderr_tail: Callable[[], str] | None = None,
+) -> list[dict]:
     """Run connect + tools/list (all pages) against ``proc`` within ``timeout_s``.
 
     Raises ``upstream_timeout`` / ``upstream_crash`` / ``payload_too_large``.
     """
     try:
         async with asyncio.timeout(timeout_s):
-            rpc = _Stdio(proc)
+            rpc = _Stdio(proc, stderr_tail=stderr_tail)
             await connect_stdio(rpc)
 
             tools: list[dict] = []

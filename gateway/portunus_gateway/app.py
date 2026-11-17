@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
+from .cimd import CIMD_PATH, cimd_document
 from .omni import Omni
 from .operator_api import create_app
 from .operator_auth import OperatorAuth
@@ -56,6 +57,23 @@ def build_app(*, registry: Registry, omni: Omni, auth: OperatorAuth | None = Non
         return PlainTextResponse(
             _SKILL_MD_TEXT,
             media_type="text/markdown; charset=utf-8",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+
+    @app.get(CIMD_PATH, include_in_schema=False, response_model=None)
+    async def oauth_client_metadata() -> dict[str, Any] | JSONResponse:
+        """OAuth Client ID Metadata Document (CIMD) for MCP authorization."""
+        doc = cimd_document()
+        if doc is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "code": "not_found",
+                    "message": "PORTUNUS_PUBLIC_URL is not configured for CIMD",
+                },
+            )
+        return JSONResponse(
+            content=doc,
             headers={"Cache-Control": "public, max-age=300"},
         )
 

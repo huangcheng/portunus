@@ -797,3 +797,112 @@ async def test_dcr_persists_client_secret(http, monkeypatch):
     assert await registry.read_oauth_client_secret(sid) == "dyn-secret"
     cfg = await registry.remote_oauth_config(sid)
     assert cfg["client_id"] == "dyn-1"
+
+
+def test_cimd_document(monkeypatch):
+    from portunus_gateway.cimd import cimd_client_id, cimd_document
+
+    monkeypatch.delenv("PORTUNUS_PUBLIC_URL", raising=False)
+    assert cimd_document() is None
+    assert cimd_client_id() is None
+
+    monkeypatch.setenv("PORTUNUS_PUBLIC_URL", "https://portunus.example.com/")
+    doc = cimd_document()
+    assert doc is not None
+    assert doc["client_id"] == "https://portunus.example.com/oauth/client-metadata.json"
+    assert doc["redirect_uris"] == ["https://portunus.example.com/api/oauth/callback"]
+    assert doc["token_endpoint_auth_method"] == "none"
+    assert doc["application_type"] == "web"
+
+
+async def test_cimd_oauth_start_skips_dcr(http, monkeypatch):
+    """use_cimd binds client_id to the CIMD URL without calling DCR."""
+    client, registry, _app = http
+    monkeypatch.setenv("PORTUNUS_PUBLIC_URL", "https://portunus.example.com")
+
+    called = {"n": 0}
+
+    async def boom(**_kwargs):
+        called["n"] += 1
+        raise AssertionError("DCR must not run when use_cimd")
+
+    monkeypatch.setattr("portunus_gateway.operator_api.register_oauth_client", boom)
+
+    created = await client.post(
+        "/api/servers",
+        json={
+            "name": "CIMD",
+            "slug": "cimd-vercel",
+            "kind": "remote",
+            "url": "https://mcp.vercel.com/",
+            "oauth": {
+                "authorize_url": "https://vercel.com/oauth/authorize",
+                "token_url": "https://vercel.com/api/login/oauth/token",
+                "scopes": ["openid"],
+                "use_cimd": True,
+                "resource": "https://mcp.vercel.com/",
+                "token_endpoint_auth_method": "none",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    sid = uuid.UUID(created.json()["id"])
+    start = await client.post(
+        f"/api/servers/{sid}/oauth/start",
+        json={"redirect_uri": "https://portunus.example.com/api/oauth/callback"},
+    )
+    assert start.status_code == 200, start.text
+    assert called["n"] == 0
+    data = start.json()
+    assert "client_id=" in data["authorize_url"]
+    assert "client-metadata.json" in data["authorize_url"]
+    cfg = await registry.remote_oauth_config(sid)
+    assert cfg["client_id"] == "https://portunus.example.com/oauth/client-metadata.json"
+    assert cfg.get("use_cimd") is True
+
+
+async def test_dcr_invalid_redirect_falls_back_to_cimd(http, monkeypatch):
+    """When DCR rejects redirect_uri, bind CIMD instead of 500."""
+    from portunus_gateway.oauth import OAuthError
+
+    client, registry, _app = http
+    monkeypatch.setenv("PORTUNUS_PUBLIC_URL", "https://portunus.example.com")
+
+    async def reject(**_kwargs):
+        raise OAuthError(
+            502,
+            "invalid_oauth",
+            "DCR rejected: invalid_redirect_uri — not approved",
+        )
+
+    monkeypatch.setattr("portunus_gateway.operator_api.register_oauth_client", reject)
+
+    created = await client.post(
+        "/api/servers",
+        json={
+            "name": "Vercel-like",
+            "slug": "dcr-fallback",
+            "kind": "remote",
+            "url": "https://mcp.vercel.com/",
+            "oauth": {
+                "authorize_url": "https://vercel.com/oauth/authorize",
+                "token_url": "https://vercel.com/api/login/oauth/token",
+                "scopes": ["openid"],
+                "registration_endpoint": "https://vercel.com/api/register",
+                "resource": "https://mcp.vercel.com/",
+                "token_endpoint_auth_method": "none",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    sid = uuid.UUID(created.json()["id"])
+    start = await client.post(
+        f"/api/servers/{sid}/oauth/start",
+        json={"redirect_uri": "https://portunus.example.com/api/oauth/callback"},
+    )
+    assert start.status_code == 200, start.text
+    assert "client-metadata.json" in start.json()["authorize_url"]
+    cfg = await registry.remote_oauth_config(sid)
+    assert cfg["client_id"] == "https://portunus.example.com/oauth/client-metadata.json"
+    assert cfg.get("use_cimd") is True
+    assert "registration_endpoint" not in cfg

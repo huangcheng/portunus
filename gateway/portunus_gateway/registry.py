@@ -1215,6 +1215,15 @@ class Registry:
                 audit["url"] = True
             if oauth is not None:
                 # Empty object clears oauth; non-empty replaces config.
+                # Once CIMD is enabled, keep it across Connect PATCH (UI must not
+                # silently fall back to DCR that Vercel rejects).
+                if (
+                    oauth_cfg
+                    and isinstance(server.oauth, dict)
+                    and server.oauth.get("use_cimd") is True
+                ):
+                    oauth_cfg = {**oauth_cfg, "use_cimd": True}
+                    oauth_cfg.pop("registration_endpoint", None)
                 server.oauth = oauth_cfg
                 audit["oauth"] = bool(oauth_cfg)
             if oauth_client_secret:

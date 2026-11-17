@@ -14,15 +14,19 @@ Ship a **catalog app** operators Connect in the dashboard. Prefer **seeded recip
 
 ## Choose the connection
 
+**Prefer remote API / MCP endpoints over CLIs** (see root `AGENTS.md`). Use
+hosted Streamable HTTP / SSE / OAuth MCP when the vendor offers it; use local
+`stdio` / `uvx` / CLI skill-bridge only when no usable remote exists.
+
 | `connection` | When | Spec lives in |
 |---|---|---|
-| `oauth` | Remote MCP + OAuth | `spec.url` + authorize/token (+ scopes) |
-| `http` | Remote MCP, bearer/cookie elsewhere or open | `spec.url` |
+| `oauth` | Remote MCP + OAuth (preferred when available) | `spec.url` or `url_from_operator` + authorize/token (+ scopes) |
+| `http` | Remote MCP, bearer/cookie elsewhere or open | `spec.url` or `url_from_operator` |
 | `webdav` | WebDAV via `webdav-mcp-server` | `root_url`, `root_path` |
-| `stdio` | Custom local MCP argv | `command`, `args`, `env` secret defs |
+| `stdio` | Local MCP argv — last resort | `command`, `args`, `env` secret defs |
 | `skill_bridge` | Vendor CLI / HTTP RPC wrapped as MCP | packaged YAML + `spec.manifest` |
 
-**Default for vendor drive/CLI skills:** `skill_bridge` + `json_cli` (Quark, 光鸭). **Default for HTTP API gateways:** `skill_bridge` + `http_rpc` (WeRead).
+**Default for HTTP API gateways:** `skill_bridge` + `http_rpc` (WeRead) when there is no remote MCP. **Default for vendor drive/CLI skills with no remote MCP:** `skill_bridge` + `json_cli` (Quark, 光鸭).
 
 Copy nearest peer:
 
@@ -66,8 +70,6 @@ cd packages/portunus_skill_bridge && uv run python -c \
 2. Add matching `catalog/apps/<slug>.toml` (filename stem = slug). skill_bridge uses
    `spec.manifest = "<slug>.example.yaml"` + `secrets = ["ENV_NAME"]` (not inlined YAML).
    Keep TOML and `DEFAULT_APPS` in parity — `test_packaged_apps_cover_default_apps` enforces it.
-   Optional regenerate: `python scripts/_gen_catalog_tomls.py`.
-
 `ensure_defaults()` **inserts missing `skill_bridge` / `http` / `oauth` / rclone-stdio seeds**
 and refreshes skill_bridge when tools/auth change.
 

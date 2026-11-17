@@ -223,7 +223,9 @@ class Spawner:
                 *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                # PIPE + ProcessHandle drain: surface a short stderr tail on crash
+                # without deadlocking a chatty child.
+                stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd="/",
                 start_new_session=True,

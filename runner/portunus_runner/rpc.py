@@ -35,8 +35,12 @@ def _ms_since(t0: float) -> int:
 
 
 class ChildRpc:
-    def __init__(self, proc: Any) -> None:
-        self._stdio = _RpcStdio(proc, client_info={"name": "portunus-invoke", "version": "1"})
+    def __init__(self, proc: Any, *, stderr_tail: Any = None) -> None:
+        self._stdio = _RpcStdio(
+            proc,
+            client_info={"name": "portunus-invoke", "version": "1"},
+            stderr_tail=stderr_tail,
+        )
         self._lock = asyncio.Lock()
         self._ready = False
         self.last_timing: dict[str, int] = {}

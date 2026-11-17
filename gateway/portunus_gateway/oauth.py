@@ -132,6 +132,7 @@ def validate_oauth_config(raw: Any) -> dict[str, Any] | None:
         raise OAuthError(422, "invalid_oauth", "scopes too large")
     client_id = raw.get("client_id")
     registration_endpoint = raw.get("registration_endpoint")
+    use_cimd = raw.get("use_cimd") is True
     if client_id is not None and client_id != "":
         if not isinstance(client_id, str) or not client_id.strip():
             raise OAuthError(422, "invalid_oauth", "client_id must be a non-empty string")
@@ -140,9 +141,11 @@ def validate_oauth_config(raw: Any) -> dict[str, Any] | None:
         client_id = None
     if registration_endpoint:
         registration_endpoint = _https_url("registration_endpoint", registration_endpoint)
-    if not client_id and not registration_endpoint:
+    if not client_id and not registration_endpoint and not use_cimd:
         raise OAuthError(
-            422, "invalid_oauth", "client_id required (or registration_endpoint for DCR)"
+            422,
+            "invalid_oauth",
+            "client_id required (or registration_endpoint for DCR, or use_cimd)",
         )
     out: dict[str, Any] = {
         "authorize_url": authorize_url,
@@ -153,6 +156,8 @@ def validate_oauth_config(raw: Any) -> dict[str, Any] | None:
         out["client_id"] = client_id
     if registration_endpoint:
         out["registration_endpoint"] = registration_endpoint
+    if use_cimd:
+        out["use_cimd"] = True
     resource = raw.get("resource")
     if resource:
         out["resource"] = _https_url("resource", resource)
@@ -182,6 +187,7 @@ def oauth_public_view(oauth: dict[str, Any] | None) -> dict[str, Any] | None:
         "issuer": oauth.get("issuer"),
         "registration_endpoint": oauth.get("registration_endpoint"),
         "token_endpoint_auth_method": oauth.get("token_endpoint_auth_method"),
+        "use_cimd": bool(oauth.get("use_cimd")),
         "configured": bool(oauth.get("authorize_url") and oauth.get("token_url")),
     }
 
@@ -312,7 +318,19 @@ async def register_oauth_client(
             502, "upstream_crash", f"registration endpoint failed: {type(e).__name__}"
         ) from e
     if resp.status_code >= 400:
-        raise OAuthError(502, "invalid_oauth", "dynamic client registration rejected")
+        detail = "dynamic client registration rejected"
+        try:
+            err_body = resp.json()
+        except ValueError:
+            err_body = None
+        if isinstance(err_body, dict):
+            err = err_body.get("error")
+            desc = err_body.get("error_description")
+            if isinstance(err, str) and isinstance(desc, str) and desc.strip():
+                detail = f"DCR rejected: {err} — {desc.strip()[:240]}"
+            elif isinstance(err, str) and err.strip():
+                detail = f"DCR rejected: {err}"
+        raise OAuthError(502, "invalid_oauth", detail)
     try:
         data = resp.json()
     except ValueError:

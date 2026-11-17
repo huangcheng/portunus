@@ -114,6 +114,8 @@ export type OAuthConfig = {
   issuer?: string | null;
   registration_endpoint?: string | null;
   token_endpoint_auth_method?: string | null;
+  use_cimd?: boolean;
+  allow_bearer_token?: boolean;
   configured: boolean;
 };
 
@@ -141,6 +143,8 @@ export type OAuthBody = {
   issuer?: string;
   registration_endpoint?: string;
   token_endpoint_auth_method?: string;
+  /** Prefer CIMD over DCR when the AS advertises client_id_metadata_document_supported. */
+  use_cimd?: boolean;
 };
 
 export type UpdateServerBody = {

@@ -22,4 +22,24 @@ Every public Provider / App that operators can Connect must have a recipe file a
 
 `test_packaged_apps_cover_default_apps` enforces the mapping. When adding an app,
 follow `.cursor/skills/add-portunus-app/SKILL.md` (manifest + seed + TOML + icon).
-Optional regenerate: `python scripts/_gen_catalog_tomls.py`.
+
+## Prefer remote API / MCP endpoints over CLIs
+
+When wiring a vendor into the catalog, **always prefer a hosted remote MCP (HTTP /
+SSE / Streamable HTTP) or HTTP API** over a local CLI / `stdio` / `uvx` / `npx`
+proxy when the vendor offers one.
+
+Order of preference:
+
+1. **Remote MCP + OAuth** (`connection = "oauth"`) — fixed or operator-pasted URL
+2. **Remote MCP + bearer / API token** (`connection = "http"`, optionally
+   `url_from_operator`)
+3. **HTTP RPC skill-bridge** (`skill_bridge` + `http_rpc`) when there is a stable
+   HTTP API but no MCP
+4. **Local stdio / CLI** (`stdio`, `uvx` packages, `skill_bridge` + `json_cli`) —
+   only when no usable remote endpoint exists
+
+Do not keep a local mcp-proxy / CLI wrapper if a remote endpoint is available
+(example: Aliyun OpenAPI MCP remote over `alibabacloud.mcp-proxy`). Product-scoped
+hosted marketplace URLs (e.g. Tencent MCP 广场 SSE) count as remote and beat
+stdio. Document how the operator gets the URL or token in `setup_hints`.

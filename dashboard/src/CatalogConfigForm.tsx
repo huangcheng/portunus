@@ -191,6 +191,15 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
       if (issuer) out.issuer = issuer;
       const method = String(spec.token_endpoint_auth_method ?? "").trim();
       if (method) out.token_endpoint_auth_method = method;
+      if (spec.use_cimd === true) out.use_cimd = true;
+      if (spec.allow_bearer_token === true) out.allow_bearer_token = true;
+      if (spec.url_from_operator === true) {
+        out.url_from_operator = true;
+        // Operator-pasted MCP URL at Connect; seed may omit a fixed url.
+        const url = String(spec.url ?? "").trim();
+        if (url) out.url = url;
+        else delete out.url;
+      }
       return withSetupHints(out);
     }
     if (connection === "http") {

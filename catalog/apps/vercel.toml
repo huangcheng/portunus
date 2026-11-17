@@ -9,14 +9,15 @@ tags = ["vercel", "oauth", "mcp", "deploy"]
 sort_order = 19
 
 [spec]
-url = "https://mcp.vercel.com"
+url = "https://mcp.vercel.com/"
 authorize_url = "https://vercel.com/oauth/authorize"
 token_url = "https://vercel.com/api/login/oauth/token"
-registration_endpoint = "https://vercel.com/api/login/oauth/register"
+# Vercel rejects unapproved DCR redirect URIs; use Client ID Metadata Document.
+use_cimd = true
 token_endpoint_auth_method = "none"
-resource = "https://mcp.vercel.com"
-issuer = "https://vercel.com"
+resource = "https://mcp.vercel.com/"
+# No issuer: Vercel omits RFC 9207 iss on the authorize redirect.
 scopes = ["openid"]
 setup_hints = [
-  "Vercel may require an approved MCP client or CIMD client_id. Docs: [vercel.com/docs/agent-resources/vercel-mcp](https://vercel.com/docs/agent-resources/vercel-mcp).",
+  "Authorize uses Portunus CIMD (no Vercel client review). Docs: [vercel.com/docs/agent-resources/vercel-mcp](https://vercel.com/docs/agent-resources/vercel-mcp).",
 ]
