@@ -10,7 +10,25 @@
 
 const fs = require("fs");
 const path = require("path");
-const { TextDecoder } = require("util");
+const {
+  PATH_FORBIDDEN_CHARACTER,
+  SHARED_LIMITS,
+  JsonStructureError,
+  SafeInputError,
+  UNSAFE_DIAGNOSTIC_CHARACTER,
+  VISIBLE_CONTENT,
+  WINDOWS_RESERVED_COMPONENT,
+  appendErrors,
+  createErrorList,
+  escapeUnsafeDiagnosticCharacters,
+  hasValidUnicodeScalarValues,
+  hasVisibleProse,
+  isSafeRelativePath: isSafeRelativeSourcePath,
+  preflightDocument: preflightDocumentShared,
+  preflightJsonText,
+  readFileWithinLimit,
+  safeQuote,
+} = require("./validation-shared.cjs");
 
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const SUPPORTED_TYPES = new Set(["object", "array", "string", "integer", "number", "boolean", "null"]);
@@ -40,67 +58,16 @@ const SEVERITY_RANK = new Map([
   ["critical", 4],
 ]);
 const LIMITS = Object.freeze({
-  inputBytes: 5 * 1024 * 1024,
-  nestingDepth: 64,
-  arrayItems: 1000,
+  ...SHARED_LIMITS,
+  arrayItems: SHARED_LIMITS.collectionItems,
   canonicalKeyBytes: 1024 * 1024,
   uniqueSetBytes: 5 * 1024 * 1024,
-  validationErrors: 100,
 });
-const VISIBLE_CONTENT = /[^\p{White_Space}\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
-const PATH_FORBIDDEN_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u;
-const WINDOWS_RESERVED_COMPONENT = /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/iu;
-const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-const UNSAFE_DIAGNOSTIC_CHARACTER = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
-const MAX_DIAGNOSTIC_STRING_LENGTH = 256;
-
-class JsonStructureError extends Error {}
-class SafeInputError extends Error {}
-
-function escapeUnsafeDiagnosticCharacters(value) {
-  return String(value).replace(UNSAFE_DIAGNOSTIC_CHARACTER, (character) => {
-    const codePoint = character.codePointAt(0);
-    return codePoint <= 0xffff
-      ? `\\u${codePoint.toString(16).padStart(4, "0")}`
-      : `\\u{${codePoint.toString(16)}}`;
-  });
-}
-
-function safeQuote(value) {
-  let serialized;
-  if (typeof value === "string") {
-    const clipped = value.length > MAX_DIAGNOSTIC_STRING_LENGTH
-      ? `${value.slice(0, MAX_DIAGNOSTIC_STRING_LENGTH)}...`
-      : value;
-    serialized = JSON.stringify(clipped);
-  } else if (value === null || typeof value === "boolean") {
-    serialized = String(value);
-  } else if (typeof value === "number" && Number.isFinite(value)) {
-    serialized = String(value);
-  } else {
-    serialized = `"<${Array.isArray(value) ? "array" : typeof value}>"`;
-  }
-  return escapeUnsafeDiagnosticCharacters(serialized);
-}
 
 function propertyPath(base, key) {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
     ? `${base}.${key}`
     : `${base}[${safeQuote(key)}]`;
-}
-
-function createErrorList() {
-  const errors = [];
-  Object.defineProperty(errors, "push", {
-    value(...messages) {
-      const remaining = LIMITS.validationErrors - this.length;
-      if (remaining > 0) {
-        Array.prototype.push.apply(this, messages.slice(0, remaining).map(escapeUnsafeDiagnosticCharacters));
-      }
-      return this.length;
-    },
-  });
-  return errors;
 }
 
 function typeOf(value) {
@@ -136,25 +103,6 @@ function codePointLength(value) {
     length++;
   }
   return length;
-}
-
-function hasValidUnicodeScalarValues(value) {
-  let index = 0;
-  while (index < value.length) {
-    const first = value.charCodeAt(index++);
-    if (first >= 0xd800 && first <= 0xdbff) {
-      if (index >= value.length) return false;
-      const second = value.charCodeAt(index++);
-      if (second < 0xdc00 || second > 0xdfff) return false;
-    } else if (first >= 0xdc00 && first <= 0xdfff) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function hasVisibleProse(value) {
-  return hasValidUnicodeScalarValues(value) && VISIBLE_CONTENT.test(value);
 }
 
 function canonicalKey(value) {
@@ -205,43 +153,7 @@ function canonicalKey(value) {
 }
 
 function collectDataLimitErrors(value, location = "$data") {
-  const stack = [{ value, location, depth: value !== null && typeof value === "object" ? 1 : 0 }];
-  const seen = new WeakSet();
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (current.value === null || typeof current.value !== "object") continue;
-    if (current.depth > LIMITS.nestingDepth) {
-      return [escapeUnsafeDiagnosticCharacters(`${current.location}: exceeds ${LIMITS.nestingDepth} level nesting depth limit`)];
-    }
-    if (seen.has(current.value)) {
-      return [escapeUnsafeDiagnosticCharacters(`${current.location}: input must not contain repeated or cyclic object references`)];
-    }
-    seen.add(current.value);
-
-    if (Array.isArray(current.value)) {
-      if (current.value.length > LIMITS.arrayItems) {
-        return [escapeUnsafeDiagnosticCharacters(`${current.location}: exceeds ${LIMITS.arrayItems} item array limit`)];
-      }
-      for (let index = current.value.length - 1; index >= 0; index--) {
-        const child = current.value[index];
-        if (child !== null && typeof child === "object") {
-          stack.push({ value: child, location: `${current.location}[${index}]`, depth: current.depth + 1 });
-        }
-      }
-    } else {
-      const keys = Object.keys(current.value);
-      for (let index = keys.length - 1; index >= 0; index--) {
-        const key = keys[index];
-        const child = current.value[key];
-        if (child !== null && typeof child === "object") {
-          stack.push({ value: child, location: propertyPath(current.location, key), depth: current.depth + 1 });
-        }
-      }
-    }
-  }
-
-  return [];
+  return preflightDocumentShared(value, { topLevelItems: LIMITS.arrayItems, location });
 }
 
 function collectSchemaErrors(schema, location = "schema") {
@@ -359,7 +271,7 @@ function findDiscriminator(schema) {
 }
 
 function validate(value, schema, p, errors) {
-  if (errors.length >= LIMITS.validationErrors) return;
+  if (errors.truncated) return;
   if (hasOwn(schema, "oneOf")) {
     const results = schema.oneOf.map((branch) => collectUnchecked(value, branch, p));
     const passingIndexes = results
@@ -373,7 +285,8 @@ function validate(value, schema, p, errors) {
           .map((branch, index) => ({ discriminator: findDiscriminator(branch), index }))
           .filter(({ discriminator }) => discriminator && hasOwn(value, discriminator.key) && deepEqual(value[discriminator.key], discriminator.value));
         if (matchingDiscriminators.length === 1) {
-          errors.push(...results[matchingDiscriminators[0].index]);
+          const branchErrors = results[matchingDiscriminators[0].index];
+          appendErrors(errors, branchErrors);
         }
       }
     }
@@ -470,18 +383,6 @@ function collect(value, schema, p = "$data") {
   return collectUnchecked(value, schema, p);
 }
 
-function isSafeRelativeSourcePath(value) {
-  if (typeof value !== "string" || value.length === 0 || !hasValidUnicodeScalarValues(value) || value.trim() !== value || PATH_FORBIDDEN_CHARACTER.test(value) || value.includes("\\") || value.includes(":")) return false;
-  if (path.posix.isAbsolute(value) || path.win32.isAbsolute(value) || /^[A-Za-z]:/.test(value) || value.startsWith("~")) return false;
-  const segments = value.split("/");
-  return segments.every((segment) =>
-    segment !== "" &&
-    segment !== "." &&
-    segment !== ".." &&
-    !/[ .]$/u.test(segment) &&
-    !WINDOWS_RESERVED_COMPONENT.test(segment));
-}
-
 function collectFindingSemanticErrors(findings) {
   const errors = createErrorList();
   if (!Array.isArray(findings)) return errors;
@@ -489,7 +390,7 @@ function collectFindingSemanticErrors(findings) {
   const fingerprints = new Map();
   let previousFingerprint = null;
   findings.forEach((finding, index) => {
-    if (errors.length >= LIMITS.validationErrors) return;
+    if (errors.truncated) return;
     if (!finding || typeof finding !== "object" || Array.isArray(finding)) return;
     const base = `$[${index}]`;
 
@@ -588,8 +489,8 @@ function validateDocument(findings, schema) {
   const limitErrors = collectDataLimitErrors(findings, "$");
   if (limitErrors.length > 0) return limitErrors;
   const errors = collectUnchecked(findings, schema, "$");
-  if (errors.length < LIMITS.validationErrors) {
-    errors.push(...collectFindingSemanticErrors(findings));
+  if (!errors.truncated) {
+    appendErrors(errors, collectFindingSemanticErrors(findings));
   }
   return errors;
 }
@@ -599,105 +500,6 @@ function loadSchema(schemaPath) {
   const errors = collectSchemaErrors(schema);
   if (errors.length > 0) throw new Error(`unsupported or invalid report schema:\n${errors.join("\n")}`);
   return schema;
-}
-
-function readFileWithinLimit(file) {
-  const noFollow = fs.constants.O_NOFOLLOW;
-  const nonBlock = fs.constants.O_NONBLOCK;
-  if (!Number.isInteger(noFollow) || noFollow === 0 || !Number.isInteger(nonBlock) || nonBlock === 0) {
-    throw new SafeInputError("OS no-follow and nonblocking input protection is unavailable");
-  }
-
-  let descriptor;
-  try {
-    descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow | nonBlock);
-  } catch (error) {
-    if (error && (error.code === "ELOOP" || error.code === "EMLINK")) {
-      throw new SafeInputError("input must not be a symlink");
-    }
-    throw error;
-  }
-  try {
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile()) {
-      throw new SafeInputError("input must be a regular file");
-    }
-    if (stat.size > LIMITS.inputBytes) {
-      throw new SafeInputError(`input exceeds ${LIMITS.inputBytes} byte limit`);
-    }
-
-    const chunks = [];
-    const buffer = Buffer.allocUnsafe(64 * 1024);
-    let bytesRead = 0;
-    while (true) {
-      const count = fs.readSync(descriptor, buffer, 0, buffer.length, null);
-      if (count === 0) break;
-      bytesRead += count;
-      if (bytesRead > LIMITS.inputBytes) {
-        throw new SafeInputError(`input exceeds ${LIMITS.inputBytes} byte limit`);
-      }
-      chunks.push(Buffer.from(buffer.subarray(0, count)));
-    }
-    try {
-      return UTF8_DECODER.decode(Buffer.concat(chunks, bytesRead));
-    } catch {
-      throw new SafeInputError("input is not valid UTF-8");
-    }
-  } finally {
-    fs.closeSync(descriptor);
-  }
-}
-
-function enforceJsonTextLimits(contents) {
-  const containers = [];
-  let inString = false;
-  let escaped = false;
-
-  function markArrayItem() {
-    const container = containers[containers.length - 1];
-    if (!container || container.type !== "array" || !container.expectsItem) return;
-    container.expectsItem = false;
-    container.items++;
-    if (container.items > LIMITS.arrayItems) {
-      throw new JsonStructureError(`input exceeds ${LIMITS.arrayItems} item array limit`);
-    }
-  }
-
-  for (let index = 0; index < contents.length; index++) {
-    const character = contents[index];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (character === "\\") {
-        escaped = true;
-      } else if (character === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (character === "\"") {
-      markArrayItem();
-      inString = true;
-    } else if (character === "[" || character === "{") {
-      markArrayItem();
-      if (containers.length >= LIMITS.nestingDepth) {
-        throw new JsonStructureError(`input exceeds ${LIMITS.nestingDepth} level nesting depth limit`);
-      }
-      containers.push({
-        type: character === "[" ? "array" : "object",
-        expectsItem: character === "[",
-        items: 0,
-      });
-    } else if (character === "]" || character === "}") {
-      containers.pop();
-    } else if (character === ",") {
-      const container = containers[containers.length - 1];
-      if (container && container.type === "array") container.expectsItem = true;
-    } else if (!/\s/.test(character)) {
-      markArrayItem();
-    }
-  }
 }
 
 function run(file) {
@@ -724,7 +526,7 @@ function run(file) {
   }
 
   try {
-    enforceJsonTextLimits(contents);
+    preflightJsonText(contents);
   } catch (error) {
     const reason = error instanceof JsonStructureError ? error.message : "invalid JSON structure";
     console.error(`Failed to parse findings JSON: ${reason}`);
@@ -748,7 +550,7 @@ function run(file) {
   }
   for (const message of errors) console.error("ERROR:", message);
   if (errors.length > 0) {
-    const cap = errors.length === LIMITS.validationErrors ? `; output capped at ${LIMITS.validationErrors}` : "";
+    const cap = errors.truncated ? `; output capped at ${LIMITS.validationErrors}` : "";
     console.error(`FAIL: ${errors.length} validation error(s)${cap}`);
     return 1;
   }

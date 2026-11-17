@@ -509,7 +509,7 @@ test("CLI rejects input above the nesting-depth limit without an exception trace
   const result = runCli(`${"[".repeat(levels)}0${"]".repeat(levels)}`);
   const output = cliOutput(result);
   assert.equal(result.status, 1, output);
-  assert.match(output, new RegExp(`${LIMITS.nestingDepth} level nesting depth limit`));
+  assert.match(output, new RegExp(`nesting depth limit ${LIMITS.nestingDepth}`));
   assert.doesNotMatch(output, /RangeError|Maximum call stack|heap out of memory/i);
 });
 
@@ -550,14 +550,18 @@ test("caps malformed 1000-finding validation output", () => {
 });
 
 test("caps amplified in-limit findings output under a constrained Node heap", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
-  const findings = Array.from({ length: 750 }, () => ({
+  const findings = Array.from({ length: 200 }, () => ({
     verdict: "confirmed",
-    trace: Array.from({ length: LIMITS.arrayItems }, () => 0),
-    evidence: Array.from({ length: LIMITS.arrayItems }, () => 0),
+    trace: Array.from({ length: LIMITS.arrayItems }, () => "xxxxx"),
+    evidence: Array.from({ length: LIMITS.arrayItems }, () => "xxxxx"),
   }));
   const contents = JSON.stringify(findings);
   assert(contents.length > 3 * 1000 * 1000, `hostile input too small: ${contents.length}`);
   assert(contents.length <= LIMITS.inputBytes, `hostile input over limit: ${contents.length}`);
+  assert(
+    1 + findings.length * (LIMITS.arrayItems * 2 + 3) <= LIMITS.preflightValues,
+    "hostile input exceeds the preflight value budget",
+  );
 
   const result = runCli(contents, {
     nodeArgs: ["--max-old-space-size=64"],
@@ -574,6 +578,18 @@ test("caps amplified in-limit findings output under a constrained Node heap", { 
 test("keeps shared helpers aligned with the coverage-ledger validator", () => {
   const findingsModule = require("./validate-findings.cjs");
   const ledgerModule = require("./validate-coverage-ledger.cjs");
+  const shared = require("./validation-shared.cjs");
+
+  for (const name of [
+    "createErrorList",
+    "escapeUnsafeDiagnosticCharacters",
+    "hasVisibleProse",
+    "readFileWithinLimit",
+    "safeQuote",
+  ]) {
+    assert.equal(findingsModule[name], shared[name], `${name} findings import`);
+    assert.equal(ledgerModule[name], shared[name], `${name} ledger import`);
+  }
 
   for (const name of [
     "VISIBLE_CONTENT",
@@ -588,7 +604,14 @@ test("keeps shared helpers aligned with the coverage-ledger validator", () => {
   const sharedLimitKeys = Object.keys(findingsModule.LIMITS)
     .filter((key) => Object.prototype.hasOwnProperty.call(ledgerModule.LIMITS, key))
     .sort();
-  assert.deepEqual(sharedLimitKeys, ["inputBytes", "nestingDepth", "validationErrors"]);
+  assert.deepEqual(sharedLimitKeys, [
+    "collectionItems",
+    "inputBytes",
+    "nestingDepth",
+    "objectFields",
+    "preflightValues",
+    "validationErrors",
+  ]);
   for (const key of sharedLimitKeys) {
     assert.equal(findingsModule.LIMITS[key], ledgerModule.LIMITS[key], `LIMITS.${key}`);
   }
@@ -693,4 +716,84 @@ test("keeps shared helpers aligned with the coverage-ledger validator", () => {
       fs.rmSync(directory, { recursive: true, force: true });
     }
   }
+});
+
+test("accepts a BOM-prefixed findings document", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const contents = Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from(JSON.stringify(producerShapedFindings())),
+  ]);
+  const result = runCli(contents);
+  assert.equal(result.status, 0, cliOutput(result));
+});
+
+test("bounds object fields and total values before findings validation", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const wideObject = Object.fromEntries(
+    Array.from({ length: LIMITS.objectFields + 1 }, (_, index) => [`field${index}`, null]),
+  );
+  assert(errorsFor([wideObject]).some((error) => error.includes(`${LIMITS.objectFields} field object limit`)));
+  const wideResult = runCli(JSON.stringify([wideObject]));
+  assert.equal(wideResult.status, 1, cliOutput(wideResult));
+  assert.match(cliOutput(wideResult), new RegExp(`${LIMITS.objectFields} field object limit`));
+
+  const manyValues = Array.from(
+    { length: Math.floor(LIMITS.preflightValues / LIMITS.arrayItems) + 1 },
+    () => Array(LIMITS.arrayItems).fill(null),
+  );
+  assert(errorsFor(manyValues).some((error) => error.includes(`${LIMITS.preflightValues} total value limit`)));
+  assert(errorsFor(manyValues).some((error) => /\$\[\d+\]\[\d+\]: exceeds/.test(error)));
+  const valuesResult = runCli(JSON.stringify(manyValues));
+  assert.equal(valuesResult.status, 1, cliOutput(valuesResult));
+  assert.match(cliOutput(valuesResult), new RegExp(`${LIMITS.preflightValues} total value limit`));
+});
+
+test("does not report output capping for exactly 100 errors", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const result = runCli(JSON.stringify(Array(LIMITS.validationErrors).fill(null)));
+  const output = cliOutput(result);
+  assert.equal(result.status, 1, output);
+  assert.match(output, new RegExp(`FAIL: ${LIMITS.validationErrors} validation error`));
+  assert.doesNotMatch(output, /output capped/);
+
+  const trailingValid = runCli(JSON.stringify([
+    ...Array(LIMITS.validationErrors).fill(null),
+    confirmed(),
+  ]));
+  assert.doesNotMatch(cliOutput(trailingValid), /output capped/);
+});
+
+test("counts each unquoted scalar once against the total-value limit", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const arrayCount = Math.max(1, Math.floor(LIMITS.preflightValues / (LIMITS.arrayItems + 1) * 0.9));
+  const contents = JSON.stringify(Array.from(
+    { length: arrayCount },
+    () => Array(LIMITS.arrayItems).fill(true),
+  ));
+  const result = runCli(contents);
+  assert.equal(result.status, 1, cliOutput(result));
+  assert.doesNotMatch(cliOutput(result), /total value limit/);
+});
+
+test("reports output capping when semantic errors exceed the limit", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const findings = Array.from({ length: LIMITS.validationErrors + 2 }, (_, index) => {
+    const finding = confirmed();
+    finding.fingerprint = `src-handler-${String(LIMITS.validationErrors + 2 - index).padStart(4, "0")}`;
+    return finding;
+  });
+  const result = runCli(JSON.stringify(findings));
+  const output = cliOutput(result);
+  assert.equal(result.status, 1, output);
+  assert.match(output, new RegExp(`output capped at ${LIMITS.validationErrors}`));
+});
+
+test("reports capping when schema errors reach the cap before semantic checks", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const findings = Array.from({ length: LIMITS.validationErrors / 2 }, (_, index) => {
+    const finding = confirmed();
+    delete finding.title;
+    finding.fingerprint = `src-handler-${String(LIMITS.validationErrors - index).padStart(4, "0")}`;
+    return finding;
+  });
+  const result = runCli(JSON.stringify(findings));
+  const output = cliOutput(result);
+  assert.equal(result.status, 1, output);
+  assert.match(output, new RegExp(`FAIL: ${LIMITS.validationErrors} validation error`));
+  assert.match(output, new RegExp(`output capped at ${LIMITS.validationErrors}`));
 });

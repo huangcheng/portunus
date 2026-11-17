@@ -718,7 +718,7 @@ test("rejects malformed top-level data and excessive unit counts", () => {
   assert.deepEqual(errors, ["$: exceeds 10000 coverage units"]);
 
   const oversizedCollection = unit({ extra: Array.from({ length: LIMITS.collectionItems + 1 }, () => null) });
-  assert(errorsFor([oversizedCollection]).some((error) => error.includes("exceeds 1000 entries")));
+  assert(errorsFor([oversizedCollection]).some((error) => error.includes(`${LIMITS.collectionItems} item array limit`)));
 });
 
 test("accepts a canonical ID derived from near-maximum multibyte references", () => {
@@ -757,4 +757,43 @@ test("reports the offending object key in nesting-limit locations", () => {
   const errors = errorsFor([nested]);
   assert(errors.some((error) => error.includes('{"fieldName"}')), errors.join("\n"));
   assert(!errors.some((error) => error.includes("{0}")), errors.join("\n"));
+});
+
+test("accepts a BOM-prefixed coverage ledger", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const contents = Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from(JSON.stringify([unit()])),
+  ]);
+  const result = runCli(contents);
+  assert.equal(result.status, 0, cliOutput(result));
+});
+
+test("does not report output capping for exactly 100 errors", { skip: !HAS_SAFE_INPUT_OPEN }, () => {
+  const directErrors = errorsFor(Array(LIMITS.validationErrors).fill(null));
+  assert.equal(directErrors.truncated, false);
+  const result = runCli(JSON.stringify(Array(LIMITS.validationErrors).fill(null)));
+  const output = cliOutput(result);
+  assert.equal(result.status, 1, output);
+  assert.match(output, new RegExp(`FAIL: ${LIMITS.validationErrors} validation error`));
+  assert.doesNotMatch(output, /output capped/);
+
+  const trailingValid = errorsFor([...Array(LIMITS.validationErrors).fill(null), unit()]);
+  assert.equal(trailingValid.truncated, false);
+});
+
+test("records truncation when late semantic errors reach the cap", () => {
+  const invalidUnits = Array.from({ length: LIMITS.validationErrors - 2 }, () => unit({ coverage_id: null }));
+  const base = unit();
+  const collision = unit({
+    canonical_refs: {
+      surface: "src/other.ts#POST /other",
+      boundary: "src/other.ts#requireOwner",
+      subsystem: "packages/other",
+      attack_class: "ATTACK-CLASSES.md#Access control",
+    },
+  });
+  collision.coverage_id = base.coverage_id;
+  const errors = errorsFor([...invalidUnits, base, collision, unit()]);
+  assert.equal(errors.length, LIMITS.validationErrors);
+  assert.equal(errors.truncated, true);
 });

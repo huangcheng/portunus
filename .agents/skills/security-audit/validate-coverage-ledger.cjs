@@ -5,21 +5,30 @@
  * Usage: node validate-coverage-ledger.cjs <path-to-coverage-ledger.json>
  */
 
-const fs = require("node:fs");
-const path = require("node:path");
-const { TextDecoder } = require("node:util");
+const {
+  PATH_FORBIDDEN_CHARACTER,
+  SHARED_LIMITS,
+  JsonStructureError,
+  SafeInputError,
+  UNSAFE_DIAGNOSTIC_CHARACTER,
+  VISIBLE_CONTENT,
+  WINDOWS_RESERVED_COMPONENT,
+  appendErrors,
+  createErrorList,
+  escapeUnsafeDiagnosticCharacters,
+  hasVisibleProse,
+  isSafeRelativePath,
+  preflightDocument: preflightDocumentShared,
+  preflightJsonText: preflightJsonTextShared,
+  readFileWithinLimit,
+  safeQuote,
+} = require("./validation-shared.cjs");
 
 // Conservative bounds apply before JSON.parse and again to the parsed document.
 const LIMITS = Object.freeze({
-  inputBytes: 5 * 1024 * 1024,
+  ...SHARED_LIMITS,
   units: 10000,
-  collectionItems: 1000,
-  objectFields: 1000,
-  nestingDepth: 64,
-  preflightValues: 500000,
-  validationErrors: 100,
 });
-const MAX_INPUT_BYTES = LIMITS.inputBytes;
 const MAX_UNITS = LIMITS.units;
 const MAX_LIST_ITEMS = LIMITS.collectionItems;
 const MAX_TEXT_LENGTH = 4096;
@@ -82,259 +91,18 @@ const PRIOR_STATUSES = new Set([
 const FINGERPRINT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/;
 const AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const WINDOWS_RESERVED_AGENT_ID = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
-const VISIBLE_CONTENT = /[^\p{White_Space}\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
-const PATH_FORBIDDEN_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u;
-const WINDOWS_RESERVED_COMPONENT = /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/iu;
-const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-const UNSAFE_DIAGNOSTIC_CHARACTER = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
-const MAX_DIAGNOSTIC_STRING_LENGTH = 256;
-
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
-
-class JsonStructureError extends Error {}
-class SafeInputError extends Error {}
-
-function escapeUnsafeDiagnosticCharacters(value) {
-  return String(value).replace(UNSAFE_DIAGNOSTIC_CHARACTER, (character) => {
-    const codePoint = character.codePointAt(0);
-    return codePoint <= 0xffff
-      ? `\\u${codePoint.toString(16).padStart(4, "0")}`
-      : `\\u{${codePoint.toString(16)}}`;
-  });
-}
-
-function safeQuote(value) {
-  let serialized;
-  if (typeof value === "string") {
-    const clipped = value.length > MAX_DIAGNOSTIC_STRING_LENGTH
-      ? `${value.slice(0, MAX_DIAGNOSTIC_STRING_LENGTH)}...`
-      : value;
-    serialized = JSON.stringify(clipped);
-  } else if (value === null || typeof value === "boolean") {
-    serialized = String(value);
-  } else if (typeof value === "number" && Number.isFinite(value)) {
-    serialized = String(value);
-  } else {
-    serialized = `"<${Array.isArray(value) ? "array" : typeof value}>"`;
-  }
-  return escapeUnsafeDiagnosticCharacters(serialized);
-}
-
-function createErrorList() {
-  const errors = [];
-  Object.defineProperty(errors, "push", {
-    value(...messages) {
-      const remaining = LIMITS.validationErrors - this.length;
-      if (remaining > 0) {
-        Array.prototype.push.apply(this, messages.slice(0, remaining).map(escapeUnsafeDiagnosticCharacters));
-      }
-      return this.length;
-    },
-  });
-  return errors;
-}
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function preflightJsonText(contents) {
-  const containers = [];
-  let rootState = "value";
-  let inString = false;
-  let escaped = false;
-  let totalValues = 0;
-
-  function fail(message) {
-    throw new JsonStructureError(`input ${message}`);
-  }
-
-  function currentContainer() {
-    return containers[containers.length - 1];
-  }
-
-  function countValue() {
-    totalValues++;
-    if (totalValues > LIMITS.preflightValues) {
-      fail(`exceeds ${LIMITS.preflightValues} total value limit`);
-    }
-  }
-
-  function beginValue() {
-    const container = currentContainer();
-    if (!container) {
-      if (rootState !== "value") fail("has malformed JSON structure");
-      rootState = "end";
-    } else if (container.type === "array") {
-      if (container.state !== "firstValueOrEnd" && container.state !== "value") {
-        fail("has malformed JSON array structure");
-      }
-      container.items++;
-      const limit = container.topLevel ? MAX_UNITS : LIMITS.collectionItems;
-      if (container.items > limit) {
-        fail(container.topLevel
-          ? `exceeds ${limit} top-level unit limit`
-          : `exceeds ${limit} item array limit`);
-      }
-      container.state = "commaOrEnd";
-    } else {
-      if (container.state !== "value") fail("has malformed JSON object structure");
-      container.state = "commaOrEnd";
-    }
-    countValue();
-  }
-
-  function beginString() {
-    const container = currentContainer();
-    if (container && container.type === "object" &&
-        (container.state === "firstKeyOrEnd" || container.state === "key")) {
-      container.fields++;
-      if (container.fields > LIMITS.objectFields) {
-        fail(`exceeds ${LIMITS.objectFields} field object limit`);
-      }
-      container.state = "colon";
-    } else {
-      beginValue();
-    }
-    inString = true;
-  }
-
-  function beginContainer(type) {
-    beginValue();
-    if (containers.length >= LIMITS.nestingDepth) {
-      fail(`exceeds nesting depth limit ${LIMITS.nestingDepth}`);
-    }
-    containers.push(type === "array"
-      ? { type, state: "firstValueOrEnd", items: 0, topLevel: containers.length === 0 }
-      : { type, state: "firstKeyOrEnd", fields: 0 });
-  }
-
-  function closeContainer(type) {
-    const container = currentContainer();
-    if (!container || container.type !== type) fail("has mismatched JSON containers");
-    const canClose = type === "array"
-      ? container.state === "firstValueOrEnd" || container.state === "commaOrEnd"
-      : container.state === "firstKeyOrEnd" || container.state === "commaOrEnd";
-    if (!canClose) fail(`has malformed JSON ${type} structure`);
-    containers.pop();
-  }
-
-  function isWhitespace(character) {
-    return character === " " || character === "\t" || character === "\r" || character === "\n";
-  }
-
-  function isTokenDelimiter(character) {
-    return isWhitespace(character) || character === "," || character === ":" ||
-      character === "[" || character === "]" || character === "{" ||
-      character === "}" || character === "\"";
-  }
-
-  for (let index = 0; index < contents.length; index++) {
-    const character = contents[index];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (character === "\\") {
-        escaped = true;
-      } else if (character === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-    if (isWhitespace(character)) continue;
-
-    if (character === "\"") {
-      beginString();
-    } else if (character === "[") {
-      beginContainer("array");
-    } else if (character === "{") {
-      beginContainer("object");
-    } else if (character === "]") {
-      closeContainer("array");
-    } else if (character === "}") {
-      closeContainer("object");
-    } else if (character === ":") {
-      const container = currentContainer();
-      if (!container || container.type !== "object" || container.state !== "colon") {
-        fail("has malformed JSON object structure");
-      }
-      container.state = "value";
-    } else if (character === ",") {
-      const container = currentContainer();
-      if (!container || container.state !== "commaOrEnd") fail("has malformed JSON collection structure");
-      container.state = container.type === "array" ? "value" : "key";
-    } else {
-      beginValue();
-      while (index + 1 < contents.length && !isTokenDelimiter(contents[index + 1])) index++;
-    }
-  }
-
-  if (inString) fail("has an unterminated JSON string");
-  if (containers.length > 0) fail("has truncated JSON structure");
-  if (rootState !== "end") fail("has no JSON value");
+  preflightJsonTextShared(contents, { topLevelItems: MAX_UNITS });
 }
 
 function preflightDocument(root) {
-  const errors = createErrorList();
-  const stack = [{ value: root, depth: 0, location: "$" }];
-  let visited = 0;
-
-  while (stack.length > 0) {
-    const { value, depth, location } = stack.pop();
-    visited++;
-    if (visited > LIMITS.preflightValues) {
-      errors.push(`$: exceeds ${LIMITS.preflightValues} total values`);
-      return errors;
-    }
-    if (value === null || typeof value !== "object") continue;
-    if (depth >= LIMITS.nestingDepth) {
-      errors.push(`${location}: exceeds nesting depth limit ${LIMITS.nestingDepth}`);
-      return errors;
-    }
-
-    if (Array.isArray(value)) {
-      const limit = location === "$" ? MAX_UNITS : MAX_LIST_ITEMS;
-      if (value.length > limit) {
-        errors.push(`${location}: exceeds ${limit} entries`);
-        return errors;
-      }
-      for (let index = value.length - 1; index >= 0; index--) {
-        stack.push({ value: value[index], depth: depth + 1, location: `${location}[${index}]` });
-      }
-      continue;
-    }
-
-    const keys = Object.keys(value);
-    if (keys.length > LIMITS.objectFields) {
-      errors.push(`${location}: exceeds ${LIMITS.objectFields} object fields`);
-      return errors;
-    }
-    for (let index = keys.length - 1; index >= 0; index--) {
-      const key = keys[index];
-      stack.push({ value: value[key], depth: depth + 1, location: `${location}{${safeQuote(key)}}` });
-    }
-  }
-
-  return errors;
-}
-
-function hasValidUnicodeScalarValues(value) {
-  let index = 0;
-  while (index < value.length) {
-    const first = value.charCodeAt(index++);
-    if (first >= 0xd800 && first <= 0xdbff) {
-      if (index >= value.length) return false;
-      const second = value.charCodeAt(index++);
-      if (second < 0xdc00 || second > 0xdfff) return false;
-    } else if (first >= 0xdc00 && first <= 0xdfff) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function hasVisibleProse(value) {
-  return hasValidUnicodeScalarValues(value) && VISIBLE_CONTENT.test(value);
+  return preflightDocumentShared(root, { topLevelItems: MAX_UNITS });
 }
 
 function isVisibleText(value, maxLength = MAX_TEXT_LENGTH) {
@@ -372,17 +140,6 @@ function canonicalCoverageId(refs) {
     throw new TypeError("canonical_refs has missing or unexpected fields");
   }
   return fields.map((field) => encodeCanonicalRef(refs[field])).join("::");
-}
-
-function isSafeRelativePath(value) {
-  if (typeof value !== "string" || value.length === 0 || !hasValidUnicodeScalarValues(value) || value.trim() !== value || PATH_FORBIDDEN_CHARACTER.test(value) || value.includes("\\") || value.includes(":")) return false;
-  if (path.posix.isAbsolute(value) || path.win32.isAbsolute(value) || /^[A-Za-z]:/.test(value) || value.startsWith("~")) return false;
-  return value.split("/").every((segment) =>
-    segment !== "" &&
-    segment !== "." &&
-    segment !== ".." &&
-    !/[ .]$/u.test(segment) &&
-    !WINDOWS_RESERVED_COMPONENT.test(segment));
 }
 
 function isSafeAgentId(value) {
@@ -648,7 +405,10 @@ function validateAttempts(value, unit, base, errors) {
 function collectUnitErrors(unit, index) {
   const errors = createErrorList();
   const base = `$[${index}]`;
-  if (!isObject(unit)) return [`${base}: expected object`];
+  if (!isObject(unit)) {
+    errors.push(`${base}: expected object`);
+    return errors;
+  }
 
   for (const field of REQUIRED_FIELDS) {
     if (!hasOwn(unit, field)) errors.push(`${base}: missing required field ${safeQuote(field)}`);
@@ -720,46 +480,6 @@ function collectUnitErrors(unit, index) {
   return errors;
 }
 
-function readFileWithinLimit(file) {
-  const noFollow = fs.constants.O_NOFOLLOW;
-  const nonBlock = fs.constants.O_NONBLOCK;
-  if (!Number.isInteger(noFollow) || noFollow === 0 || !Number.isInteger(nonBlock) || nonBlock === 0) {
-    // Node exposes no race-safe fallback on these platforms, so reject all inputs.
-    throw new SafeInputError("OS no-follow and nonblocking input protection is unavailable");
-  }
-
-  let descriptor;
-  try {
-    descriptor = fs.openSync(file, fs.constants.O_RDONLY | noFollow | nonBlock);
-  } catch (error) {
-    if (error && (error.code === "ELOOP" || error.code === "EMLINK")) throw new SafeInputError("input must not be a symlink");
-    throw error;
-  }
-  try {
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile()) throw new SafeInputError("input must be a regular file");
-    if (stat.size > MAX_INPUT_BYTES) throw new SafeInputError(`input exceeds ${MAX_INPUT_BYTES} byte limit`);
-
-    const chunks = [];
-    const buffer = Buffer.allocUnsafe(64 * 1024);
-    let bytesRead = 0;
-    while (true) {
-      const count = fs.readSync(descriptor, buffer, 0, buffer.length, null);
-      if (count === 0) break;
-      bytesRead += count;
-      if (bytesRead > MAX_INPUT_BYTES) throw new SafeInputError(`input exceeds ${MAX_INPUT_BYTES} byte limit`);
-      chunks.push(Buffer.from(buffer.subarray(0, count)));
-    }
-    try {
-      return UTF8_DECODER.decode(Buffer.concat(chunks, bytesRead));
-    } catch {
-      throw new SafeInputError("input is not valid UTF-8");
-    }
-  } finally {
-    fs.closeSync(descriptor);
-  }
-}
-
 function validateDocument(ledger) {
   const errors = createErrorList();
   if (!Array.isArray(ledger)) {
@@ -771,16 +491,17 @@ function validateDocument(ledger) {
     return errors;
   }
 
-  errors.push(...preflightDocument(ledger));
+  const preflightErrors = preflightDocument(ledger);
+  appendErrors(errors, preflightErrors);
   if (errors.length > 0) return errors;
 
   const ids = new Map();
   const semantics = new Map();
   let previousId = null;
-  for (let index = 0; index < ledger.length && errors.length < LIMITS.validationErrors; index++) {
+  for (let index = 0; index < ledger.length && !errors.truncated; index++) {
     const unit = ledger[index];
-    errors.push(...collectUnitErrors(unit, index));
-    if (errors.length >= LIMITS.validationErrors) break;
+    const unitErrors = collectUnitErrors(unit, index);
+    appendErrors(errors, unitErrors);
     if (!isObject(unit) || typeof unit.coverage_id !== "string") continue;
 
     const key = hasValidSemanticFields(unit) ? semanticKey(unit) : null;
@@ -803,6 +524,7 @@ function validateDocument(ledger) {
       errors.push(`$[${index}].coverage_id: units must be sorted lexicographically`);
     }
     previousId = unit.coverage_id;
+    if (errors.truncated) break;
   }
   return errors;
 }
@@ -846,7 +568,7 @@ function run(file) {
   }
   for (const message of errors) console.error("ERROR:", message);
   if (errors.length > 0) {
-    const cap = errors.length === LIMITS.validationErrors ? `; output capped at ${LIMITS.validationErrors}` : "";
+    const cap = errors.truncated ? `; output capped at ${LIMITS.validationErrors}` : "";
     console.error(`FAIL: ${errors.length} validation error(s)${cap}`);
     return 1;
   }
