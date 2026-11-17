@@ -46,7 +46,7 @@ import {
   validateStdioArgs,
 } from "./stdioArgv";
 
-type Tab = "all" | "connected";
+type Tab = "all" | "connected" | "custom";
 
 /** Popup for oauth_link authorize URLs (no QR — vendor扫一扫 misreads the URL as a code). */
 function openAuthorizeWindow(url: string) {
@@ -129,6 +129,28 @@ function serverConnected(server: Server, catalog: CatalogApp[]): boolean {
   }
   return true;
 }
+
+function isCatalogLinked(server: Server, catalog: CatalogApp[]): boolean {
+  return !!server.recipe_slug || !!catalogAppForServer(server, catalog);
+}
+
+function serverMatchesQuery(server: Server, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return (
+    server.name.toLowerCase().includes(q) ||
+    server.slug.toLowerCase().includes(q) ||
+    (server.url ?? "").toLowerCase().includes(q) ||
+    (server.command ?? "").toLowerCase().includes(q) ||
+    (server.args ?? []).join(" ").toLowerCase().includes(q)
+  );
+}
+
+const SECTION_KICKERS: Record<string, string> = {
+  Popular: "Curated starting points",
+  Connected: "Live integrations",
+  "Custom MCPs": "Outside the catalog",
+};
 
 function oauthBodyFromApp(
   app: OAuthApp,
@@ -328,17 +350,20 @@ export function AppsPage() {
     });
   }
 
+  // Catalog-backed connections (recipe or slug/url match); operator-added live under Custom.
   const connected = useMemo(() => {
-    const q = query.trim().toLowerCase();
     return servers.filter((s) => {
+      if (!isCatalogLinked(s, catalog)) return false;
       if (!serverConnected(s, catalog)) return false;
-      if (!q) return true;
-      return (
-        s.name.toLowerCase().includes(q) ||
-        s.slug.toLowerCase().includes(q) ||
-        (s.url ?? "").toLowerCase().includes(q)
-      );
+      return serverMatchesQuery(s, query);
     });
+  }, [servers, catalog, query]);
+
+  // Operator-added MCPs (no recipe and no catalog slug/url match).
+  const customServers = useMemo(() => {
+    return servers.filter(
+      (s) => !isCatalogLinked(s, catalog) && serverMatchesQuery(s, query),
+    );
   }, [servers, catalog, query]);
 
   const discoveredTools = Object.values(toolCounts).reduce((sum, count) => sum + count, 0);
@@ -376,7 +401,7 @@ export function AppsPage() {
       {showOverview && (
         <GatewayOverview
           appCount={catalog.length}
-          connectedCount={connected.length}
+          connectedCount={connected.length + customServers.length}
           toolCount={discoveredTools}
         />
       )}
@@ -410,6 +435,20 @@ export function AppsPage() {
           >
             Connected
             <span className="apps-tab-count">{connected.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={!catalogConfig && tab === "custom"}
+            className={!catalogConfig && tab === "custom" ? "active" : undefined}
+            onClick={() => {
+              setCatalogConfig(false);
+              setTab("custom");
+              resetGalleryPage();
+            }}
+          >
+            Custom
+            <span className="apps-tab-count">{customServers.length}</span>
           </button>
         </div>
         {!catalogConfig && (
@@ -499,7 +538,7 @@ export function AppsPage() {
           <CreateMcpForm
             onCreated={() => {
               setAdding(false);
-              setTab("connected");
+              setTab("custom");
               void onChanged();
             }}
             onCancel={() => setAdding(false)}
@@ -507,7 +546,7 @@ export function AppsPage() {
         </div>
       )}
 
-      {tab === "all" ? (
+      {tab === "all" && (
         <>
           {showPopular && (
             <AppSection title="Popular">
@@ -586,24 +625,46 @@ export function AppsPage() {
             )}
           </AppSection>
         </>
-      ) : connected.length === 0 ? (
-        <div className="empty">
-          <strong>No connected apps</strong>
-          Connect from All, or add a custom MCP.
-        </div>
-      ) : (
-        <AppSection title="Connected">
-          {connected.map((server) => (
-            <ConnectedCard
-              key={server.id}
-              server={server}
-              catalog={catalogAppForServer(server, catalog)}
-              toolCount={toolCounts[server.id]}
-              onOpen={() => openConnected(server)}
-            />
-          ))}
-        </AppSection>
       )}
+      {tab === "custom" &&
+        (customServers.length === 0 ? (
+          <div className="empty">
+            <strong>No custom MCPs</strong>
+            {query.trim()
+              ? `No custom MCPs match “${query.trim()}”.`
+              : "Use Add custom MCP for remotes or stdio endpoints outside the catalog."}
+          </div>
+        ) : (
+          <AppSection title="Custom MCPs" count={customServers.length}>
+            {customServers.map((server) => (
+              <ConnectedCard
+                key={server.id}
+                server={server}
+                toolCount={toolCounts[server.id]}
+                onOpen={() => openConnected(server)}
+              />
+            ))}
+          </AppSection>
+        ))}
+      {tab === "connected" &&
+        (connected.length === 0 ? (
+          <div className="empty">
+            <strong>No connected apps</strong>
+            Connect from All. Custom MCPs are listed under Custom.
+          </div>
+        ) : (
+          <AppSection title="Connected">
+            {connected.map((server) => (
+              <ConnectedCard
+                key={server.id}
+                server={server}
+                catalog={catalogAppForServer(server, catalog)}
+                toolCount={toolCounts[server.id]}
+                onOpen={() => openConnected(server)}
+              />
+            ))}
+          </AppSection>
+        ))}
 
       {selectedApp && (
         <ManagePanel
@@ -650,7 +711,7 @@ function AppSection({
     <section ref={sectionRef} className={`apps-section${featured ? " featured" : ""}`}>
       <div className="apps-section-heading">
         <div>
-          <p className="section-kicker">{featured ? "Curated starting points" : title === "Connected" ? "Live integrations" : "Integration directory"}</p>
+          <p className="section-kicker">{SECTION_KICKERS[title] ?? "Integration directory"}</p>
           <h2 className="apps-section-title">{title}</h2>
         </div>
         {typeof count === "number" && <span className="section-count">{String(count).padStart(2, "0")}</span>}
