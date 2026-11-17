@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "usage: $0 [--components LIST] [--from DIR] host ..." >&2; exit 2; }
       FROM="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,25p' "$0"; exit 0 ;;
+      sed -n '2,/^[^#]/p' "$0" | sed '$d'; exit 0 ;;
     --)
       shift; break ;;
     -*)
