@@ -50,4 +50,42 @@ describe("tokenizeSetupHint", () => {
     const raw = "[wiki](https://en.wikipedia.org/wiki/Foo_(bar))";
     assert.deepEqual(tokenizeSetupHint(raw), [{ kind: "text", text: raw }]);
   });
+  it("inline code with backticks", () => {
+    const segs = tokenizeSetupHint(
+      "Grant `AliyunOpenAPIMCPServerStaticCredentialAccess` then paste.",
+    );
+    assert.deepEqual(segs, [
+      { kind: "text", text: "Grant " },
+      { kind: "code", text: "AliyunOpenAPIMCPServerStaticCredentialAccess" },
+      { kind: "text", text: " then paste." },
+    ]);
+  });
+  it("bold emphasis", () => {
+    const segs = tokenizeSetupHint("Type **MCP**, then Save.");
+    assert.deepEqual(segs, [
+      { kind: "text", text: "Type " },
+      { kind: "bold", text: "MCP" },
+      { kind: "text", text: ", then Save." },
+    ]);
+  });
+  it("code and link together", () => {
+    const segs = tokenizeSetupHint(
+      "Use `AK`. Docs: [api.aliyun.com/mcp](https://api.aliyun.com/mcp).",
+    );
+    assert.deepEqual(segs, [
+      { kind: "text", text: "Use " },
+      { kind: "code", text: "AK" },
+      { kind: "text", text: ". Docs: " },
+      { kind: "link", label: "api.aliyun.com/mcp", href: "https://api.aliyun.com/mcp" },
+      { kind: "text", text: "." },
+    ]);
+  });
+  it("code wins over surrounding bold markers", () => {
+    const segs = tokenizeSetupHint("**use `foo`**");
+    assert.deepEqual(segs, [
+      { kind: "text", text: "**use " },
+      { kind: "code", text: "foo" },
+      { kind: "text", text: "**" },
+    ]);
+  });
 });

@@ -6,6 +6,8 @@ type Props = {
   onChange: (name: string, value: string) => void;
   /** Connected / already vaulted — blank means keep. */
   active: boolean;
+  /** Vaulted env names (values never returned). Used for non-secret "saved" hints. */
+  storedNames?: ReadonlySet<string>;
   /** Multiline secret reveal map (stdio). Omit / empty for skill_bridge. */
   revealed?: Record<string, boolean>;
   onReveal?: (name: string) => void;
@@ -16,7 +18,15 @@ type Props = {
  * Presentation only: panels own values / reveal / save blank-to-keep semantics.
  * Masked `••••` must never be written into `values`.
  */
-export function EnvFields({ defs, values, onChange, active, revealed, onReveal }: Props) {
+export function EnvFields({
+  defs,
+  values,
+  onChange,
+  active,
+  storedNames,
+  revealed,
+  onReveal,
+}: Props) {
   return (
     <>
       {defs.map((def) => {
@@ -25,14 +35,14 @@ export function EnvFields({ defs, values, onChange, active, revealed, onReveal }
           return (
             <div className="field" key={def.name}>
               {def.label} {keep}
-              {renderControl(def, values, onChange, active, revealed, onReveal)}
+              {renderControl(def, values, onChange, active, storedNames, revealed, onReveal)}
             </div>
           );
         }
         return (
           <label className="field" key={def.name}>
             {def.label} {keep}
-            {renderControl(def, values, onChange, active, revealed, onReveal)}
+            {renderControl(def, values, onChange, active, storedNames, revealed, onReveal)}
           </label>
         );
       })}
@@ -45,6 +55,7 @@ function renderControl(
   values: Record<string, string>,
   onChange: (name: string, value: string) => void,
   active: boolean,
+  storedNames: ReadonlySet<string> | undefined,
   revealed: Record<string, boolean> | undefined,
   onReveal: ((name: string) => void) | undefined,
 ) {
@@ -73,6 +84,11 @@ function renderControl(
       />
     );
   }
+  const stored = !!storedNames?.has(def.name);
+  const nonSecretStoredHint =
+    !def.secret && stored && !(values[def.name] || "").trim()
+      ? "Saved — leave blank to keep"
+      : undefined;
   return (
     <input
       type={def.secret ? "password" : "text"}
@@ -81,7 +97,9 @@ function renderControl(
       // Non-secret fields may be optional (catalog env_defaults or blank-ok).
       required={!active && def.secret}
       autoComplete="off"
-      placeholder={active && def.secret ? "••••••••" : undefined}
+      placeholder={
+        nonSecretStoredHint ?? (active && def.secret ? "••••••••" : undefined)
+      }
     />
   );
 }

@@ -1841,6 +1841,28 @@ function stdioEnvDefaults(app: StdioApp): Record<string, string> {
   return out;
 }
 
+/** Non-secret Connect fields: keep typed values; default only when empty + not vaulted. */
+function nonSecretFormValues(
+  defs: ReturnType<typeof stdioEnvDefs>,
+  prev: Record<string, string>,
+  envDefaults: Record<string, string>,
+  vaultedNames: ReadonlySet<string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const def of defs) {
+    if (def.secret) continue;
+    const typed = (prev[def.name] || "").trim();
+    if (typed) {
+      out[def.name] = typed;
+      continue;
+    }
+    if (!vaultedNames.has(def.name) && envDefaults[def.name]) {
+      out[def.name] = envDefaults[def.name];
+    }
+  }
+  return out;
+}
+
 function StdioManagePanel({
   app,
   server,
@@ -1863,12 +1885,10 @@ function StdioManagePanel({
 
   useEffect(() => {
     setCurrent(server);
-    // Prefill non-secret fields that have catalog env_defaults (e.g. Infisical Host URL).
-    const initial: Record<string, string> = {};
-    for (const def of secretDefs) {
-      if (!def.secret && envDefaults[def.name]) initial[def.name] = envDefaults[def.name];
-    }
-    setValues(initial);
+    // Non-secrets: keep typed values across refresh; catalog defaults only when empty + not vaulted.
+    setValues((prev) =>
+      nonSecretFormValues(secretDefs, prev, envDefaults, new Set(server?.env_names ?? [])),
+    );
     setRevealed({});
     setError("");
     setNotice("");
@@ -1877,6 +1897,7 @@ function StdioManagePanel({
   const { active, configured } = appStatus(app, current);
   const command = specString(app.spec, "command") || "pikpak";
   const args = specStringList(app.spec, "args");
+  const storedNames = new Set(current?.env_names ?? []);
 
   async function save(e: FormEvent) {
     e.preventDefault();
@@ -1884,19 +1905,18 @@ function StdioManagePanel({
     setError("");
     setNotice("");
     try {
-      const env: Record<string, string> = { ...envDefaults };
+      // Only operator-typed values; blank means keep vaulted (do not re-send env_defaults).
+      const typed: Record<string, string> = {};
       for (const def of secretDefs) {
         const v = (values[def.name] || "").trim();
-        if (v) env[def.name] = v;
+        if (v) typed[def.name] = v;
       }
+      let saved: Server;
       if (current) {
         const missing = Object.fromEntries(
           Object.entries(envDefaults).filter(([k]) => !current.env_names.includes(k)),
         );
-        const payload = { ...missing };
-        for (const def of secretDefs) {
-          if (env[def.name]) payload[def.name] = env[def.name];
-        }
+        const payload = { ...missing, ...typed };
         if (!Object.keys(payload).length) {
           setNotice("Already connected. Enter a new value only when rotating.");
           return;
@@ -1908,13 +1928,13 @@ function StdioManagePanel({
             throw new Error(`${def.label} is required`);
           }
         }
-        const updated = await api.updateServer(current.id, { env: payload });
-        setCurrent(updated);
+        saved = await api.updateServer(current.id, { env: payload });
       } else {
+        const env = { ...envDefaults, ...typed };
         for (const def of secretDefs) {
           if (def.secret && !env[def.name]) throw new Error(`${def.label} is required`);
         }
-        const created = await api.createServer({
+        saved = await api.createServer({
           name: app.name,
           slug: app.slug,
           kind: "stdio",
@@ -1923,9 +1943,12 @@ function StdioManagePanel({
           env,
           recipe_slug: app.slug,
         });
-        setCurrent(created);
       }
-      setValues({});
+      setCurrent(saved);
+      // Secrets clear; optional URLs / hosts must stay visible after Connect.
+      setValues((prev) =>
+        nonSecretFormValues(secretDefs, prev, envDefaults, new Set(saved.env_names ?? [])),
+      );
       setNotice("Saved. Probe to refresh tools and go live for agents.");
       await onChanged();
     } catch (err) {
@@ -1955,6 +1978,7 @@ function StdioManagePanel({
           values={values}
           onChange={(name, value) => setValues((prev) => ({ ...prev, [name]: value }))}
           active={active}
+          storedNames={storedNames}
           revealed={revealed}
           onReveal={(name) => setRevealed((prev) => ({ ...prev, [name]: true }))}
         />
