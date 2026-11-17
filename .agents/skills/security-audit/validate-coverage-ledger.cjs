@@ -524,7 +524,6 @@ function validateDocument(ledger) {
       errors.push(`$[${index}].coverage_id: units must be sorted lexicographically`);
     }
     previousId = unit.coverage_id;
-    if (errors.truncated) break;
   }
   return errors;
 }

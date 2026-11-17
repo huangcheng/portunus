@@ -797,3 +797,20 @@ test("reports capping when schema errors reach the cap before semantic checks", 
   assert.match(output, new RegExp(`FAIL: ${LIMITS.validationErrors} validation error`));
   assert.match(output, new RegExp(`output capped at ${LIMITS.validationErrors}`));
 });
+
+test("uses dotted property paths for shared preflight errors", () => {
+  const repeated = {};
+  const errors = errorsFor([{ first: repeated, second: repeated }]);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /^\$\[0\]\.second: input must not contain repeated/);
+});
+
+test("uses dotted property paths for total-value overflow", () => {
+  const rows = Array.from(
+    { length: Math.floor(LIMITS.preflightValues / LIMITS.arrayItems) + 1 },
+    () => Array.from({ length: LIMITS.arrayItems }, () => ({ field: null })),
+  );
+  const errors = errorsFor(rows);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /^\$\[\d+\]\[\d+\]\.field: exceeds/);
+});

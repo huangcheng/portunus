@@ -237,7 +237,11 @@ function appendErrors(target, source) {
   return target;
 }
 
-function preflightDocument(root, { topLevelItems = null, location = "$" } = {}) {
+function preflightDocument(root, {
+  topLevelItems = null,
+  location = "$",
+  formatKey = (parent, key) => `${parent}{${safeQuote(key)}}`,
+} = {}) {
   const errors = createErrorList();
   const stack = [{ value: root, depth: 0, location, topLevel: true }];
   const seen = new WeakSet();
@@ -248,17 +252,23 @@ function preflightDocument(root, { topLevelItems = null, location = "$" } = {}) 
     return errors;
   }
 
-  function countScalar(parentLocation) {
+  function countValueAt(parentLocation, key) {
     visited++;
     if (visited > SHARED_LIMITS.preflightValues) {
-      return fail(`${parentLocation}: exceeds ${SHARED_LIMITS.preflightValues} total value limit`);
+      let valueLocation = parentLocation;
+      if (typeof key === "number") {
+        valueLocation = `${parentLocation}[${key}]`;
+      } else if (key !== undefined) {
+        valueLocation = formatKey(parentLocation, key);
+      }
+      return fail(`${valueLocation}: exceeds ${SHARED_LIMITS.preflightValues} total value limit`);
     }
     return null;
   }
 
   while (stack.length > 0) {
     const current = stack.pop();
-    const limitError = countScalar(current.location);
+    const limitError = countValueAt(current.location);
     if (limitError) return limitError;
     if (current.value === null || typeof current.value !== "object") continue;
     if (current.depth >= SHARED_LIMITS.nestingDepth) {
@@ -279,10 +289,8 @@ function preflightDocument(root, { topLevelItems = null, location = "$" } = {}) 
       for (let index = current.value.length - 1; index >= 0; index--) {
         const child = current.value[index];
         if (child === null || typeof child !== "object") {
-          visited++;
-          if (visited > SHARED_LIMITS.preflightValues) {
-            return fail(`${current.location}[${index}]: exceeds ${SHARED_LIMITS.preflightValues} total value limit`);
-          }
+          const scalarError = countValueAt(current.location, index);
+          if (scalarError) return scalarError;
           continue;
         }
         stack.push({
@@ -303,15 +311,13 @@ function preflightDocument(root, { topLevelItems = null, location = "$" } = {}) 
       const key = keys[index];
       const child = current.value[key];
       if (child === null || typeof child !== "object") {
-        visited++;
-        if (visited > SHARED_LIMITS.preflightValues) {
-          return fail(`${current.location}{${safeQuote(key)}}: exceeds ${SHARED_LIMITS.preflightValues} total value limit`);
-        }
+        const scalarError = countValueAt(current.location, key);
+        if (scalarError) return scalarError;
         continue;
       }
       stack.push({
         value: child,
-        location: `${current.location}{${safeQuote(key)}}`,
+        location: formatKey(current.location, key),
         depth: current.depth + 1,
         topLevel: false,
       });

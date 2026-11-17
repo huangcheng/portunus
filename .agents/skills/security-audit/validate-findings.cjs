@@ -153,7 +153,11 @@ function canonicalKey(value) {
 }
 
 function collectDataLimitErrors(value, location = "$data") {
-  return preflightDocumentShared(value, { topLevelItems: LIMITS.arrayItems, location });
+  return preflightDocumentShared(value, {
+    topLevelItems: LIMITS.arrayItems,
+    location,
+    formatKey: propertyPath,
+  });
 }
 
 function collectSchemaErrors(schema, location = "schema") {
