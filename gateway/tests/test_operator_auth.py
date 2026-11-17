@@ -358,3 +358,22 @@ def test_throttle_hard_cap(monkeypatch):
     tracked = next(iter(throttle._state))
     throttle.record_failure(tracked)
     assert len(throttle._state) <= 3
+
+
+def test_session_ttl_from_env(monkeypatch):
+    from portunus_gateway.db.models import SESSION_TTL_ENV, session_ttl
+
+    monkeypatch.delenv(SESSION_TTL_ENV, raising=False)
+    assert session_ttl() == timedelta(days=30)
+
+    monkeypatch.setenv(SESSION_TTL_ENV, "7")
+    assert session_ttl() == timedelta(days=7)
+
+    monkeypatch.setenv(SESSION_TTL_ENV, "0")
+    assert session_ttl() == timedelta(days=1)
+
+    monkeypatch.setenv(SESSION_TTL_ENV, "9999")
+    assert session_ttl() == timedelta(days=365)
+
+    monkeypatch.setenv(SESSION_TTL_ENV, "nope")
+    assert session_ttl() == timedelta(days=30)

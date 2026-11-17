@@ -705,6 +705,18 @@ def test_weknora_http_seed_url_from_operator():
     assert "url" not in spec
 
 
+def test_xunlei_http_seed_url_is_credential():
+    from portunus_gateway.catalog import DEFAULT_APPS, egress_for_slug, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "xunlei")
+    assert raw["connection"] == "http"
+    spec = validate_spec("http", raw["spec"])
+    assert spec["url_from_operator"] is True
+    assert spec["url_is_credential"] is True
+    assert "auth_header" not in spec
+    assert egress_for_slug("xunlei") == "domestic"
+
+
 def test_merge_skill_bridge_seed_keeps_operator_fields():
     import copy
 

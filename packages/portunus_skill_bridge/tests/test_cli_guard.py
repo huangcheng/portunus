@@ -33,6 +33,18 @@ def test_scrubbed_env_drops_portunus_and_ld(monkeypatch):
     monkeypatch.setenv("CUBOX_TOKEN","ok-secret")
     monkeypatch.setenv("serverUrl","https://example.test")
     monkeypatch.setenv("PATH","/usr/bin")
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    monkeypatch.delenv("STATE_DIR", raising=False)
     env=scrubbed_child_env()
     assert "PORTUNUS_TOKEN_FILE" not in env and "LD_PRELOAD" not in env
     assert env["CUBOX_TOKEN"]=="ok-secret" and env["serverUrl"]=="https://example.test"
+    assert env["HOME"] == "/tmp"
+    assert env["TMPDIR"] == "/tmp"
+
+
+def test_scrubbed_env_home_prefers_state_dir(monkeypatch):
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setenv("STATE_DIR", "/var/lib/portunus/skill-state/cubox")
+    env = scrubbed_child_env()
+    assert env["HOME"] == "/var/lib/portunus/skill-state/cubox"

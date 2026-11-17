@@ -279,10 +279,17 @@ def validate_regions(regions: Any) -> list[str]:
 
 
 def server_view(
-    server: Server, env_names: list[str], *, health: dict[str, Any] | None = None
+    server: Server,
+    env_names: list[str],
+    *,
+    health: dict[str, Any] | None = None,
+    url_is_credential: bool = False,
 ) -> dict[str, Any]:
     # Hide reserved vault names from the operator UI.
     public_names = sorted(n for n in env_names if not n.lower().startswith("portunus."))
+    vault_auth = any(not n.lower().startswith("portunus.") for n in env_names)
+    # Personal MCP links (迅雷): the URL path is the secret — no vault headers.
+    link_auth = bool(url_is_credential and server.url)
     out: dict[str, Any] = {
         "id": str(server.id),
         "name": server.name,
@@ -294,7 +301,7 @@ def server_view(
         "url": server.url,
         "oauth": oauth_public_view(server.oauth if isinstance(server.oauth, dict) else None),
         # Any non-reserved vault entry counts (Authorization, WyHeader, …).
-        "has_auth": any(not n.lower().startswith("portunus.") for n in env_names),
+        "has_auth": vault_auth or link_auth,
         # device_qr marker written after platform login succeeds.
         "has_skill_session": any(n == "SKILL_SESSION" for n in env_names),
         "preferred_regions": list(server.preferred_regions or []),
@@ -510,7 +517,12 @@ class Registry:
 
     async def _enriched_view(self, server: Server, env_names: list[str]) -> dict[str, Any]:
         health = await self.health_for_server(server, env_names)
-        return server_view(server, env_names, health=health)
+        url_cred = False
+        if server.recipe_slug:
+            url_cred = await self._recipe_url_is_credential(server.recipe_slug)
+        return server_view(
+            server, env_names, health=health, url_is_credential=url_cred
+        )
 
     async def record_outcome(
         self,
@@ -931,8 +943,8 @@ class Registry:
         return any(str(a.get("slug", "")).casefold() == key for a in DEFAULT_APPS)
 
     @staticmethod
-    def _recipe_url_from_operator_static(recipe_slug: str) -> bool | None:
-        """Return True/False from TOML/DEFAULT_APPS, or None if the slug is unknown there."""
+    def _recipe_spec_flag_static(recipe_slug: str, flag: str) -> bool | None:
+        """Return True/False for a boolean spec flag, or None if the slug is unknown."""
         key = recipe_slug.casefold()
         try:
             from .toml_catalog import get_loaded
@@ -944,15 +956,24 @@ class Registry:
             for recipe in loaded.recipes:
                 if recipe.slug.casefold() == key and recipe.enabled:
                     spec = recipe.spec if isinstance(recipe.spec, dict) else {}
-                    return bool(spec.get("url_from_operator"))
+                    return bool(spec.get(flag))
             return None
         from .catalog import DEFAULT_APPS
 
         for app in DEFAULT_APPS:
             if str(app.get("slug", "")).casefold() == key:
                 spec = app.get("spec") if isinstance(app.get("spec"), dict) else {}
-                return bool(spec.get("url_from_operator"))
+                return bool(spec.get(flag))
         return None
+
+    @staticmethod
+    def _recipe_url_from_operator_static(recipe_slug: str) -> bool | None:
+        """Return True/False from TOML/DEFAULT_APPS, or None if the slug is unknown there."""
+        return RegistryStore._recipe_spec_flag_static(recipe_slug, "url_from_operator")
+
+    @staticmethod
+    def _recipe_url_is_credential_static(recipe_slug: str) -> bool | None:
+        return RegistryStore._recipe_spec_flag_static(recipe_slug, "url_is_credential")
 
     async def _catalog_has_slug(self, slug: str) -> bool:
         if self._static_catalog_has_slug(slug):
@@ -972,9 +993,8 @@ class Registry:
             ).scalar_one_or_none()
         return hit is not None
 
-    async def _recipe_url_from_operator(self, recipe_slug: str) -> bool:
-        """True when the catalog recipe lets the operator set the MCP URL (e.g. WeKnora)."""
-        static = self._recipe_url_from_operator_static(recipe_slug)
+    async def _recipe_bool_flag(self, recipe_slug: str, flag: str) -> bool:
+        static = self._recipe_spec_flag_static(recipe_slug, flag)
         if static is not None:
             return static
         try:
@@ -992,7 +1012,15 @@ class Registry:
         if row is None:
             return False
         spec = row.spec if isinstance(row.spec, dict) else {}
-        return bool(spec.get("url_from_operator"))
+        return bool(spec.get(flag))
+
+    async def _recipe_url_from_operator(self, recipe_slug: str) -> bool:
+        """True when the catalog recipe lets the operator set the MCP URL (e.g. WeKnora)."""
+        return await self._recipe_bool_flag(recipe_slug, "url_from_operator")
+
+    async def _recipe_url_is_credential(self, recipe_slug: str) -> bool:
+        """True when the pasted MCP URL itself is the secret (e.g. 迅雷 SSE path token)."""
+        return await self._recipe_bool_flag(recipe_slug, "url_is_credential")
 
     async def create_server(
         self,
@@ -1399,7 +1427,11 @@ class Registry:
     async def _inject_skill_bridge_manifest(
         self, s: AsyncSession, slug: str, env: dict[str, str]
     ) -> dict[str, str]:
-        """Overlay live catalog manifest for skill_bridge apps (DB hot-update source of truth)."""
+        """Overlay live catalog manifest + fill missing env_defaults for skill_bridge apps.
+
+        Vault literals win on conflict. Catalog ``env_defaults`` (e.g. STATE_DIR)
+        fill gaps so seed updates apply without forcing operators to re-Connect.
+        """
         from .catalog import SKILL_BRIDGE_MANIFEST_ENV
         from .db.models import CatalogApp
 
@@ -1413,11 +1445,21 @@ class Registry:
         ).scalar_one_or_none()
         if row is None:
             return env
-        manifest = (row.spec or {}).get("manifest")
-        if not isinstance(manifest, dict):
-            return env
         out = dict(env)
-        out[SKILL_BRIDGE_MANIFEST_ENV] = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
+        defaults = (row.spec or {}).get("env_defaults")
+        if isinstance(defaults, dict):
+            for key, value in defaults.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    continue
+                k = key.strip()
+                if not k or k in out:
+                    continue
+                out[k] = value
+        manifest = (row.spec or {}).get("manifest")
+        if isinstance(manifest, dict):
+            out[SKILL_BRIDGE_MANIFEST_ENV] = json.dumps(
+                manifest, ensure_ascii=False, separators=(",", ":")
+            )
         return out
 
     # ---- probe -------------------------------------------------------------------

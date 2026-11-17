@@ -73,14 +73,38 @@ for h in "${HOSTS[@]}"; do
   fi
 done
 
-if [[ -z "$FROM" ]]; then
-  if [[ -d "$SKILLS_DST/guangyapan-drive" || -d "$SKILLS_DST/quarkclouddrive" ]]; then
-    FROM="$SKILLS_DST"
-  else
-    FROM="$ROOT/third_party"
+# Resolve skill-tree source. Worker images often bind third_party at
+# /app/third_party while PORTUNUS_REPO_ROOT points at /opt/stacks/portunus.
+resolve_skills_from() {
+  local cand
+  if [[ -n "$FROM" ]]; then
+    [[ -d "$FROM" ]] || { echo "source not a directory: $FROM" >&2; return 1; }
+    printf '%s' "$FROM"
+    return 0
   fi
-fi
-[[ -d "$FROM" ]] || { echo "source not a directory: $FROM" >&2; exit 2; }
+  if [[ -d "$SKILLS_DST/guangyapan-drive" || -d "$SKILLS_DST/quarkclouddrive" ]]; then
+    printf '%s' "$SKILLS_DST"
+    return 0
+  fi
+  for cand in \
+    "${PORTUNUS_SKILLS_FROM:-}" \
+    "$ROOT/third_party" \
+    /app/third_party \
+    /opt/stacks/portunus/third_party
+  do
+    [[ -n "$cand" && -d "$cand" ]] || continue
+    # Prefer a tree that actually contains skill dirs.
+    if [[ -d "$cand/guangyapan-drive" || -d "$cand/quarkclouddrive" ]] \
+      || find "$cand" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1 | grep -q .; then
+      printf '%s' "$cand"
+      return 0
+    fi
+  done
+  echo "source not a directory: tried skills dst + third_party mounts" >&2
+  return 1
+}
+FROM="$(resolve_skills_from)" || exit 2
+echo "skills from: $FROM"
 
 # Map tree directory name → skill-state slug (STATE_DIR leaf). Unknown trees
 # still sync; state dir is created under the same basename as a fallback.

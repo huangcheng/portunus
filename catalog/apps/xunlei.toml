@@ -1,0 +1,16 @@
+slug = "xunlei"
+label = "迅雷"
+description = "Xunlei download MCP (SSE). Paste your personal link from pan.xunlei.com/mcp — the path after /sse/ is the credential."
+connection = "http"
+egress = "domestic"
+popular = true
+categories = ["Storage"]
+tags = ["xunlei", "download", "sse", "http"]
+sort_order = 56
+
+[spec]
+url_from_operator = true
+url_is_credential = true
+setup_hints = [
+  "Open [pan.xunlei.com/mcp](https://pan.xunlei.com/mcp), create an app, copy the SSE URL (…/models/sse/<token>). In PC/NAS 迅雷: 设置 → 下载设置 → 开启远程下载. The path after `/sse/` is your secret — do not share it.",
+]

@@ -90,6 +90,36 @@ async def test_json_cli_sets_home_from_state_dir(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
+async def test_json_cli_pins_home_when_unset(monkeypatch, tmp_path):
+    """Cubox-style: scrubbed MCP env has no HOME/STATE_DIR — still pin a home."""
+    import os
+
+    recorder = tmp_path / "recorder.py"
+    recorder.write_text(
+        "\n".join(
+            [
+                "import json, os, sys",
+                "print(json.dumps({\"home\": os.environ.get(\"HOME\")}))",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    m = load_manifest(CUBOX)
+    m.cli.command = [sys_executable(), str(recorder)]  # type: ignore[union-attr]
+
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.delenv("STATE_DIR", raising=False)
+    monkeypatch.delenv("TMPDIR", raising=False)
+
+    backend = JsonCliBackend(m)
+    tool = next(t for t in m.tools if t.name == "tag_list")
+    out = await backend.call(tool, {})
+    assert out["exit_code"] == 0
+    assert out["result"]["home"] == "/tmp"
+    assert "HOME" not in os.environ
+
+
+@pytest.mark.anyio
 async def test_json_cli_multi_token_cli_prefix(tmp_path):
     """Cubox-style tools pass cli as ['folder','list'] before flags."""
     recorder = tmp_path / "recorder.py"

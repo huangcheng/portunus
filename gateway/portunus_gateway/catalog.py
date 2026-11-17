@@ -75,6 +75,7 @@ DOMESTIC_EGRESS_SLUGS = frozenset(
         "aliyun",
         "tencentcloud",
         "flyai",
+        "xunlei",
     }
 )
 
@@ -170,6 +171,7 @@ GUANGYAPAN_MANIFEST: dict[str, Any] = _load_packaged_manifest("guangyapan.exampl
 # Default paths on Portunus runners (see deploy). Overridable via Connect env.
 GUANGYAPAN_SKILL_ROOT = "/var/lib/portunus/skills/guangyapan-drive"
 GUANGYAPAN_STATE_DIR = "/var/lib/portunus/skill-state/guangyapan"
+CUBOX_STATE_DIR = "/var/lib/portunus/skill-state/cubox"
 # Seeded once when the table is empty. Operators can edit/delete afterward.
 # ``categories`` drive browse filters (Composio-style); ``tags`` are freeform chips.
 DEFAULT_APPS: list[dict[str, Any]] = [
@@ -759,6 +761,31 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         },
     },
     {
+        "slug": "xunlei",
+        "label": "迅雷",
+        "name": "迅雷",
+        "description": (
+            "Xunlei download MCP (SSE). Paste your personal link from pan.xunlei.com/mcp — "
+            "the path after /sse/ is the credential."
+        ),
+        "connection": "http",
+        "popular": True,
+        "categories": ["Storage"],
+        "tags": ["xunlei", "download", "sse", "http"],
+        "sort_order": 56,
+        "spec": {
+            "url_from_operator": True,
+            "url_is_credential": True,
+            "setup_hints": [
+                (
+                    "Open [pan.xunlei.com/mcp](https://pan.xunlei.com/mcp), create an app, "
+                    "copy the SSE URL (…/models/sse/<token>). In PC/NAS 迅雷: 设置 → 下载设置 → "
+                    "开启远程下载. The path after `/sse/` is your secret — do not share it."
+                ),
+            ],
+        },
+    },
+    {
         "slug": "weread",
         "label": "微信读书",
         "name": "微信读书",
@@ -796,6 +823,7 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             ],
             "env_defaults": {
                 "CUBOX_SERVER": "cubox.pro",
+                "STATE_DIR": CUBOX_STATE_DIR,
             },
             "setup_hints": [
                 (
@@ -1318,6 +1346,7 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
     if connection == "http":
         # Self-hosted MCP (e.g. WeKnora): operator pastes endpoint URL at Connect.
         url_from_operator = bool(spec.get("url_from_operator"))
+        url_is_credential = bool(spec.get("url_is_credential"))
         out: dict[str, Any] = {}
         if url_from_operator:
             out["url_from_operator"] = True
@@ -1330,9 +1359,24 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
                 out["url"] = url_hint.strip()
         else:
             out["url"] = _require_str(spec, "url")
+        if url_is_credential:
+            # Personal SSE/HTTP MCP links (迅雷): path token is the secret; no Bearer.
+            if not url_from_operator:
+                raise RegistryError(
+                    422,
+                    "invalid_request",
+                    "spec.url_is_credential requires url_from_operator",
+                )
+            out["url_is_credential"] = True
         # Optional custom request header for Connect (e.g. Weiyun WyHeader).
         auth_header = spec.get("auth_header")
         if auth_header is not None and auth_header != "":
+            if url_is_credential:
+                raise RegistryError(
+                    422,
+                    "invalid_request",
+                    "spec.auth_header conflicts with url_is_credential",
+                )
             if not isinstance(auth_header, str) or not auth_header.strip():
                 raise RegistryError(422, "invalid_request", "spec.auth_header must be a non-empty string")
             out["auth_header"] = auth_header.strip()

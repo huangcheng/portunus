@@ -109,7 +109,11 @@ def validate_cli_command(command: list[str]) -> None:
 
 
 def scrubbed_child_env(source: dict[str, str] | None = None) -> dict[str, str]:
-    """Forward parent env except runner-owned prefixes (PORTUNUS_/LD_/DYLD_)."""
+    """Forward parent env except runner-owned prefixes (PORTUNUS_/LD_/DYLD_).
+
+    Always pins ``PATH``, ``TMPDIR``, and ``HOME`` so Go/Node CLIs do not crash
+    when the runner MCP env is fully scrubbed (no inherited home).
+    """
     src = dict(os.environ) if source is None else dict(source)
     out: dict[str, str] = {}
     for k, v in src.items():
@@ -125,4 +129,10 @@ def scrubbed_child_env(source: dict[str, str] | None = None) -> dict[str, str]:
         out[k] = v
     if "PATH" not in out:
         out["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+    if not out.get("TMPDIR", "").strip():
+        out["TMPDIR"] = "/tmp"
+    if not out.get("HOME", "").strip():
+        # Prefer STATE_DIR when present (may be refined by json_cli._child_env).
+        state = out.get("STATE_DIR", "").strip()
+        out["HOME"] = state or out["TMPDIR"]
     return out

@@ -211,6 +211,9 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
       } else {
         out.url = String(spec.url ?? "").trim();
       }
+      if (spec.url_is_credential === true) {
+        out.url_is_credential = true;
+      }
       const authHeader = String(spec.auth_header ?? "").trim();
       if (authHeader) {
         out.auth_header = authHeader;

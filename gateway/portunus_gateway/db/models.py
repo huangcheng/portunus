@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -27,7 +28,25 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, validates
 
 SERVER_KINDS = ("stdio", "remote")
 CATALOG_CONNECTIONS = ("oauth", "http", "webdav", "stdio", "skill_bridge")
-SESSION_TTL = timedelta(hours=12)
+
+# Operator dashboard login cookie + DB session row lifetime.
+SESSION_TTL_ENV = "PORTUNUS_OPERATOR_SESSION_DAYS"
+_SESSION_TTL_DEFAULT_DAYS = 30
+_SESSION_TTL_MIN_DAYS = 1
+_SESSION_TTL_MAX_DAYS = 365
+
+
+def session_ttl() -> timedelta:
+    """Operator session lifetime from ``PORTUNUS_OPERATOR_SESSION_DAYS`` (default 30)."""
+    raw = os.environ.get(SESSION_TTL_ENV)
+    days = _SESSION_TTL_DEFAULT_DAYS
+    if raw is not None and str(raw).strip():
+        try:
+            days = int(str(raw).strip())
+        except ValueError:
+            days = _SESSION_TTL_DEFAULT_DAYS
+    days = max(_SESSION_TTL_MIN_DAYS, min(_SESSION_TTL_MAX_DAYS, days))
+    return timedelta(days=days)
 
 
 def _now() -> datetime:
@@ -35,7 +54,7 @@ def _now() -> datetime:
 
 
 def _session_expiry() -> datetime:
-    return _now() + SESSION_TTL
+    return _now() + session_ttl()
 
 
 class Base(DeclarativeBase):

@@ -1,7 +1,21 @@
 """FleetProvidersUpdateWorkflow helpers."""
 
+from portunus_worker.activities.fleet import parse_component_status
 from portunus_worker.client import humanize_query_status
 from portunus_worker.workflows.fleet_providers import normalize_components
+
+
+def test_parse_component_status():
+    out = parse_component_status(
+        "noise\nCOMPONENT_STATUS rclone=skip skills=ok clis=ok skill_bridge=ok\n"
+    )
+    assert out == {
+        "rclone": "skip",
+        "skills": "ok",
+        "clis": "ok",
+        "skill_bridge": "ok",
+    }
+    assert parse_component_status("no status") == {}
 
 
 def test_normalize_components_default():

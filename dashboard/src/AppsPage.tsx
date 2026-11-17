@@ -90,6 +90,12 @@ function appStatus(app: CatalogApp, server: Server | null): {
   }
   if (isHttpApp(app)) {
     const needsUrl = specBool(app.spec, "url_from_operator");
+    const urlIsCredential = specBool(app.spec, "url_is_credential");
+    // 迅雷-style: personal SSE URL is the secret — no separate Bearer vault entry.
+    if (urlIsCredential && needsUrl) {
+      const active = !!server?.url;
+      return { active, configured: active };
+    }
     const active = needsUrl ? !!(server?.url && server.has_auth) : !!server?.has_auth;
     return { active, configured: active };
   }
@@ -2081,6 +2087,7 @@ function HttpManagePanel({
   const [current, setCurrent] = useState<Server | null>(server);
   const [token, setToken] = useState("");
   const urlFromOperator = specBool(app.spec, "url_from_operator");
+  const urlIsCredential = specBool(app.spec, "url_is_credential");
   const [mcpUrl, setMcpUrl] = useState(server?.url || "");
 
   useEffect(() => {
@@ -2094,10 +2101,12 @@ function HttpManagePanel({
   const authHeader = specString(app.spec, "auth_header");
   const tokenPrefix = specString(app.spec, "token_prefix");
   const customHeader = !!authHeader;
-  const active = customHeader
-    ? !!current?.env_names.some((n) => n.toLowerCase() === authHeader.toLowerCase()) ||
-      !!current?.has_auth
-    : !!current?.has_auth;
+  const active = urlIsCredential
+    ? !!current?.url
+    : customHeader
+      ? !!current?.env_names.some((n) => n.toLowerCase() === authHeader.toLowerCase()) ||
+        !!current?.has_auth
+      : !!current?.has_auth;
   const configured = urlFromOperator ? !!(current?.url && active) : active;
 
   async function ensureServer(url: string): Promise<Server> {
@@ -2125,6 +2134,22 @@ function HttpManagePanel({
     const url = urlFromOperator ? mcpUrl.trim() : specString(app.spec, "url");
     if (urlFromOperator && !url) {
       setError("MCP endpoint URL is required.");
+      return;
+    }
+    if (urlIsCredential) {
+      if (!url) return;
+      setBusy(true);
+      setError("");
+      try {
+        const updated = await ensureServer(url);
+        setCurrent(updated);
+        setNotice("Saved. Probe tools to go live for agents.");
+        await onChanged();
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setBusy(false);
+      }
       return;
     }
     if (!token.trim() && !active) return;
@@ -2163,9 +2188,11 @@ function HttpManagePanel({
   const tokenLabel = customHeader
     ? `${authHeader} token${active ? " (replace)" : ""}`
     : `Bearer token${active ? " (replace)" : ""}`;
-  const canSubmit = urlFromOperator
-    ? !!mcpUrl.trim() && (!!token.trim() || active)
-    : !!token.trim();
+  const canSubmit = urlIsCredential
+    ? !!mcpUrl.trim()
+    : urlFromOperator
+      ? !!mcpUrl.trim() && (!!token.trim() || active)
+      : !!token.trim();
 
   return (
     <DrawerShell
@@ -2178,7 +2205,12 @@ function HttpManagePanel({
       configured={configured}
     >
       <form className="stack drawer-section" onSubmit={saveToken}>
-        {urlFromOperator ? (
+        {urlIsCredential ? (
+          <p className="provider-hint">
+            Paste your personal SSE MCP URL. The path after <code>/sse/</code> is the credential —
+            no separate Bearer token.
+          </p>
+        ) : urlFromOperator ? (
           <p className="provider-hint">
             Self-hosted MCP — paste the endpoint URL from your deployment (path looks like{" "}
             <code>/mcp/&lt;endpoint_id&gt;</code>).
@@ -2209,22 +2241,28 @@ function HttpManagePanel({
               value={mcpUrl}
               onChange={(e) => setMcpUrl(e.target.value)}
               autoComplete="off"
-              placeholder="https://your-host/mcp/<endpoint_id>"
+              placeholder={
+                urlIsCredential
+                  ? "https://api-xmodels.xunlei.com/models/sse/<token>"
+                  : "https://your-host/mcp/<endpoint_id>"
+              }
               required
             />
           </label>
         ) : null}
-        <label className="field">
-          {tokenLabel}
-          <input
-            type="password"
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            autoComplete="off"
-            placeholder={active ? "••••••••" : "Paste token"}
-            required={!active}
-          />
-        </label>
+        {urlIsCredential ? null : (
+          <label className="field">
+            {tokenLabel}
+            <input
+              type="password"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              autoComplete="off"
+              placeholder={active ? "••••••••" : "Paste token"}
+              required={!active}
+            />
+          </label>
+        )}
         <div className="apps-actions">
           <button className="primary sm" type="submit" disabled={busy || !canSubmit}>
             {current ? "Save" : "Connect"}

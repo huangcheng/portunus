@@ -88,9 +88,20 @@ def resolve_exec(command: str, policy: Policy) -> str:
 
 
 def build_env(command: str, policy: Policy, literals: dict[str, str]) -> dict[str, str]:
-    """Scrubbed child env: nothing inherited from the runner (no token), PATH = trusted_path."""
+    """Scrubbed child env: nothing inherited from the runner (no token), PATH = trusted_path.
+
+    Child runtime contract: always set ``HOME`` and ``TMPDIR`` when the start
+    frame omits them — Go CLIs (cubox-cli) and many Node tools call
+    ``os.UserHomeDir`` / ``os.homedir`` / tmp and fail hard if unset. Prefer
+    explicit literals; otherwise ``STATE_DIR`` for HOME, else ``/tmp``.
+    """
     env = dict(literals)
     env["PATH"] = os.pathsep.join(policy.trusted_path)
+    if not str(env.get("TMPDIR", "")).strip():
+        env["TMPDIR"] = "/tmp"
+    if not str(env.get("HOME", "")).strip():
+        state = str(env.get("STATE_DIR", "")).strip()
+        env["HOME"] = state or env["TMPDIR"]
     if command == "uvx":
         env["UV_NO_BUILD"] = "1"  # spec §6: not overridable by literals
     return env

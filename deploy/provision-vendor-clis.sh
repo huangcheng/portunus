@@ -175,6 +175,11 @@ print("\t".join(str(o[k]) for k in ("name","dest","kind","repo","tag","asset","b
       docker cp '$remote_tmp/$binary' '$runner:$dest'
       docker exec '$runner' chmod 755 '$dest'
       docker exec '$runner' test -x '$dest'
+      # Writable HOME/STATE_DIR for Go CLIs (drop-privs child uid).
+      state='/var/lib/portunus/skill-state/$name'
+      mkdir -p \"\$state\"
+      chown ${PORTUNUS_STATE_UID:-10001}:${PORTUNUS_STATE_UID:-10001} \"\$state\" 2>/dev/null || true
+      chmod 700 \"\$state\"
       echo OK:$name:$runner
     "; then
       echo "FAIL: install $name into $runner on $host" >&2

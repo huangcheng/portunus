@@ -25,7 +25,7 @@ from sqlalchemy.exc import IntegrityError
 
 from . import authz, keys
 from . import passkey as pk
-from .db.models import AgentKey, AuditEvent, Grant, Server
+from .db.models import AgentKey, AuditEvent, Grant, Server, session_ttl
 from .operator_account import (
     consume_recovery_code,
     confirm_totp,
@@ -799,7 +799,7 @@ def _session_response(auth: OperatorAuth, token: str, body: dict[str, Any]) -> J
     out.set_cookie(
         SESSION_COOKIE,
         token,
-        max_age=12 * 3600,
+        max_age=int(session_ttl().total_seconds()),
         httponly=True,
         secure=auth.secure_cookie,
         samesite="strict",

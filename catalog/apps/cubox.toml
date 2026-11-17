@@ -16,3 +16,4 @@ setup_hints = [
 ]
 [spec.env_defaults]
 CUBOX_SERVER = "cubox.pro"
+STATE_DIR = "/var/lib/portunus/skill-state/cubox"

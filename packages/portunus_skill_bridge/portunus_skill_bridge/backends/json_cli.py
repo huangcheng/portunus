@@ -140,6 +140,10 @@ class JsonCliBackend:
         ``$HOME/.…`` *and* ``--agent-profile-dir``. skill_exec always sets
         ``HOME=STATE_DIR``; without that the MCP child invents a fresh agent
         under the process home and returns LOGIN_PENDING despite a good login.
+
+        Token-only Go CLIs (e.g. cubox-cli) call ``os.UserHomeDir()`` and exit
+        when ``HOME`` is unset. Runner MCP env is scrubbed (no inherited HOME),
+        so always pin one here.
         """
         from portunus_skill_bridge.cli_guard import scrubbed_child_env
 
@@ -151,6 +155,17 @@ class JsonCliBackend:
         ident = self.cli.identity
         if ident.agent_profile_dir:
             env["HOME"] = _absolute_existing_dir(ident.agent_profile_dir, label="agent_profile_dir")
+            return env
+        if not env.get("HOME", "").strip():
+            for key in ("TMPDIR", "TMP", "TEMP"):
+                cand = env.get(key, "").strip()
+                if cand:
+                    try:
+                        env["HOME"] = _absolute_existing_dir(cand, label=key)
+                        return env
+                    except RuntimeError:
+                        continue
+            env["HOME"] = "/tmp"
         return env
 
     async def _run(

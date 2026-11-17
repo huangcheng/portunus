@@ -105,13 +105,39 @@ echo "hosts: ${HOSTS[*]}"
 echo "rclone cache: $PORTUNUS_RCLONE_CACHE"
 
 fail=0
+# Per-component status for Temporal / operators: ok | fail | skip | na
+st_rclone=na
+st_skills=na
+st_clis=na
+st_bridge=na
+
+run_component() {
+  # $1=name  $2=status_var  remaining=command
+  local name="$1" var="$2"
+  shift 2
+  local rc=0
+  set +e
+  "$@"
+  rc=$?
+  set -e
+  case "$rc" in
+    0) printf -v "$var" '%s' "ok" ;;
+    3)
+      printf -v "$var" '%s' "skip"
+      echo "SKIP: $name (non-fatal)" >&2
+      ;;
+    *)
+      printf -v "$var" '%s' "fail"
+      echo "FAIL: $name (exit $rc)" >&2
+      fail=1
+      ;;
+  esac
+  return 0
+}
 
 if [[ "$want_rclone" -eq 1 ]]; then
   echo "=== provision rclone ==="
-  if ! bash "$HERE/provision-rclone-shim.sh" "${HOSTS[@]}"; then
-    echo "FAIL: provision-rclone-shim" >&2
-    fail=1
-  fi
+  run_component rclone st_rclone bash "$HERE/provision-rclone-shim.sh" "${HOSTS[@]}"
 fi
 
 if [[ "$want_skills" -eq 1 ]]; then
@@ -120,18 +146,12 @@ if [[ "$want_skills" -eq 1 ]]; then
   if [[ -n "$FROM" ]]; then
     skills_args+=(--from "$FROM")
   fi
-  if ! bash "$HERE/fleet-skills.sh" "${skills_args[@]}" "${HOSTS[@]}"; then
-    echo "FAIL: fleet-skills" >&2
-    fail=1
-  fi
+  run_component skills st_skills bash "$HERE/fleet-skills.sh" "${skills_args[@]}" "${HOSTS[@]}"
 fi
 
 if [[ "$want_clis" -eq 1 ]]; then
   echo "=== provision vendor CLIs (cubox-cli, …) ==="
-  if ! bash "$HERE/provision-vendor-clis.sh" "${HOSTS[@]}"; then
-    echo "FAIL: provision-vendor-clis" >&2
-    fail=1
-  fi
+  run_component clis st_clis bash "$HERE/provision-vendor-clis.sh" "${HOSTS[@]}"
 fi
 
 resolve_skill_bridge_src() {
@@ -181,16 +201,21 @@ sync_skill_bridge_host() {
 
 if [[ "$want_bridge" -eq 1 ]]; then
   echo "=== sync portunus_skill_bridge ==="
+  st_bridge=ok
   for host in "${HOSTS[@]}"; do
     if ! sync_skill_bridge_host "$host"; then
       echo "FAIL: skill_bridge on $host" >&2
+      st_bridge=fail
       fail=1
     fi
   done
 fi
 
+# Machine-readable summary for Temporal activity / operators.
+echo "COMPONENT_STATUS rclone=$st_rclone skills=$st_skills clis=$st_clis skill_bridge=$st_bridge"
+
 if [[ "$fail" -ne 0 ]]; then
   echo "fleet-providers-update: one or more steps failed" >&2
   exit 1
 fi
-echo "fleet-providers-update: all hosts ok"
+echo "fleet-providers-update: all requested components ok (skips allowed)"

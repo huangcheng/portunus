@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from pathlib import Path
 
 from temporalio import activity
@@ -10,6 +11,11 @@ from temporalio import activity
 from portunus_worker.settings import FLEET_DEFAULT_COMPONENTS
 
 log = logging.getLogger("portunus.worker.activities.fleet")
+
+_COMPONENT_STATUS_RE = re.compile(
+    r"^COMPONENT_STATUS\s+(.+)$",
+    re.MULTILINE,
+)
 
 
 def _repo_root() -> Path:
@@ -29,10 +35,26 @@ def _deploy_script(name: str) -> Path | None:
     return alt if alt.is_file() else None
 
 
+def parse_component_status(stdout: str) -> dict[str, str]:
+    """Parse ``COMPONENT_STATUS rclone=ok skills=fail …`` from script stdout."""
+    out: dict[str, str] = {}
+    for match in _COMPONENT_STATUS_RE.finditer(stdout or ""):
+        for part in match.group(1).split():
+            if "=" not in part:
+                continue
+            key, _, val = part.partition("=")
+            key = key.strip()
+            val = val.strip()
+            if key and val:
+                out[key] = val
+    return out
+
+
 async def _run_script(script: Path, *args: str) -> dict:
     env = os.environ.copy()
     # Writable rclone cache when deploy/ is bind-mounted :ro.
     env.setdefault("PORTUNUS_RCLONE_CACHE", "/var/lib/portunus/cache/rclone")
+    env.setdefault("PORTUNUS_VENDOR_CLI_CACHE", "/var/lib/portunus/cache/vendor-clis")
     proc = await asyncio.create_subprocess_exec(
         "bash",
         str(script),
@@ -51,6 +73,7 @@ async def _run_script(script: Path, *args: str) -> dict:
         "stdout": out,
         "stderr": err,
         "script": script.name,
+        "component_status": parse_component_status(out),
     }
 
 
@@ -81,12 +104,14 @@ async def update_providers_host(host: str, components: list[str] | None = None) 
         args.extend(["--components", ",".join(comps)])
     args.append(host)
     result = await _run_script(script, *args)
+    status = result.get("component_status") or {}
     log.info(
-        "update_providers_host host=%s ok=%s code=%s components=%s",
+        "update_providers_host host=%s ok=%s code=%s components=%s status=%s",
         host,
         result["ok"],
         result["code"],
         comps or "default",
+        status,
     )
     return {
         "host": host,
