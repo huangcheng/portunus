@@ -428,3 +428,205 @@ def test_merge_skill_bridge_seed_keeps_operator_fields():
     assert merged["env_defaults"]["NEW_SEED"] == "yes"
     assert merged["command"] == "/usr/bin/python3"
     assert merged["args"] == live["args"]
+
+
+@pytest.mark.anyio
+async def test_gdrive_rclone_migration_restores_issuer(db):
+    import uuid
+
+    from sqlalchemy import select
+
+    from portunus_gateway.catalog import CatalogStore, RCLONE_SHIM
+    from portunus_gateway.db.models import CatalogApp, Server
+    from portunus_gateway.db.session import async_session
+
+    async with async_session() as s:
+        s.add(
+            CatalogApp(
+                id=uuid.uuid4(),
+                slug="gdrive",
+                label="Google Drive",
+                name="Google Drive",
+                description="legacy rclone",
+                connection="stdio",
+                spec={"command": RCLONE_SHIM, "args": [], "env": []},
+            )
+        )
+        s.add(
+            Server(
+                id=uuid.uuid4(),
+                name="Google Drive",
+                slug="gdrive",
+                kind="stdio",
+                command=RCLONE_SHIM,
+                args=[],
+            )
+        )
+        await s.commit()
+
+    await CatalogStore(async_session).ensure_defaults()
+
+    async with async_session() as s:
+        row = (await s.execute(select(CatalogApp).where(CatalogApp.slug == "gdrive"))).scalar_one()
+        srv = (await s.execute(select(Server).where(Server.slug == "gdrive"))).scalar_one()
+        assert row.spec["issuer"] == "https://accounts.google.com"
+        assert srv.oauth["issuer"] == "https://accounts.google.com"
+
+
+@pytest.mark.anyio
+async def test_gdrive_oauth_backfills_issuer_after_earlier_migration(db):
+    import uuid
+
+    from sqlalchemy import select
+
+    from portunus_gateway.catalog import DEFAULT_APPS, CatalogStore, validate_spec
+    from portunus_gateway.db.models import CatalogApp, Server
+    from portunus_gateway.db.session import async_session
+
+    seed = next(a for a in DEFAULT_APPS if a["slug"] == "gdrive")
+    legacy_spec = validate_spec(
+        "oauth", {k: v for k, v in seed["spec"].items() if k != "issuer"}
+    )
+    legacy_oauth = {k: v for k, v in legacy_spec.items() if k not in {"url", "setup_hints"}}
+    async with async_session() as s:
+        s.add(
+            CatalogApp(
+                id=uuid.uuid4(),
+                slug="gdrive",
+                label="Google Drive",
+                name="Google Drive",
+                description=seed["description"],
+                connection="oauth",
+                spec=legacy_spec,
+            )
+        )
+        s.add(
+            Server(
+                id=uuid.uuid4(),
+                name="Google Drive",
+                slug="gdrive",
+                kind="remote",
+                url=legacy_spec["url"],
+                oauth=legacy_oauth,
+            )
+        )
+        await s.commit()
+
+    store = CatalogStore(async_session)
+    await store.ensure_defaults()
+    await store.ensure_defaults()
+
+    expected_spec = validate_spec("oauth", seed["spec"])
+    expected_oauth = {
+        k: v for k, v in expected_spec.items() if k not in {"url", "setup_hints"}
+    }
+    async with async_session() as s:
+        row = (await s.execute(select(CatalogApp).where(CatalogApp.slug == "gdrive"))).scalar_one()
+        srv = (await s.execute(select(Server).where(Server.slug == "gdrive"))).scalar_one()
+        assert row.spec == expected_spec
+        assert srv.oauth == expected_oauth
+
+
+@pytest.mark.anyio
+async def test_gdrive_oauth_backfill_preserves_custom_configuration(db):
+    import uuid
+
+    from sqlalchemy import select
+
+    from portunus_gateway.catalog import DEFAULT_APPS, CatalogStore, validate_spec
+    from portunus_gateway.db.models import CatalogApp, Server
+    from portunus_gateway.db.session import async_session
+
+    seed = next(a for a in DEFAULT_APPS if a["slug"] == "gdrive")
+    custom_spec = validate_spec(
+        "oauth",
+        {
+            **seed["spec"],
+            "url": "https://mcp.example.com/mcp",
+            "authorize_url": "https://auth.example.com/authorize",
+            "token_url": "https://auth.example.com/token",
+            "resource": "https://mcp.example.com/mcp",
+            "issuer": "https://auth.example.com",
+        },
+    )
+    custom_oauth = {k: v for k, v in custom_spec.items() if k not in {"url", "setup_hints"}}
+    async with async_session() as s:
+        s.add(
+            CatalogApp(
+                id=uuid.uuid4(),
+                slug="gdrive",
+                label="Google Drive",
+                name="Google Drive",
+                description="operator-managed OAuth",
+                connection="oauth",
+                spec=custom_spec,
+            )
+        )
+        s.add(
+            Server(
+                id=uuid.uuid4(),
+                name="Google Drive",
+                slug="gdrive",
+                kind="remote",
+                url=custom_spec["url"],
+                oauth=custom_oauth,
+            )
+        )
+        await s.commit()
+
+    await CatalogStore(async_session).ensure_defaults()
+
+    async with async_session() as s:
+        row = (await s.execute(select(CatalogApp).where(CatalogApp.slug == "gdrive"))).scalar_one()
+        srv = (await s.execute(select(Server).where(Server.slug == "gdrive"))).scalar_one()
+        assert row.spec == custom_spec
+        assert srv.oauth == custom_oauth
+
+
+@pytest.mark.anyio
+async def test_gdrive_oauth_backfill_skips_invalid_catalog_spec(db):
+    import uuid
+
+    from sqlalchemy import select
+
+    from portunus_gateway.catalog import DEFAULT_APPS, CatalogStore, validate_spec
+    from portunus_gateway.db.models import CatalogApp, Server
+    from portunus_gateway.db.session import async_session
+
+    seed = next(a for a in DEFAULT_APPS if a["slug"] == "gdrive")
+    legacy_spec = validate_spec(
+        "oauth", {k: v for k, v in seed["spec"].items() if k != "issuer"}
+    )
+    legacy_oauth = {k: v for k, v in legacy_spec.items() if k not in {"url", "setup_hints"}}
+    invalid_spec = {**legacy_spec, "scopes": "legacy-invalid-shape"}
+    async with async_session() as s:
+        s.add(
+            CatalogApp(
+                id=uuid.uuid4(),
+                slug="gdrive",
+                label="Google Drive",
+                name="Google Drive",
+                description=seed["description"],
+                connection="oauth",
+                spec=invalid_spec,
+            )
+        )
+        s.add(
+            Server(
+                id=uuid.uuid4(),
+                name="Google Drive",
+                slug="gdrive",
+                kind="remote",
+                url=legacy_spec["url"],
+                oauth=legacy_oauth,
+            )
+        )
+        await s.commit()
+
+    await CatalogStore(async_session).ensure_defaults()
+
+    async with async_session() as s:
+        row = (await s.execute(select(CatalogApp).where(CatalogApp.slug == "gdrive"))).scalar_one()
+        srv = (await s.execute(select(Server).where(Server.slug == "gdrive"))).scalar_one()
+        assert row.spec == invalid_spec
+        assert srv.oauth["issuer"] == "https://accounts.google.com"

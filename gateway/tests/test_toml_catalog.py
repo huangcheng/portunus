@@ -140,6 +140,20 @@ def test_packaged_apps_cover_default_apps() -> None:
     assert not disabled, [(r.slug, r.disable_reasons) for r in disabled]
 
 
+def test_packaged_oauth_specs_match_default_apps() -> None:
+    from portunus_gateway.catalog import DEFAULT_APPS, validate_spec
+    from portunus_gateway.toml_catalog import load_apps_dir, packaged_apps_dir
+
+    loaded = load_apps_dir(packaged_apps_dir())
+    recipes = {r.slug: r for r in loaded.recipes}
+    for seed in DEFAULT_APPS:
+        if seed["connection"] == "oauth":
+            recipe_spec = dict(recipes[seed["slug"]].spec)
+            if recipe_spec.get("secrets") == []:
+                recipe_spec.pop("secrets")
+            assert recipe_spec == validate_spec("oauth", seed["spec"])
+
+
 def test_skill_bridge_toml_secrets_are_objects() -> None:
     """Connect UI needs [{name,label,secret}] — not bare env-name strings."""
     from portunus_gateway.toml_catalog import load_apps_dir, packaged_apps_dir, recipe_public_view

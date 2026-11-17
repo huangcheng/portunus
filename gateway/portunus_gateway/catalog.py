@@ -1338,6 +1338,56 @@ class CatalogStore:
                 await s.commit()
                 log.info("gdrive migration: switched catalog row to Drive MCP oauth")
 
+        # Backfill deployments that ran the migration before exact issuer validation
+        # was restored, without replacing operator-managed OAuth endpoints.
+        async with self._sf() as s:
+            seed = next((a for a in DEFAULT_APPS if a["slug"] == "gdrive"), None)
+            row = (
+                await s.execute(select(CatalogApp).where(CatalogApp.slug == "gdrive"))
+            ).scalar_one_or_none()
+            if seed is not None and row is not None and row.connection == "oauth":
+                seed_spec = seed["spec"]
+                live_spec = dict(row.spec or {})
+                official_keys = ("url", "authorize_url", "token_url", "resource")
+                seed_issuer = seed_spec.get("issuer")
+                if seed_issuer and all(
+                    live_spec.get(k) == seed_spec.get(k) for k in official_keys
+                ):
+                    dirty = False
+                    if "issuer" not in live_spec:
+                        try:
+                            row.spec = validate_spec(
+                                "oauth", {**live_spec, "issuer": seed_issuer}
+                            )
+                        except RegistryError:
+                            log.warning(
+                                "gdrive issuer backfill skipped (invalid live spec)",
+                                exc_info=True,
+                            )
+                        else:
+                            live_spec["issuer"] = seed_issuer
+                            dirty = True
+                    linked = (
+                        await s.execute(select(Server).where(Server.slug == "gdrive"))
+                    ).scalars().all()
+                    for srv in linked:
+                        oauth = dict(srv.oauth or {})
+                        if (
+                            srv.kind == "remote"
+                            and srv.url == seed_spec["url"]
+                            and "issuer" not in oauth
+                            and all(
+                                oauth.get(k) == seed_spec.get(k)
+                                for k in ("authorize_url", "token_url", "resource")
+                            )
+                        ):
+                            oauth["issuer"] = live_spec.get("issuer", seed_issuer)
+                            srv.oauth = oauth
+                            srv.vault_version = int(srv.vault_version or 0) + 1
+                            dirty = True
+                    if dirty:
+                        await s.commit()
+
         # Idempotent: add new skill_bridge seeds (e.g. weread) on existing deploys,
         # and refresh skill_bridge manifests when the packaged seed grows (tool list).
         # Also insert missing rclone-shim stdio seeds (yandex/drime/…) and http
