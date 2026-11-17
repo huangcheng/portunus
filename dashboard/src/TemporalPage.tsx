@@ -369,38 +369,40 @@ export function TemporalPage() {
                       items.map((row) => {
                         const label = workflowLabel(row.workflow_id);
                         return (
-                        <tr key={`${row.workflow_id}:${row.run_id}`}>
-                          <td data-label="Workflow">
-                            <strong className="mono" title={row.workflow_id ?? undefined}>
-                              {label}
-                            </strong>
-                            {row.workflow_id && label !== row.workflow_id ? (
-                              <div className="muted mono temporal-workflow-id">
-                                {row.workflow_id}
+                          <tr key={`${row.workflow_id}:${row.run_id}`}>
+                            <td data-label="Workflow">
+                              <div className="temporal-workflow-cell">
+                                <strong className="mono" title={row.workflow_id ?? undefined}>
+                                  {label}
+                                </strong>
+                                {row.workflow_id && label !== row.workflow_id ? (
+                                  <div className="muted mono temporal-workflow-id">
+                                    {row.workflow_id}
+                                  </div>
+                                ) : null}
                               </div>
-                            ) : null}
-                          </td>
-                          <td data-label="Type" className="mono">
-                            {row.workflow_type ?? "—"}
-                          </td>
-                          <td data-label="Status">
-                            <span className={`health on-card ${statusKind(row.status)}`}>
-                              <span className="dot" aria-hidden />
-                              {statusLabel(row.status)}
-                            </span>
-                          </td>
-                          <td data-label="Started">{fmtTimestamp(row.start_time)}</td>
-                          <td data-label="Closed">{fmtTimestamp(row.close_time)}</td>
-                          <td data-label="">
-                            <button
-                              type="button"
-                              className="ghost sm"
-                              onClick={() => void openDetail(row)}
-                            >
-                              Inspect
-                            </button>
-                          </td>
-                        </tr>
+                            </td>
+                            <td data-label="Type" className="mono">
+                              {row.workflow_type ?? "—"}
+                            </td>
+                            <td data-label="Status">
+                              <span className={`health on-card ${statusKind(row.status)}`}>
+                                <span className="dot" aria-hidden />
+                                {statusLabel(row.status)}
+                              </span>
+                            </td>
+                            <td data-label="Started">{fmtTimestamp(row.start_time)}</td>
+                            <td data-label="Closed">{fmtTimestamp(row.close_time)}</td>
+                            <td data-label="">
+                              <button
+                                type="button"
+                                className="ghost sm"
+                                onClick={() => void openDetail(row)}
+                              >
+                                Inspect
+                              </button>
+                            </td>
+                          </tr>
                         );
                       })
                     )}

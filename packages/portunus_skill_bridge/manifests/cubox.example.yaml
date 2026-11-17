@@ -18,7 +18,7 @@ cli:
     kind: github_release
     repo: OLCUBO/cubox-cli
     tag: v1.0.10
-    asset: cubox-cli-1.0.10-linux-{arch}.tar.gz
+    asset: cubox-cli-{version}-linux-{arch}.tar.gz
     binary: cubox-cli
   identity: {}
   run_wrapper: raw

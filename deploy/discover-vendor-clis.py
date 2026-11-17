@@ -80,7 +80,14 @@ def main() -> int:
             except ImportError:
                 print("discover-vendor-clis: need portunus_skill_bridge or PyYAML", file=sys.stderr)
                 return 2
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            try:
+                data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except Exception as e:  # noqa: BLE001
+                print(f"skip {path.name}: {e}", file=sys.stderr)
+                continue
+            if not isinstance(data, dict):
+                print(f"skip {path.name}: manifest root must be a mapping", file=sys.stderr)
+                continue
             cli = data.get("cli")
             if not isinstance(cli, dict):
                 continue

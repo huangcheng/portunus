@@ -62,9 +62,45 @@ def test_load_cubox_example():
     assert m.cli.provision is not None
     assert m.cli.provision.repo == "OLCUBO/cubox-cli"
     assert m.cli.provision.tag == "v1.0.10"
+    assert "{version}" in m.cli.provision.asset
     folder = next(t for t in m.tools if t.name == "folder_list")
     assert folder.cli == ["folder", "list"]
     assert {t.name for t in m.tools} >= {"folder_list", "card_list", "card_rag", "save"}
+
+
+def test_absolute_cli_requires_provision():
+    from portunus_skill_bridge.manifest import Manifest
+
+    with pytest.raises(Exception, match="absolute"):
+        Manifest.model_validate(
+            {
+                "name": "x",
+                "backend": "json_cli",
+                "cli": {"command": ["/usr/local/bin/missing-cli"]},
+                "tools": [{"name": "t", "description": "d", "cli": "t"}],
+            }
+        )
+
+
+def test_provision_requires_absolute_command():
+    from portunus_skill_bridge.manifest import Manifest
+
+    with pytest.raises(Exception, match="absolute"):
+        Manifest.model_validate(
+            {
+                "name": "x",
+                "backend": "json_cli",
+                "cli": {
+                    "command": ["cubox-cli"],
+                    "provision": {
+                        "repo": "OLCUBO/cubox-cli",
+                        "tag": "v1.0.10",
+                        "asset": "cubox-cli-{version}-linux-{arch}.tar.gz",
+                    },
+                },
+                "tools": [{"name": "t", "description": "d", "cli": "t"}],
+            }
+        )
 
 
 def test_load_flyai_example():

@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "usage: $0 [--components LIST] [--from DIR] host ..." >&2; exit 2; }
       FROM="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,32p' "$0"; exit 0 ;;
+      sed -n '2,25p' "$0"; exit 0 ;;
     --)
       shift; break ;;
     -*)
@@ -161,8 +161,11 @@ sync_skill_bridge_host() {
     -e "ssh ${SSH_OPTS[*]}" \
     "$src/" "$host:$remote_tmp/" || return 1
   # Prefer explicit container name; else first running *portunus*runner* name.
+  # Interpolate override — ssh does not forward local PORTUNUS_RUNNER_CONTAINER.
+  local runner_override
+  runner_override="$(printf '%q' "${PORTUNUS_RUNNER_CONTAINER:-}")"
   ssh "${SSH_OPTS[@]}" "$host" "set -e
-    C=\"\${PORTUNUS_RUNNER_CONTAINER:-}\"
+    C=$runner_override
     if [[ -z \"\$C\" ]]; then
       C=\$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E 'portunus.*runner' | head -1 || true)
     fi

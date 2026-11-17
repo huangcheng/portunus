@@ -46,8 +46,17 @@ do
   fi
 done
 
-# Keep discovery stderr visible (skip diagnostics); collect stdout as specs.
-mapfile -t SPECS < <("$PYTHON" "$DISCOVER")
+# Capture discovery stdout and honor exit status (process substitution drops it).
+SPECS_FILE="$(mktemp "${TMPDIR:-/tmp}/portunus-cli-specs.XXXXXX")"
+# shellcheck disable=SC2064
+trap 'rm -f "$SPECS_FILE"' EXIT
+if ! "$PYTHON" "$DISCOVER" >"$SPECS_FILE"; then
+  echo "provision-vendor-clis: manifest discovery failed (see stderr above)" >&2
+  exit 1
+fi
+mapfile -t SPECS <"$SPECS_FILE"
+rm -f "$SPECS_FILE"
+trap - EXIT
 if [[ ${#SPECS[@]} -eq 0 ]]; then
   echo "provision-vendor-clis: no cli.provision entries in manifests (nothing to install)"
   exit 0
@@ -93,17 +102,19 @@ fetch_github_release() {
 
 resolve_runner() {
   local host="$1"
-  ssh "${SSH_OPTS[@]}" "$host" 'set -e
-    C="${PORTUNUS_RUNNER_CONTAINER:-}"
-    if [[ -z "$C" ]]; then
-      C=$(docker ps --format "{{.Names}}" 2>/dev/null | grep -E "portunus.*runner" | head -1 || true)
+  local override="${PORTUNUS_RUNNER_CONTAINER:-}"
+  # Interpolate override into the remote command — ssh does not forward local env.
+  ssh "${SSH_OPTS[@]}" "$host" "set -e
+    C=$(printf '%q' "$override")
+    if [[ -z \"\$C\" ]]; then
+      C=\$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E 'portunus.*runner' | head -1 || true)
     fi
-    if [[ -z "$C" ]]; then
-      echo "FAIL: no runner container (set PORTUNUS_RUNNER_CONTAINER)" >&2
+    if [[ -z \"\$C\" ]]; then
+      echo 'FAIL: no runner container (set PORTUNUS_RUNNER_CONTAINER)' >&2
       exit 1
     fi
-    printf "%s" "$C"
-  '
+    printf '%s' \"\$C\"
+  "
 }
 
 fail=0
@@ -130,12 +141,11 @@ for host in "$@"; do
     continue
   }
 
-  remote_tmp="/tmp/portunus-vendor-clis"
-  if ! ssh "${SSH_OPTS[@]}" "$host" "mkdir -p '$remote_tmp'"; then
-    echo "FAIL: mkdir remote tmp on $host" >&2
+  remote_tmp="$(ssh "${SSH_OPTS[@]}" "$host" 'mktemp -d "${TMPDIR:-/tmp}/portunus-vendor-clis.XXXXXX"')" || {
+    echo "FAIL: mkdtemp remote tmp on $host" >&2
     fail=1
     continue
-  fi
+  }
 
   for line in "${SPECS[@]}"; do
     # Parse once per record (avoid 7× python startups per host×spec).
@@ -150,7 +160,7 @@ print("\t".join(str(o[k]) for k in ("name","dest","kind","repo","tag","asset","b
       fail=1
       continue
     }
-    cache_bin="$CACHE_DIR/${name}-${tag}-linux-${RARCH}"
+    cache_bin="$CACHE_DIR/${name}-${tag}-${asset//\//_}-linux-${RARCH}"
     if ! fetch_github_release "$repo" "$tag" "$asset" "$RARCH" "$cache_bin" "$binary"; then
       echo "FAIL: download $name" >&2
       fail=1
@@ -172,6 +182,7 @@ print("\t".join(str(o[k]) for k in ("name","dest","kind","repo","tag","asset","b
       continue
     fi
   done
+  ssh "${SSH_OPTS[@]}" "$host" "rm -rf $(printf '%q' "$remote_tmp")" || true
 done
 
 if [[ "$fail" -ne 0 ]]; then
