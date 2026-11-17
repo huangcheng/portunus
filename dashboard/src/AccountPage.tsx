@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import QRCode from "qrcode";
 import { api, type AuthStatus, type PasskeyInfo, type RecoveryStatus } from "./api";
+import { confirmPassword } from "./ConfirmPassword";
 import { Icon } from "./icons/ui";
 import { b64urlToBuffer, bufferToB64url } from "./webauthn";
 
@@ -239,7 +240,6 @@ function TotpSection({ status, onDone }: { status: AuthStatus | null; onDone: ()
   const [uri, setUri] = useState("");
   const [code, setCode] = useState("");
   const [codes, setCodes] = useState<string[]>([]);
-  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -248,7 +248,6 @@ function TotpSection({ status, onDone }: { status: AuthStatus | null; onDone: ()
     setSecret("");
     setUri("");
     setCode("");
-    setPassword("");
     setError("");
   }
 
@@ -261,6 +260,7 @@ function TotpSection({ status, onDone }: { status: AuthStatus | null; onDone: ()
       setUri(r.provisioning_uri);
       setMode("scan");
     } catch (err) {
+      if ((err as { code?: string }).code === "cancelled") return;
       setError(err instanceof Error ? err.message : "Could not start two-factor");
     } finally {
       setBusy(false);
@@ -276,38 +276,46 @@ function TotpSection({ status, onDone }: { status: AuthStatus | null; onDone: ()
       setMode("keys");
       onDone();
     } catch (err) {
+      if ((err as { code?: string }).code === "cancelled") return;
       setError(err instanceof Error ? err.message : "That code did not match");
     } finally {
       setBusy(false);
     }
   }
 
-  async function reveal(e: FormEvent) {
-    e.preventDefault();
+  async function reveal() {
     setError("");
     setBusy(true);
     try {
-      const r = await api.totpQr(password);
+      const r = await api.totpQr();
       setSecret(r.secret);
       setUri(r.provisioning_uri);
-      setPassword("");
     } catch (err) {
+      if ((err as { code?: string }).code === "cancelled") {
+        reset();
+        return;
+      }
       setError(err instanceof Error ? err.message : "Could not reveal the key");
+      setMode("idle");
     } finally {
       setBusy(false);
     }
   }
 
-  async function disable(e: FormEvent) {
-    e.preventDefault();
+  async function disable() {
     setError("");
     setBusy(true);
     try {
-      await api.totpDisable(password);
+      await api.totpDisable();
       reset();
       onDone();
     } catch (err) {
+      if ((err as { code?: string }).code === "cancelled") {
+        reset();
+        return;
+      }
       setError(err instanceof Error ? err.message : "Could not disable two-factor");
+      setMode("idle");
     } finally {
       setBusy(false);
     }
@@ -327,10 +335,26 @@ function TotpSection({ status, onDone }: { status: AuthStatus | null; onDone: ()
           <div className="row">
             {enabled ? (
               <>
-                <button className="outline sm" type="button" onClick={() => setMode("qr")}>
+                <button
+                  className="outline sm"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setMode("qr");
+                    void reveal();
+                  }}
+                >
                   Show QR and key
                 </button>
-                <button className="destructive sm" type="button" onClick={() => setMode("disable")}>
+                <button
+                  className="destructive sm"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setMode("disable");
+                    void disable();
+                  }}
+                >
                   Disable…
                 </button>
               </>
@@ -397,46 +421,31 @@ function TotpSection({ status, onDone }: { status: AuthStatus | null; onDone: ()
           </div>
         )}
         {mode === "qr" && (
-          <form className="stack" onSubmit={reveal}>
+          <div className="stack">
             {uri ? (
               <div className="totp-scan">
                 <QrFigure text={uri} />
                 <code className="secret-code">{secret}</code>
               </div>
             ) : (
-              <label className="field">
-                Console password
-                <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required autoFocus />
-              </label>
+              <p className="muted">{busy ? "Confirming…" : "Waiting for password confirmation…"}</p>
             )}
-            <div className="row">
-              {!uri && (
-                <button className="primary sm" type="submit" disabled={busy || !password}>
-                  {busy ? "Checking…" : "Reveal"}
-                </button>
-              )}
-              <button className="ghost" type="button" onClick={reset}>
-                Close
-              </button>
-            </div>
-          </form>
+            <button className="ghost" type="button" onClick={reset}>
+              Close
+            </button>
+          </div>
         )}
         {mode === "disable" && (
-          <form className="stack" onSubmit={disable}>
-            <p className="muted">Password sign-in drops back to one factor, and every recovery key is wiped.</p>
-            <label className="field">
-              Console password
-              <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required autoFocus />
-            </label>
-            <div className="row">
-              <button className="destructive sm" type="submit" disabled={busy || !password}>
-                {busy ? "Disabling…" : "Disable two-factor"}
-              </button>
-              <button className="ghost" type="button" onClick={reset} disabled={busy}>
-                Cancel
-              </button>
-            </div>
-          </form>
+          <div className="stack">
+            <p className="muted">
+              {busy
+                ? "Confirming…"
+                : "Password sign-in drops back to one factor, and every recovery key is wiped."}
+            </p>
+            <button className="ghost" type="button" onClick={reset} disabled={busy}>
+              Cancel
+            </button>
+          </div>
         )}
         {error && <div className="notice error">{error}</div>}
       </div>
@@ -456,22 +465,19 @@ function RecoverySection({
   const enabled = !!status?.has_totp;
   const total = recovery?.total ?? 10;
   const remaining = recovery?.remaining ?? 0;
-  const [open, setOpen] = useState(false);
-  const [password, setPassword] = useState("");
   const [codes, setCodes] = useState<string[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  async function regenerate(e: FormEvent) {
-    e.preventDefault();
+  async function regenerate() {
     setError("");
     setBusy(true);
     try {
-      const r = await api.regenerateRecovery(password);
+      const r = await api.regenerateRecovery();
       setCodes(r.codes);
-      setPassword("");
       onDone();
     } catch (err) {
+      if ((err as { code?: string }).code === "cancelled") return;
       setError(err instanceof Error ? err.message : "Could not regenerate keys");
     } finally {
       setBusy(false);
@@ -493,14 +499,7 @@ function RecoverySection({
         ) : codes ? (
           <div className="stack">
             <RecoveryCodes codes={codes} />
-            <button
-              className="primary sm"
-              type="button"
-              onClick={() => {
-                setCodes(null);
-                setOpen(false);
-              }}
-            >
+            <button className="primary sm" type="button" onClick={() => setCodes(null)}>
               Done — I saved them
             </button>
           </div>
@@ -512,29 +511,12 @@ function RecoverySection({
               ))}
             </div>
             <p className="muted">{remaining} unused</p>
-            {open ? (
-              <form className="stack" onSubmit={regenerate}>
-                <p className="muted">Every existing key stops working, including any saved in a password manager.</p>
-                <label className="field">
-                  Console password
-                  <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required autoFocus />
-                </label>
-                {error && <div className="notice error">{error}</div>}
-                <div className="row">
-                  <button className="primary sm" type="submit" disabled={busy || !password}>
-                    {busy ? "Replacing…" : "Regenerate"}
-                  </button>
-                  <button className="ghost" type="button" onClick={() => setOpen(false)} disabled={busy}>
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <button className="outline sm" type="button" onClick={() => setOpen(true)}>
-                <Icon name="shield" size={14} />
-                Regenerate keys
-              </button>
-            )}
+            <p className="muted">Every existing key stops working, including any saved in a password manager.</p>
+            {error && <div className="notice error">{error}</div>}
+            <button className="outline sm" type="button" disabled={busy} onClick={() => void regenerate()}>
+              <Icon name="shield" size={14} />
+              {busy ? "Replacing…" : "Regenerate keys"}
+            </button>
           </>
         )}
       </div>
@@ -544,7 +526,6 @@ function RecoverySection({
 
 function PasskeySection({ passkeys, onDone }: { passkeys: PasskeyInfo[]; onDone: () => void }) {
   const [name, setName] = useState("");
-  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -555,14 +536,15 @@ function PasskeySection({ passkeys, onDone }: { passkeys: PasskeyInfo[]; onDone:
       setError("Name this passkey first.");
       return;
     }
-    if (!password) {
-      setError("Confirm your operator password first.");
-      return;
-    }
     setBusy(true);
     try {
-      // Password already collected — keep WebAuthn create() inside the click activation window.
-      const opts = await api.passkeyRegisterOptions(password);
+      // One modal for both step-up calls; Continue is the WebAuthn user gesture.
+      const pw = await confirmPassword({
+        title: "Confirm password",
+        message: "Re-enter your operator password to register a passkey.",
+      });
+      if (!pw) return;
+      const opts = await api.passkeyRegisterOptions(pw);
       const cred = (await navigator.credentials.create({
         publicKey: {
           challenge: b64urlToBuffer(opts.challenge),
@@ -588,12 +570,12 @@ function PasskeySection({ passkeys, onDone }: { passkeys: PasskeyInfo[]; onDone:
             attestationObject: bufferToB64url(response.attestationObject),
           },
         },
-        password,
+        pw,
       );
       setName("");
-      setPassword("");
       onDone();
     } catch (err) {
+      if ((err as { code?: string }).code === "cancelled") return;
       setError(err instanceof Error ? err.message : "Registration failed");
     } finally {
       setBusy(false);
@@ -606,6 +588,7 @@ function PasskeySection({ passkeys, onDone }: { passkeys: PasskeyInfo[]; onDone:
       await api.deletePasskey(id);
       onDone();
     } catch (err) {
+      if ((err as { code?: string }).code === "cancelled") return;
       setError(err instanceof Error ? err.message : "Could not remove the passkey");
     }
   }
@@ -625,17 +608,7 @@ function PasskeySection({ passkeys, onDone }: { passkeys: PasskeyInfo[]; onDone:
             Name a new passkey
             <input value={name} onChange={(e) => setName(e.target.value)} maxLength={64} placeholder="This laptop" />
           </label>
-          <label className="field grow">
-            Operator password
-            <input
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
-          </label>
-          <button className="primary sm" type="submit" disabled={busy || !password}>
+          <button className="primary sm" type="submit" disabled={busy}>
             {busy ? "Waiting…" : "Register"}
           </button>
         </form>

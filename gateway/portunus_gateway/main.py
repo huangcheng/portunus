@@ -311,6 +311,7 @@ def create_gateway_app() -> FastAPI:
         from .retention import retention_loop
 
         setup_telemetry(service_version=gateway_version)
+        slots.publish_runner_gauges()
         a.state.started_at = datetime.now(timezone.utc)
         await store.reload_from_db()  # authz is rebuilt from the DB on start (spec §3)
         # Single-operator: every active key may use every server.

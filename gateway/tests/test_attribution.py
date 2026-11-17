@@ -291,3 +291,35 @@ async def test_dispatch_attaches_meta_via_asgi_scope_headers():
         http_headers={"traceparent": parent},
     )
     assert _portunus(result)["trace_id"] == "4bf92f3577b34da6a3ce929d0e0e4736"
+
+
+def test_extract_parent_context_none_keeps_active_span():
+    """No inbound traceparent must not wipe an active parent (e.g. POST /mcp)."""
+    from portunus_gateway import telemetry as tel
+
+    assert tel.extract_parent_context(None, None) is None
+    assert tel.extract_parent_context({}, {}) is None
+    with tel.start_span("portunus.test.parent") as parent:
+        want = format(parent.get_span_context().trace_id, "032x")
+        with tel.use_parent_context(tel.extract_parent_context(None, None)):
+            with tel.start_span("portunus.test.child") as child:
+                assert format(child.get_span_context().trace_id, "032x") == want
+                assert child.get_span_context().trace_id == parent.get_span_context().trace_id
+
+
+async def test_dispatch_inherits_active_span_without_traceparent():
+    from portunus_gateway import telemetry as tel
+
+    authz = MagicMock()
+    authz.is_revoked = MagicMock(return_value=True)
+    omni = Omni(
+        session_factory=MagicMock(),
+        registry=MagicMock(),
+        slots=MagicMock(),
+        runner=MagicMock(),
+        authz=authz,
+    )
+    with tel.start_span("POST /mcp") as gate:
+        want = format(gate.get_span_context().trace_id, "032x")
+        revoked = await omni.dispatch("key1", "portunus_discover_servers", {})
+    assert _portunus(revoked)["trace_id"] == want

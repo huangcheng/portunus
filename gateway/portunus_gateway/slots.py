@@ -154,13 +154,28 @@ class SlotManager:
             return self.pool.site_of(client)
 
         async def on_connected() -> None:
+            self.publish_runner_gauges()
             await self.sync_with_runner(site())
+
+        async def on_disconnected() -> None:
+            self.publish_runner_gauges()
 
         def on_exited(child_id: str) -> bool:
             return self.on_child_exited(child_id, site_id=site())
 
         client.on_connected = on_connected
+        client.on_disconnected = on_disconnected
         client.on_child_exited = on_exited
+        # Initial gauges are published from the app lifespan after setup_telemetry
+        # (service.version). Calling set_runner_connected here would configure OTel
+        # without that attribute and make the later versioned setup a no-op.
+
+    def publish_runner_gauges(self) -> None:
+        """Export per-site runner connected gauges. Call after setup_telemetry."""
+        from . import telemetry as tel
+
+        for site_id in self.pool.site_ids():
+            tel.set_runner_connected(site_id, 1 if self.pool.is_connected(site_id) else 0)
 
     def _site_or_only(self, site_id: str | None) -> str:
         """``site_id``, or the pool's single site (v1 callers never name one)."""

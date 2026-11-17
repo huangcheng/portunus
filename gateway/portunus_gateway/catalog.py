@@ -56,6 +56,7 @@ OVERSEAS_EGRESS_SLUGS = frozenset(
         "vercel",
         "fastmail",
         "doppler",
+        "linear",
     }
 )
 DOMESTIC_EGRESS_SLUGS = frozenset(
@@ -303,6 +304,39 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "[cloudflare/skills](https://github.com/cloudflare/skills) stay in the IDE; "
                     "this app is remote MCP at mcp.cloudflare.com. Setup: "
                     "[agent-setup/prompt.md](https://developers.cloudflare.com/agent-setup/prompt.md)."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "linear",
+        "label": "Linear",
+        "name": "Linear",
+        "description": (
+            "Linear remote MCP (issues, projects, comments) via OAuth 2.1 + DCR "
+            "at mcp.linear.app."
+        ),
+        "connection": "oauth",
+        "egress": "overseas",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["linear", "oauth", "mcp", "issues", "projects"],
+        "sort_order": 24,
+        "spec": {
+            "url": "https://mcp.linear.app/mcp",
+            "authorize_url": "https://mcp.linear.app/authorize",
+            "token_url": "https://mcp.linear.app/token",
+            "registration_endpoint": "https://mcp.linear.app/register",
+            "token_endpoint_auth_method": "none",
+            "resource": "https://mcp.linear.app/mcp",
+            "issuer": "https://mcp.linear.app",
+            "scopes": ["read", "write"],
+            "setup_hints": [
+                (
+                    "Authorize opens Linear OAuth (DCR — no Client ID to paste). "
+                    "Read-write MCP at https://mcp.linear.app/mcp. For read-only, use "
+                    "/mcp/readonly or request only the `read` scope. Docs: "
+                    "[linear.app/docs/mcp](https://linear.app/docs/mcp)."
                 ),
             ],
         },

@@ -21,6 +21,7 @@ export type AppIconId =
   | "cubox"
   | "github"
   | "cloudflare"
+  | "linear"
   | "aliyun"
   | "vultr"
   | "vercel"
@@ -57,6 +58,7 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "cubox") return "cubox";
   if (slug === "github") return "github";
   if (slug === "cloudflare") return "cloudflare";
+  if (slug === "linear") return "linear";
   if (slug === "aliyun" || slug === "alibaba" || slug === "alibabacloud") return "aliyun";
   if (slug === "vultr") return "vultr";
   if (slug === "vercel") return "vercel";
@@ -93,6 +95,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   cubox: "cubox.png",
   github: "github.svg",
   cloudflare: "cloudflare.svg",
+  linear: "linear.svg",
   aliyun: "aliyun.svg",
   vultr: "vultr.png",
   vercel: "vercel.svg",

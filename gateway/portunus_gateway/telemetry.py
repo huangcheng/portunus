@@ -150,8 +150,12 @@ def current_trace_id() -> str:
 def extract_parent_context(
     request_meta: Mapping[str, Any] | None = None,
     http_headers: Mapping[str, str] | None = None,
-) -> Context:
-    """Parent context: params ``_meta.traceparent`` first, else HTTP ``traceparent``, else root."""
+) -> Context | None:
+    """Parent context from ``_meta.traceparent`` or HTTP ``traceparent``.
+
+    Returns ``None`` when neither is present so callers keep the active context
+    (e.g. the ``/mcp`` gate span) instead of forcing a new root.
+    """
     setup_telemetry()
     carrier: dict[str, str] = {}
     if request_meta:
@@ -171,11 +175,15 @@ def extract_parent_context(
             if isinstance(ts, str) and ts.strip():
                 carrier["tracestate"] = ts.strip()
             return _propagator.extract(carrier)
-    return Context()
+    return None
 
 
 @contextmanager
-def use_parent_context(parent: Context) -> Iterator[None]:
+def use_parent_context(parent: Context | None) -> Iterator[None]:
+    """Attach ``parent`` when given; otherwise leave the current context alone."""
+    if parent is None:
+        yield
+        return
     token = attach(parent)
     try:
         yield

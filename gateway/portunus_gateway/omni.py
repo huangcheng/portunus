@@ -779,7 +779,7 @@ class Omni:
             with tel.use_parent_context(parent):
                 with tel.start_span(
                     "tools/call unknown",
-                    kind=SpanKind.SERVER,
+                    kind=SpanKind.INTERNAL,
                     attributes={
                         tel.ATTR_MCP_METHOD: "tools/call",
                         tel.ATTR_GEN_AI_TOOL: "unknown",
@@ -839,7 +839,7 @@ class Omni:
             with tel.use_parent_context(parent):
                 with tel.start_span(
                     f"tools/call {tool_label}",
-                    kind=SpanKind.SERVER,
+                    kind=SpanKind.INTERNAL,
                     attributes={
                         tel.ATTR_MCP_METHOD: "tools/call",
                         tel.ATTR_GEN_AI_TOOL: tool_label,
@@ -906,6 +906,14 @@ class Omni:
                         server = _safe_label(str(invoke_attrs.get("server") or ""))
                         tool = _safe_label(str(invoke_attrs.get("tool") or ""))
                         outcome = error_type or "ok"
+                        if server:
+                            span.set_attribute(tel.ATTR_SERVER, server)
+                        if tool:
+                            span.set_attribute(tel.ATTR_TOOL, tool)
+                        span.set_attribute(tel.ATTR_OUTCOME, outcome)
+                        site_id = invoke_attrs.get("site_id")
+                        if isinstance(site_id, str) and site_id:
+                            span.set_attribute(tel.ATTR_SITE_ID, site_id)
                         if server and tool:
                             tel.record_tool_duration(
                                 gateway_ms / 1000.0,
@@ -1525,9 +1533,8 @@ _JSONRPC_ADAPTER = TypeAdapter(types.JSONRPCMessage)
 
 
 def _gate_trace_id() -> str:
-    """Trace id for gate-layer errors (401/413/envelope); always creates a span context."""
-    with tel.start_span("portunus.gate", kind=SpanKind.SERVER):
-        return tel.current_trace_id()
+    """Trace id for gate-layer errors; reuses the active ``/mcp`` span when present."""
+    return tel.current_trace_id()
 
 
 def _error_response(status: int, code: str, message: str, headers: dict[str, str] | None = None):
@@ -1658,6 +1665,44 @@ class _Gate:
         if scope["type"] != "http":
             return
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        method = str(scope.get("method") or "HTTP")
+        parent = tel.extract_parent_context(None, headers)
+        with tel.use_parent_context(parent):
+            with tel.start_span(
+                f"{method} /mcp",
+                kind=SpanKind.SERVER,
+                attributes={
+                    "http.request.method": method,
+                    "http.route": "/mcp",
+                    "url.path": "/mcp",
+                },
+            ) as span:
+                status_code = 500
+
+                async def send_with_status(message: Message) -> None:
+                    nonlocal status_code
+                    if message["type"] == "http.response.start":
+                        status_code = int(message.get("status") or 500)
+                        span.set_attribute("http.response.status_code", status_code)
+                        if status_code >= 500:
+                            tel.set_span_error(span, f"http_{status_code}")
+                        elif status_code >= 400:
+                            span.set_attribute(tel.ATTR_ERROR_TYPE, f"http_{status_code}")
+                    await send(message)
+
+                try:
+                    await self._handle(scope, receive, send_with_status, headers)
+                except Exception:
+                    tel.set_span_error(span, "internal")
+                    raise
+
+    async def _handle(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        headers: dict[str, str],
+    ) -> None:
         # MCP 2026-07-28 Streamable HTTP: Origin present + invalid → 403 (DNS rebinding).
         if not origin_allowed(headers.get("origin")):
             await _error_response(403, "forbidden", "invalid Origin")(scope, receive, send)

@@ -253,6 +253,7 @@ def test_egress_preferred_regions_for_catalog_slugs():
         "raindrop",
         "github",
         "cloudflare",
+        "linear",
         "dropbox",
         "pikpak",
         "Yandex",
@@ -593,6 +594,24 @@ def test_cloudflare_oauth_seed_shape():
     assert spec["token_url"] == "https://mcp.cloudflare.com/token"
     assert spec["token_endpoint_auth_method"] == "none"
     assert "offline_access" in spec["scopes"]
+
+
+def test_linear_oauth_seed_shape():
+    from portunus_gateway.catalog import DEFAULT_APPS, egress_for_slug, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "linear")
+    assert raw["connection"] == "oauth"
+    assert raw.get("egress") == "overseas"
+    assert egress_for_slug("linear") == "overseas"
+    spec = validate_spec("oauth", raw["spec"])
+    assert spec["url"] == "https://mcp.linear.app/mcp"
+    assert spec["registration_endpoint"] == "https://mcp.linear.app/register"
+    assert spec["authorize_url"] == "https://mcp.linear.app/authorize"
+    assert spec["token_url"] == "https://mcp.linear.app/token"
+    assert spec["token_endpoint_auth_method"] == "none"
+    assert spec["issuer"] == "https://mcp.linear.app"
+    assert spec["resource"] == "https://mcp.linear.app/mcp"
+    assert spec["scopes"] == ["read", "write"]
 
 
 def test_validate_cubox_skill_bridge_spec():

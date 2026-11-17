@@ -50,7 +50,7 @@ export function KeysPage() {
       await refresh();
       window.dispatchEvent(new Event("portunus-refresh"));
     } catch (err) {
-      setError((err as Error).message);
+      if ((err as { code?: string }).code !== "cancelled") setError((err as Error).message);
     }
   }
 
@@ -63,7 +63,7 @@ export function KeysPage() {
       setCopiedId(keyId);
       window.setTimeout(() => setCopiedId(null), 1500);
     } catch (e) {
-      setError((e as Error).message);
+      if ((e as { code?: string }).code !== "cancelled") setError((e as Error).message);
     } finally {
       setCopyingId(null);
     }

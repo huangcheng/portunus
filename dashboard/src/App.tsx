@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type AuthStatus } from "./api";
 import { AccountPage } from "./AccountPage";
 import { AppsPage } from "./AppsPage";
+import { ConfirmPasswordHost } from "./ConfirmPassword";
 import { FleetPage } from "./FleetPage";
 import { BrandMark, Icon } from "./icons/ui";
 import { KeysPage } from "./KeysPage";
@@ -378,19 +379,22 @@ export function App() {
   if (!authed && authStatus) return <Login status={authStatus} onLogin={() => setAuthed(true)} />;
 
   return (
-    <Shell
-      view={view}
-      setView={setView}
-      runners={runners}
-      keyCount={keyCount}
-      onLogout={() => api.logout().finally(() => showSignedOut())}
-    >
-      {view === "apps" ? <AppsPage /> : null}
-      {view === "keys" ? <KeysPage /> : null}
-      {view === "fleet" ? <FleetPage /> : null}
-      {view === "logs" ? <LogsPage /> : null}
-      {view === "workflows" ? <TemporalPage /> : null}
-      {view === "account" ? <AccountPage /> : null}
-    </Shell>
+    <>
+      <Shell
+        view={view}
+        setView={setView}
+        runners={runners}
+        keyCount={keyCount}
+        onLogout={() => api.logout().finally(() => showSignedOut())}
+      >
+        {view === "apps" ? <AppsPage /> : null}
+        {view === "keys" ? <KeysPage /> : null}
+        {view === "fleet" ? <FleetPage /> : null}
+        {view === "logs" ? <LogsPage /> : null}
+        {view === "workflows" ? <TemporalPage /> : null}
+        {view === "account" ? <AccountPage /> : null}
+      </Shell>
+      <ConfirmPasswordHost />
+    </>
   );
 }

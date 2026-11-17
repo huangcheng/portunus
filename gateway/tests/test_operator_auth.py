@@ -258,7 +258,7 @@ async def test_mutations_require_csrf_token(db, pepper_file, authz):
         r = await c.post("/api/keys", json=body, headers={"X-CSRF-Token": "nope"})
         assert r.status_code == 403 and r.json()["code"] == "csrf"
         assert (await c.post("/api/auth/logout")).status_code == 403
-        assert (await c.post("/api/keys", json=body, headers=await _step_up(c, csrf))).status_code == 201
+        assert (await c.post("/api/keys", json=body, headers=csrf)).status_code == 201
         # Reads need only the cookie.
         assert (await c.get("/api/keys")).status_code == 200
 
@@ -272,7 +272,7 @@ async def test_mutations_require_csrf_token(db, pepper_file, authz):
 async def test_mint_list_revoke_key(db, pepper_file, authz):
     async with _client(_auth()) as c:
         csrf = await _logged_in(c)
-        r = await c.post("/api/keys", json={"label": "agent-1"}, headers=await _step_up(c, csrf))
+        r = await c.post("/api/keys", json={"label": "agent-1"}, headers=csrf)
         assert r.status_code == 201
         minted = r.json()
         assert minted["token"].startswith("pm-") and minted["token"].split(".")[0][3:] == minted["key_id"]
@@ -284,9 +284,7 @@ async def test_mint_list_revoke_key(db, pepper_file, authz):
         assert listed[0]["revoked_at"] is None and listed[0]["has_secret"] is True
         assert listed[0]["server_ids"] == []
 
-        secret = await c.get(
-            f"/api/keys/{minted['key_id']}/secret", headers=await _step_up(c, csrf)
-        )
+        secret = await c.get(f"/api/keys/{minted['key_id']}/secret", headers=csrf)
         assert secret.status_code == 200 and secret.json()["token"] == minted["token"]
 
         r = await c.delete(f"/api/keys/{minted['key_id']}", headers=csrf)
@@ -307,16 +305,14 @@ async def test_mint_key_validates_expiry(db, pepper_file, authz):
         csrf = await _logged_in(c)
         soon = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
         assert (
-            await c.post("/api/keys", json={"expires_at": soon}, headers=await _step_up(c, csrf))
+            await c.post("/api/keys", json={"expires_at": soon}, headers=csrf)
         ).status_code == 201
         past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        # Expiry is validated before step-up is consumed when auth fails earlier;
-        # still send a fresh step-up so a missing token is not the failure mode.
         assert (
-            await c.post("/api/keys", json={"expires_at": past}, headers=await _step_up(c, csrf))
+            await c.post("/api/keys", json={"expires_at": past}, headers=csrf)
         ).status_code == 422
         assert (
-            await c.post("/api/keys", json={"bogus": 1}, headers=await _step_up(c, csrf))
+            await c.post("/api/keys", json={"bogus": 1}, headers=csrf)
         ).status_code == 422
 
 
@@ -334,7 +330,7 @@ async def test_grant_and_ungrant(db, pepper_file, authz):
         await s.commit()
     async with _client(_auth()) as c:
         csrf = await _logged_in(c)
-        key_id = (await c.post("/api/keys", json={}, headers=await _step_up(c, csrf))).json()["key_id"]
+        key_id = (await c.post("/api/keys", json={}, headers=csrf)).json()["key_id"]
         g = f"/api/keys/{key_id}/grants/{server.id}"
         assert (await c.put(g, headers=csrf)).status_code == 200
         assert (await c.put(g, headers=csrf)).status_code == 200  # idempotent
@@ -344,9 +340,7 @@ async def test_grant_and_ungrant(db, pepper_file, authz):
             await c.put(f"/api/keys/{key_id}/grants/{uuid.uuid4()}", headers=csrf)
         ).status_code == 404
 
-        denied = await c.delete(g, headers=csrf)
-        assert denied.status_code == 401 and denied.json()["code"] == "step_up_required"
-        assert (await c.delete(g, headers=await _step_up(c, csrf))).status_code == 200
+        assert (await c.delete(g, headers=csrf)).status_code == 200
         assert not authz.has_grant(key_id, server.id)
     async with async_session() as s:
         assert (await s.execute(select(Grant))).first() is None

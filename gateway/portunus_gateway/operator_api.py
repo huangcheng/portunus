@@ -96,11 +96,8 @@ async def require_operator(request: Request) -> str:
 async def require_step_up(request: Request, actor: str = Depends(require_operator)) -> str:
     """Operator session plus a single-use ``X-Step-Up-Token``.
 
-    Used for high-impact secret surfaces (key mint/reveal, ungrant, recovery).
-    Connect flows (enable after probe, bearer paste) use the operator session alone
-    so Connect does not re-prompt for the password. Registry tests that override
-    ``require_operator`` attach no ``OperatorAuth``; there is no session to bind a
-    token to in that harness.
+    Reserved for account security surfaces (2FA, recovery keys, passkeys).
+    Key mint/reveal and Connect use the operator session alone.
     """
     auth = getattr(request.app.state, "auth", None)
     if auth is None:
@@ -227,9 +224,6 @@ async def create_catalog_app(
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     _toml_catalog_mutations_gone()
-    # Specs that carry executable command/package need password step-up.
-    if body.connection in ("skill_bridge", "stdio", "webdav"):
-        actor = await require_step_up(request, actor)
     view = await catalog.create(
         slug=body.slug,
         label=body.label,
@@ -257,12 +251,6 @@ async def update_catalog_app(
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     _toml_catalog_mutations_gone()
-    existing = await catalog.get(app_id)
-    if (
-        existing.get("connection") in ("skill_bridge", "stdio", "webdav")
-        and body.spec is not None
-    ):
-        actor = await require_step_up(request, actor)
     view = await catalog.update(
         app_id,
         actor=actor,
@@ -1157,17 +1145,11 @@ async def totp_confirm(
 
 
 @router.post("/auth/totp/qr")
-async def totp_qr(
-    body: PasswordBody, request: Request, actor: str = Depends(require_operator)
-) -> dict[str, Any]:
+async def totp_qr(request: Request, actor: str = Depends(require_step_up)) -> dict[str, Any]:
     auth = _auth(request)
-    sf = auth.session_factory
-    acct = await get_account(sf)
+    acct = await get_account(auth.session_factory)
     if acct is None or not acct.totp_enabled or not acct.totp_secret:
         raise RegistryError(409, "totp_not_enabled", "TOTP is not enabled")
-    if not await auth.verify_password_hash(acct.password_hash, body.password):
-        await record_auth_event(sf, "totp_qr", False, auth.client_ip(request), actor)
-        raise RegistryError(401, "invalid_credentials", "wrong password")
     try:
         secret = open_totp_secret(acct.totp_secret)
     except OperatorCryptoError:
@@ -1200,16 +1182,13 @@ async def recovery_status(request: Request, actor: str = Depends(require_operato
 
 @router.post("/auth/recovery/regenerate")
 async def recovery_regenerate(
-    body: PasswordBody, request: Request, actor: str = Depends(require_step_up)
+    request: Request, actor: str = Depends(require_step_up)
 ) -> dict[str, Any]:
     auth = _auth(request)
     sf = auth.session_factory
     acct = await get_account(sf)
     if acct is None or not acct.totp_enabled:
         raise RegistryError(409, "totp_not_enabled", "enable two-factor first")
-    if not await auth.verify_password_hash(acct.password_hash, body.password):
-        await record_auth_event(sf, "recovery_regenerate", False, auth.client_ip(request), actor)
-        raise RegistryError(401, "invalid_credentials", "wrong password")
     try:
         codes = generate_recovery_codes()
         await replace_recovery_codes(sf, codes)
@@ -1688,7 +1667,7 @@ async def _key_row_view(registry: Registry, key_id: str) -> dict[str, Any]:
 @router.post("/keys", status_code=201)
 async def mint_key(
     body: MintKey,
-    actor: str = Depends(require_step_up),
+    actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     if body.expires_at is not None and _utc(body.expires_at) <= datetime.now(timezone.utc):
@@ -1724,7 +1703,7 @@ async def list_keys(
 @router.get("/keys/{key_id}/secret")
 async def reveal_key_secret(
     key_id: str,
-    actor: str = Depends(require_step_up),
+    actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, str]:
     try:
@@ -1788,7 +1767,7 @@ async def grant_server(
 async def ungrant_server(
     key_id: str,
     server_id: uuid.UUID,
-    actor: str = Depends(require_step_up),
+    actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     async with registry.session_factory() as s:

@@ -355,6 +355,21 @@ async def test_attach_hooks_reconcile_per_site(manager, site_a, site_b, authz):
     assert site_b.ops.count("inventory") == 1 and "inventory" not in site_a.ops
 
 
+async def test_attach_publishes_runner_connected_gauge(manager, site_a, site_b, monkeypatch):
+    calls: list[tuple[str, int]] = []
+
+    def capture(site_id: str, connected: int) -> None:
+        calls.append((site_id, connected))
+
+    monkeypatch.setattr("portunus_gateway.telemetry.set_runner_connected", capture)
+    # Re-attach so the wrapped hooks call the patched publisher.
+    manager.attach(manager.pool)
+    assert ("site-a", 1) in calls and ("site-b", 1) in calls
+    site_a.connected = False
+    await site_a.on_disconnected()
+    assert ("site-a", 0) in calls
+
+
 async def test_multi_site_requires_explicit_site_for_sync(manager):
     with pytest.raises(ValueError):
         await manager.sync_with_runner()

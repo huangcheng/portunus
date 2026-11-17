@@ -1,4 +1,7 @@
 // Thin fetch wrapper: session cookie is sent automatically; CSRF token is kept in memory only.
+// Step-up password re-prompt is only for account security (2FA / recovery / passkeys), via in-app modal.
+
+import { confirmPassword } from "./ConfirmPassword";
 
 export class ApiError extends Error {
   constructor(
@@ -26,9 +29,10 @@ type ErrorBody = {
 async function stepUpHeaders(password?: string): Promise<Record<string, string>> {
   const pw =
     password ??
-    (typeof window !== "undefined"
-      ? window.prompt("Confirm your operator password to continue")
-      : null);
+    (await confirmPassword({
+      title: "Confirm password",
+      message: "Re-enter your operator password to continue.",
+    }));
   if (!pw) {
     throw new ApiError(401, "cancelled", "step-up cancelled");
   }
@@ -403,18 +407,9 @@ export type PasskeyAssertionOptions = {
 
 export const api = {
   apps: () => call<CatalogAppRow[]>("GET", "/apps"),
-  createApp: async (b: Omit<CatalogAppRow, "id">, password?: string) => {
-    const needsStep =
-      b.connection === "skill_bridge" || b.connection === "stdio" || b.connection === "webdav";
-    const headers = needsStep ? await stepUpHeaders(password) : undefined;
-    return call<CatalogAppRow>("POST", "/apps", b, headers);
-  },
-  updateApp: async (id: string, b: Partial<CatalogAppRow>, password?: string) => {
-    // Server gates on existing connection when spec is patched; PATCH bodies omit
-    // connection, so always step-up when sending spec.
-    const headers = b.spec != null ? await stepUpHeaders(password) : undefined;
-    return call<CatalogAppRow>("PATCH", `/apps/${encodeURIComponent(id)}`, b, headers);
-  },
+  createApp: (b: Omit<CatalogAppRow, "id">) => call<CatalogAppRow>("POST", "/apps", b),
+  updateApp: (id: string, b: Partial<CatalogAppRow>) =>
+    call<CatalogAppRow>("PATCH", `/apps/${encodeURIComponent(id)}`, b),
   deleteApp: (id: string) => call<void>("DELETE", `/apps/${encodeURIComponent(id)}`),
   authStatus: () => call<AuthStatus>("GET", "/auth/status"),
   setup: async (body: { username: string; password: string; bootstrap_password?: string }) => {
@@ -474,18 +469,26 @@ export const api = {
       headers,
     );
   },
-  totpQr: (password: string) =>
-    call<{ secret: string; provisioning_uri: string }>("POST", "/auth/totp/qr", { password }),
-  totpDisable: (password: string) => call<{ ok: boolean }>("POST", "/auth/totp/disable", { password }),
-  recovery: () => call<RecoveryStatus>("GET", "/auth/recovery"),
-  regenerateRecovery: async (password: string) => {
+  totpQr: async (password?: string) => {
     const headers = await stepUpHeaders(password);
-    return call<{ ok: boolean; codes: string[] }>(
-      "POST",
-      "/auth/recovery/regenerate",
-      { password },
-      headers,
-    );
+    return call<{ secret: string; provisioning_uri: string }>("POST", "/auth/totp/qr", {}, headers);
+  },
+  totpDisable: async (password?: string) => {
+    const pw =
+      password ??
+      (await confirmPassword({
+        title: "Disable two-factor",
+        message: "Re-enter your operator password to turn off two-factor authentication.",
+      }));
+    if (!pw) {
+      throw new ApiError(401, "cancelled", "step-up cancelled");
+    }
+    return call<{ ok: boolean }>("POST", "/auth/totp/disable", { password: pw });
+  },
+  recovery: () => call<RecoveryStatus>("GET", "/auth/recovery"),
+  regenerateRecovery: async (password?: string) => {
+    const headers = await stepUpHeaders(password);
+    return call<{ ok: boolean; codes: string[] }>("POST", "/auth/recovery/regenerate", {}, headers);
   },
   passkeyRegisterOptions: async (password?: string) => {
     const headers = await stepUpHeaders(password);
@@ -584,26 +587,15 @@ export const api = {
       { redirect_uri },
     ),
   keys: () => call<Key[]>("GET", "/keys"),
-  mintKey: async (label: string, password?: string) => {
-    const headers = await stepUpHeaders(password);
-    return call<Key & { token: string }>("POST", "/keys", { label: label || null }, headers);
-  },
-  revealKey: async (id: string, password?: string) => {
-    const headers = await stepUpHeaders(password);
-    return call<{ token: string }>("GET", `/keys/${encodeURIComponent(id)}/secret`, undefined, headers);
-  },
+  mintKey: (label: string) =>
+    call<Key & { token: string }>("POST", "/keys", { label: label || null }),
+  revealKey: (id: string) =>
+    call<{ token: string }>("GET", `/keys/${encodeURIComponent(id)}/secret`),
   deleteKey: (id: string) => call<void>("DELETE", `/keys/${encodeURIComponent(id)}`),
   grant: (key: string, server: string) =>
     call<Key>("PUT", `/keys/${encodeURIComponent(key)}/grants/${encodeURIComponent(server)}`),
-  ungrant: async (key: string, server: string, password?: string) => {
-    const headers = await stepUpHeaders(password);
-    return call<Key>(
-      "DELETE",
-      `/keys/${encodeURIComponent(key)}/grants/${encodeURIComponent(server)}`,
-      undefined,
-      headers,
-    );
-  },
+  ungrant: (key: string, server: string) =>
+    call<Key>("DELETE", `/keys/${encodeURIComponent(key)}/grants/${encodeURIComponent(server)}`),
   fleet: () => call<FleetResponse>("GET", "/fleet"),
   audit: (q?: { limit?: number; before?: string; action?: string; target?: string }) => {
     const p = new URLSearchParams();
