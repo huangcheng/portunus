@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
-# Update provider runtimes on fleet hosts: rclone binary, skill trees / CLIs,
-# and the packaged portunus_skill_bridge module inside runner containers.
+# Sync provider runtimes to every fleet runner: rclone, skill trees, vendor CLIs
+# (cubox-cli, …), and portunus_skill_bridge inside runner containers.
+#
+# This is the single “sync all tools/skills/configs to runners” entrypoint used by
+# Temporal FleetProvidersUpdateWorkflow and POST /api/fleet/providers-update.
 #
 # Usage:
 #   deploy/fleet-providers-update.sh [--components LIST] [--from DIR] host [host ...]
 #   PORTUNUS_FLEET_HOSTS="runner-a runner-b" deploy/fleet-providers-update.sh
 #
-# --components LIST  Comma-separated subset of: rclone,skills,skill_bridge
-#                    (default: all three). Order is always rclone → skills →
-#                    skill_bridge when multiple are selected.
+# --components LIST  Comma-separated subset of:
+#                      rclone, skills, clis, skill_bridge
+#                    (default: all four). Order is always
+#                      rclone → skills → clis → skill_bridge.
 # --from DIR         Passed through to fleet-skills.sh as skill-tree source.
 #
 # Env:
 #   PORTUNUS_RCLONE_CACHE     Writable dir for rclone zip/binary (default under
 #                             /var/lib/portunus when deploy/ is read-only)
 #   PORTUNUS_RCLONE_VERSION   Pin (default in provision-rclone-shim.sh)
+#   PORTUNUS_VENDOR_CLI_CACHE Writable dir for cubox-cli etc.
+#   (no version override: each manifest's cli.provision.tag wins)
 #   PORTUNUS_RUNNER_CONTAINER Override runner container name on each host
 #   PORTUNUS_STATE_UID        Skill-state owner uid (fleet-skills.sh)
 set -euo pipefail
@@ -22,7 +28,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 SSH_OPTS=(-o ConnectTimeout=15 -o BatchMode=yes)
-COMPONENTS="rclone,skills,skill_bridge"
+COMPONENTS="rclone,skills,clis,skill_bridge"
 FROM=""
 
 while [[ $# -gt 0 ]]; do
@@ -34,7 +40,7 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "usage: $0 [--components LIST] [--from DIR] host ..." >&2; exit 2; }
       FROM="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,28p' "$0"; exit 0 ;;
+      sed -n '2,32p' "$0"; exit 0 ;;
     --)
       shift; break ;;
     -*)
@@ -63,6 +69,7 @@ done
 
 want_rclone=0
 want_skills=0
+want_clis=0
 want_bridge=0
 IFS=',' read -r -a _parts <<<"$COMPONENTS"
 for raw in "${_parts[@]}"; do
@@ -70,14 +77,15 @@ for raw in "${_parts[@]}"; do
   case "$c" in
     "" ) ;;
     rclone) want_rclone=1 ;;
-    skills|skill|trees|cli|clis) want_skills=1 ;;
+    skills|skill|trees) want_skills=1 ;;
+    clis|cli|tools|vendor|vendor_clis|vendor-clis) want_clis=1 ;;
     skill_bridge|skill-bridge|bridge) want_bridge=1 ;;
     *)
-      echo "unknown component: $raw (want rclone,skills,skill_bridge)" >&2
+      echo "unknown component: $raw (want rclone,skills,clis,skill_bridge)" >&2
       exit 2 ;;
   esac
 done
-[[ $want_rclone -eq 1 || $want_skills -eq 1 || $want_bridge -eq 1 ]] || {
+[[ $want_rclone -eq 1 || $want_skills -eq 1 || $want_clis -eq 1 || $want_bridge -eq 1 ]] || {
   echo "no components selected" >&2
   exit 2
 }
@@ -92,7 +100,7 @@ if [[ -z "${PORTUNUS_RCLONE_CACHE:-}" ]]; then
   fi
 fi
 
-echo "components: rclone=$want_rclone skills=$want_skills skill_bridge=$want_bridge"
+echo "components: rclone=$want_rclone skills=$want_skills clis=$want_clis skill_bridge=$want_bridge"
 echo "hosts: ${HOSTS[*]}"
 echo "rclone cache: $PORTUNUS_RCLONE_CACHE"
 
@@ -107,13 +115,21 @@ if [[ "$want_rclone" -eq 1 ]]; then
 fi
 
 if [[ "$want_skills" -eq 1 ]]; then
-  echo "=== sync skill trees / CLIs ==="
+  echo "=== sync skill trees ==="
   skills_args=(--also-rclone)
   if [[ -n "$FROM" ]]; then
     skills_args+=(--from "$FROM")
   fi
   if ! bash "$HERE/fleet-skills.sh" "${skills_args[@]}" "${HOSTS[@]}"; then
     echo "FAIL: fleet-skills" >&2
+    fail=1
+  fi
+fi
+
+if [[ "$want_clis" -eq 1 ]]; then
+  echo "=== provision vendor CLIs (cubox-cli, …) ==="
+  if ! bash "$HERE/provision-vendor-clis.sh" "${HOSTS[@]}"; then
+    echo "FAIL: provision-vendor-clis" >&2
     fail=1
   fi
 fi

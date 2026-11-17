@@ -1,7 +1,8 @@
-"""Shared fleet providers update — durable loop for rclone / skills / skill_bridge.
+"""Shared fleet sync — durable loop for rclone / skills / vendor CLIs / skill_bridge.
 
 One always-on workflow (like server-probe / oauth-refresh). Daily by default;
-operator **Update providers** signals ``kick``.
+operator **Sync fleet** signals ``kick``. Workflow id stays ``fleet-providers-update``
+for Temporal continuity.
 """
 
 from __future__ import annotations
@@ -14,12 +15,16 @@ from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
     from portunus_worker.activities import fleet as fleet_acts
-    from portunus_worker.settings import fleet_hosts, fleet_providers_interval_s
+    from portunus_worker.settings import (
+        FLEET_DEFAULT_COMPONENTS,
+        fleet_hosts,
+        fleet_providers_interval_s,
+    )
 
 _CONTINUE_EVERY = 50
 _WORKFLOW_ID = "fleet-providers-update"
 
-DEFAULT_COMPONENTS = ("rclone", "skills", "skill_bridge")
+DEFAULT_COMPONENTS = FLEET_DEFAULT_COMPONENTS
 
 
 def shared_workflow_id() -> str:
@@ -27,7 +32,7 @@ def shared_workflow_id() -> str:
 
 
 def normalize_components(raw: list[str] | None) -> list[str]:
-    """Deduplicate and validate component names; default = all three."""
+    """Deduplicate and validate component names; default = full fleet sync set."""
     if not raw:
         return list(DEFAULT_COMPONENTS)
     aliases = {
@@ -35,8 +40,13 @@ def normalize_components(raw: list[str] | None) -> list[str]:
         "skills": "skills",
         "skill": "skills",
         "trees": "skills",
-        "cli": "skills",
-        "clis": "skills",
+        "clis": "clis",
+        "cli": "clis",
+        "tools": "clis",
+        "vendor": "clis",
+        "vendor_clis": "clis",
+        "vendor-clis": "clis",
+        "vendor-cli": "clis",
         "skill_bridge": "skill_bridge",
         "skill-bridge": "skill_bridge",
         "bridge": "skill_bridge",
@@ -56,7 +66,7 @@ def normalize_components(raw: list[str] | None) -> list[str]:
 
 @workflow.defn(name="FleetProvidersUpdateWorkflow")
 class FleetProvidersUpdateWorkflow:
-    """Refresh rclone, skill trees/CLIs, and skill_bridge on fleet hosts."""
+    """Sync rclone, skill trees, vendor CLIs, and skill_bridge to fleet hosts."""
 
     def __init__(self) -> None:
         self._kick = False
@@ -75,7 +85,7 @@ class FleetProvidersUpdateWorkflow:
         hosts: list[str] | None = None,
         components: list[str] | None = None,
     ) -> None:
-        """Wake early (operator Update providers / boot nudge)."""
+        """Wake early (operator Sync fleet / boot nudge)."""
         self._kick = True
         if hosts:
             self._hosts_override = [h for h in hosts if isinstance(h, str) and h.strip()]

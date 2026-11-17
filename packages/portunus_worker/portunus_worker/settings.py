@@ -48,6 +48,10 @@ def fleet_hosts() -> list[str]:
     return [h for h in raw.split() if h.strip()]
 
 
+# Default Sync fleet components (workflow + activity reporting must stay aligned).
+FLEET_DEFAULT_COMPONENTS = ("rclone", "skills", "clis", "skill_bridge")
+
+
 def fleet_providers_interval_s() -> int:
     """How often the durable fleet-providers-update loop runs (default: 1 day)."""
     raw = os.environ.get("PORTUNUS_FLEET_PROVIDERS_INTERVAL_S", "86400")

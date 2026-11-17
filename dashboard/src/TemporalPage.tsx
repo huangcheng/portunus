@@ -27,6 +27,16 @@ function statusLabel(status: string | null | undefined): string {
   return status.replace(/^WORKFLOW_EXECUTION_STATUS_/, "").replace(/_/g, " ");
 }
 
+/** Operator-facing names for always-on control-plane workflows. */
+function workflowLabel(id: string | null | undefined): string {
+  if (!id) return "—";
+  if (id === "fleet-providers-update") return "fleet sync";
+  if (id === "server-probe") return "server probe";
+  if (id === "oauth-refresh") return "oauth refresh";
+  if (id.startsWith("fleet-skills-sync:")) return "fleet skills (one-shot)";
+  return id;
+}
+
 function taskStatusKind(status: string | null | undefined): "ok" | "warn" | "bad" | "" {
   if (!status) return "";
   const u = status.toLowerCase();
@@ -138,7 +148,7 @@ export function TemporalPage() {
     }
   }
 
-  async function syncFleet() {
+  async function syncSkillsOnly() {
     setSyncBusy(true);
     setNotice(null);
     try {
@@ -152,15 +162,15 @@ export function TemporalPage() {
     }
   }
 
-  async function updateProviders() {
+  async function syncFleet() {
     setSyncBusy(true);
     setNotice(null);
     try {
       const r = await api.fleetProvidersUpdate();
-      setNotice(`Kicked providers update · ${r.workflow_id}`);
+      setNotice(`Kicked fleet sync · always-on: ${r.workflow_id}`);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Providers update failed");
+      setError(e instanceof Error ? e.message : "Fleet sync failed");
     } finally {
       setSyncBusy(false);
     }
@@ -289,8 +299,8 @@ export function TemporalPage() {
                 type="button"
                 className="outline sm"
                 disabled={syncBusy}
-                onClick={() => void syncFleet()}
-                title="Rsync skill trees only"
+                onClick={() => void syncSkillsOnly()}
+                title="Rsync skill trees only (legacy one-shot)"
               >
                 Sync skills
               </button>
@@ -298,10 +308,10 @@ export function TemporalPage() {
                 type="button"
                 className="primary sm"
                 disabled={syncBusy}
-                onClick={() => void updateProviders()}
-                title="rclone + skill trees/CLIs + skill_bridge on PORTUNUS_FLEET_HOSTS"
+                onClick={() => void syncFleet()}
+                title="Full fleet sync: rclone, skill trees, vendor CLIs from manifests, skill_bridge"
               >
-                Update providers
+                Sync fleet
               </button>
             </div>
           </div>
@@ -356,12 +366,19 @@ export function TemporalPage() {
                         </td>
                       </tr>
                     ) : (
-                      items.map((row) => (
+                      items.map((row) => {
+                        const label = workflowLabel(row.workflow_id);
+                        return (
                         <tr key={`${row.workflow_id}:${row.run_id}`}>
                           <td data-label="Workflow">
                             <strong className="mono" title={row.workflow_id ?? undefined}>
-                              {row.workflow_id}
+                              {label}
                             </strong>
+                            {row.workflow_id && label !== row.workflow_id ? (
+                              <div className="muted mono temporal-workflow-id">
+                                {row.workflow_id}
+                              </div>
+                            ) : null}
                           </td>
                           <td data-label="Type" className="mono">
                             {row.workflow_type ?? "—"}
@@ -384,7 +401,8 @@ export function TemporalPage() {
                             </button>
                           </td>
                         </tr>
-                      ))
+                        );
+                      })
                     )}
                   </tbody>
                 </table>

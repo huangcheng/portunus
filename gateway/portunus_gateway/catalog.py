@@ -802,7 +802,8 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "Enable API Extension, then paste the full save URL from "
                     "[cubox.pro](https://cubox.pro/web/settings/extensions) or "
                     "[cubox.cc](https://cubox.cc/web/settings/extensions) "
-                    "(a full URL also sets CUBOX_SERVER; a bare token keeps the cubox.pro default). "
+                    "(full URL sets CUBOX_SERVER; bare token keeps cubox.pro). "
+                    "Runners need `/usr/local/bin/cubox-cli` (not npx). "
                     "Docs: [help.cubox.pro/ai/agents](https://help.cubox.pro/ai/agents/)."
                 ),
             ],
@@ -2168,6 +2169,11 @@ class CatalogStore:
                 seed_auth = seed_manifest.get("auth") if isinstance(seed_manifest, dict) else None
                 live_auth = live_manifest.get("auth") if isinstance(live_manifest, dict) else None
                 auth_changed = seed_auth != live_auth
+                # Full cli block (command + provision + wrapper) — fleet sync
+                # discovers cli.provision automatically.
+                seed_cli = seed_manifest.get("cli") if isinstance(seed_manifest, dict) else None
+                live_cli = live_manifest.get("cli") if isinstance(live_manifest, dict) else None
+                cli_changed = seed_cli != live_cli
                 seed_defaults = spec.get("env_defaults") or {}
                 live_defaults = (row.spec or {}).get("env_defaults") or {}
                 defaults_changed = seed_defaults != live_defaults
@@ -2185,6 +2191,7 @@ class CatalogStore:
                 spec_changed = (
                     (seed_names and seed_names != live_names)
                     or auth_changed
+                    or cli_changed
                     or defaults_changed
                     or secrets_changed
                 )

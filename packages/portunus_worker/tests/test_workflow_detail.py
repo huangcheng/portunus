@@ -11,7 +11,7 @@ def test_humanize_query_status():
     assert humanize_query_status("scanning") == "Scanning for due work"
     assert humanize_query_status("probing:abc") == "Probing abc"
     assert humanize_query_status("refreshing:xyz") == "Refreshing OAuth for xyz"
-    assert humanize_query_status("host:edge-1") == "Updating providers on edge-1"
+    assert humanize_query_status("host:edge-1") == "Syncing fleet on edge-1"
     assert (
         humanize_query_status("sleep:300 due=2 fail=1")
         == "Sleeping 300s until next wave · last wave: 2 due, 1 failed"

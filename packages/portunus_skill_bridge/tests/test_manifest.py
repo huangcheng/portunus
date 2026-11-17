@@ -58,7 +58,10 @@ def test_load_cubox_example():
     assert m.auth.type == "none"
     assert m.cli is not None
     assert m.cli.run_wrapper == "raw"
-    assert m.cli.command[:2] == ["npx", "-y"]
+    assert m.cli.command == ["/usr/local/bin/cubox-cli"]
+    assert m.cli.provision is not None
+    assert m.cli.provision.repo == "OLCUBO/cubox-cli"
+    assert m.cli.provision.tag == "v1.0.10"
     folder = next(t for t in m.tools if t.name == "folder_list")
     assert folder.cli == ["folder", "list"]
     assert {t.name for t in m.tools} >= {"folder_list", "card_list", "card_rag", "save"}

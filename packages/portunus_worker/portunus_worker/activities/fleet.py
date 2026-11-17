@@ -7,6 +7,8 @@ from pathlib import Path
 
 from temporalio import activity
 
+from portunus_worker.settings import FLEET_DEFAULT_COMPONENTS
+
 log = logging.getLogger("portunus.worker.activities.fleet")
 
 
@@ -65,7 +67,7 @@ async def sync_skills_host(host: str) -> dict:
 
 @activity.defn(name="update_providers_host")
 async def update_providers_host(host: str, components: list[str] | None = None) -> dict:
-    """Run deploy/fleet-providers-update.sh for rclone / skills / skill_bridge."""
+    """Run deploy/fleet-providers-update.sh for rclone / skills / clis / skill_bridge."""
     script = _deploy_script("fleet-providers-update.sh")
     if script is None:
         return {
@@ -86,4 +88,8 @@ async def update_providers_host(host: str, components: list[str] | None = None) 
         result["code"],
         comps or "default",
     )
-    return {"host": host, "components": comps or ["rclone", "skills", "skill_bridge"], **result}
+    return {
+        "host": host,
+        "components": comps or list(FLEET_DEFAULT_COMPONENTS),
+        **result,
+    }

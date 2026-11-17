@@ -12,7 +12,7 @@ sort_order = 72
 manifest = "cubox.example.yaml"
 secrets = ["CUBOX_TOKEN"]
 setup_hints = [
-  "Enable API Extension, then paste the full save URL from [cubox.pro](https://cubox.pro/web/settings/extensions) or [cubox.cc](https://cubox.cc/web/settings/extensions) (a full URL also sets CUBOX_SERVER; a bare token keeps the cubox.pro default). Docs: [help.cubox.pro/ai/agents](https://help.cubox.pro/ai/agents/).",
+  "Enable API Extension, then paste the full save URL from [cubox.pro](https://cubox.pro/web/settings/extensions) or [cubox.cc](https://cubox.cc/web/settings/extensions) (full URL sets CUBOX_SERVER; bare token keeps cubox.pro). Runners need `/usr/local/bin/cubox-cli` (not npx). Docs: [help.cubox.pro/ai/agents](https://help.cubox.pro/ai/agents/).",
 ]
 [spec.env_defaults]
 CUBOX_SERVER = "cubox.pro"

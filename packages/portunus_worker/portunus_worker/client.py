@@ -158,7 +158,7 @@ def humanize_query_status(status: str | None) -> str | None:
     if raw == "no_hosts":
         return "No fleet hosts configured"
     if raw.startswith("host:"):
-        return f"Updating providers on {raw.split(':', 1)[1]}"
+        return f"Syncing fleet on {raw.split(':', 1)[1]}"
     if raw.startswith("probing:"):
         return f"Probing {raw.split(':', 1)[1]}"
     if raw.startswith("refreshing:"):

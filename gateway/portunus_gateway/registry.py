@@ -2215,7 +2215,10 @@ class Registry:
         except (VaultError, UnicodeDecodeError):
             # Messages from the vault never carry material, but don't forward them anyway.
             raise RegistryError(500, "vault_error", "cannot decrypt server env") from None
-        return env
+        # Cubox Connect pastes often store the full Extension URL; cubox-cli env mode
+        # needs a bare token. validate_env normalizes on write, but older vault rows
+        # (and any path that skipped validate) still ship the URL — normalize on read.
+        return normalize_cubox_env(env)
 
     @staticmethod
     def _audit(actor: str, action: str, target: uuid.UUID, detail: dict | None) -> AuditEvent:

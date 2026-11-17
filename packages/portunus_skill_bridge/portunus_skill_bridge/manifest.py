@@ -274,6 +274,38 @@ class CliIdentity(BaseModel):
     agent_instance_id: str | None = None
 
 
+class CliProvision(BaseModel):
+    """How fleet sync installs ``cli.command[0]`` onto runners (auto-discovered).
+
+    Ops host downloads; runners never curl GitHub themselves (domestic egress).
+    ``asset`` may contain ``{arch}`` (amd64|arm64) and ``{version}`` / ``{tag}``.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    kind: Literal["github_release"] = "github_release"
+    repo: str = Field(min_length=3, max_length=200)  # owner/name
+    tag: str = Field(min_length=1, max_length=64)
+    asset: str = Field(min_length=1, max_length=200)
+    # File basename inside a .tar.gz / .zip; default = basename of command[0].
+    binary: str | None = Field(default=None, max_length=128)
+
+    @field_validator("repo")
+    @classmethod
+    def _repo_shape(cls, v: str) -> str:
+        parts = v.split("/")
+        if len(parts) != 2 or not all(parts):
+            raise ValueError("provision.repo must be owner/name")
+        return v
+
+    @field_validator("binary")
+    @classmethod
+    def _binary_basename(cls, v: str | None) -> str | None:
+        if v is not None and ("/" in v or "\\" in v):
+            raise ValueError("provision.binary must be a file basename, not a path")
+        return v
+
+
 class CliSpec(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -282,6 +314,8 @@ class CliSpec(BaseModel):
     identity: CliIdentity = Field(default_factory=CliIdentity)
     # "run_operation" wraps one MCP tool call as CLI `run` with a single operation
     run_wrapper: Literal["run_operation", "raw"] = "run_operation"
+    # Required when command[0] is an absolute path fleet sync must install.
+    provision: CliProvision | None = None
 
     @field_validator("command")
     @classmethod
@@ -290,6 +324,20 @@ class CliSpec(BaseModel):
 
         validate_cli_command(command)
         return command
+
+    @model_validator(mode="after")
+    def _absolute_needs_provision(self) -> CliSpec:
+        head = self.command[0]
+        if head.startswith("/") and self.provision is None:
+            raise ValueError(
+                f"cli.command[0]={head!r} is absolute; set cli.provision so fleet sync can install it"
+            )
+        if self.provision is not None and not head.startswith("/"):
+            raise ValueError(
+                f"cli.provision is set but command[0]={head!r} is not absolute "
+                "(fleet sync only installs absolute destinations)"
+            )
+        return self
 
 
 class Manifest(BaseModel):

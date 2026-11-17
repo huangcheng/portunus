@@ -3,7 +3,7 @@
 # Do not expose auth login/logout as MCP tools.
 
 name: cubox
-version: "1.0.10"
+version: "1.0.11"
 backend: json_cli
 
 auth:
@@ -11,8 +11,15 @@ auth:
   connect_hint: "Paste the full API Extension save URL (https://cubox.pro|cc/c/api/save/…) or bare token from Cubox 扩展中心. Full URLs set CUBOX_SERVER automatically."
 
 cli:
-  # Pinned npm release of the official Go CLI wrapper.
-  command: ["npx", "-y", "cubox-cli@1.0.10"]
+  # Absolute path + provision: fleet-providers-update discovers this and installs
+  # the binary into every runner (no runtime npx / GitHub from domestic sites).
+  command: ["/usr/local/bin/cubox-cli"]
+  provision:
+    kind: github_release
+    repo: OLCUBO/cubox-cli
+    tag: v1.0.10
+    asset: cubox-cli-1.0.10-linux-{arch}.tar.gz
+    binary: cubox-cli
   identity: {}
   run_wrapper: raw
 

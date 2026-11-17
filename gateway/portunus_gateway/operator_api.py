@@ -1354,7 +1354,7 @@ async def fleet_providers_update(
     actor: str = Depends(require_operator),
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
-    """Update rclone, skill trees/CLIs, and skill_bridge on fleet hosts."""
+    """Sync rclone, skill trees, vendor CLIs, and skill_bridge to fleet hosts."""
     body: dict[str, Any] = {}
     try:
         raw = await request.json()
@@ -1375,7 +1375,7 @@ async def fleet_providers_update(
         raise RegistryError(
             422,
             "invalid_request",
-            "components must be a list of strings (rclone, skills, skill_bridge)",
+            "components must be a list of strings (rclone, skills, clis, skill_bridge)",
         )
     try:
         from portunus_worker.client import start_fleet_providers_update

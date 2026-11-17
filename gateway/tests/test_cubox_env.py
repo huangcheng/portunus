@@ -29,3 +29,9 @@ def test_normalize_leaves_bare_token():
 def test_validate_env_applies_cubox_normalize():
     out = validate_env({"CUBOX_TOKEN": "https://cubox.pro/c/api/save/abcXYZ"})
     assert out == {"CUBOX_TOKEN": "abcXYZ", "CUBOX_SERVER": "cubox.pro"}
+
+
+def test_normalize_idempotent_after_url_split():
+    # _decrypt_env applies normalize on every spawn; already-bare tokens must stay put.
+    once = normalize_cubox_env({"CUBOX_TOKEN": "https://cubox.pro/c/api/save/abcXYZ"})
+    assert normalize_cubox_env(once) == once
