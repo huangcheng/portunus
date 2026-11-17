@@ -66,7 +66,7 @@ function renderControl(
         rows={7}
         value={values[def.name] || ""}
         onChange={(e) => onChange(def.name, e.target.value)}
-        required={!active}
+        required={!active && def.secret}
         autoComplete="off"
         spellCheck={false}
         placeholder={active ? undefined : "Paste the multi-line configuration value"}
@@ -78,7 +78,8 @@ function renderControl(
       type={def.secret ? "password" : "text"}
       value={values[def.name] || ""}
       onChange={(e) => onChange(def.name, e.target.value)}
-      required={!active}
+      // Non-secret fields may be optional (catalog env_defaults or blank-ok).
+      required={!active && def.secret}
       autoComplete="off"
       placeholder={active && def.secret ? "••••••••" : undefined}
     />

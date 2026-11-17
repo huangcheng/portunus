@@ -98,7 +98,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   vercel: "vercel.svg",
   fastmail: "fastmail.svg",
   infisical: "infisical.png",
-  doppler: "doppler.png",
+  doppler: "doppler.svg",
   tencentcloud: "tencentcloud.png",
   flyai: "flyai.png",
   youdaonote: "youdaonote.png",

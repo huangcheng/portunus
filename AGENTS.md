@@ -39,7 +39,12 @@ Order of preference:
 4. **Local stdio / CLI** (`stdio`, `uvx` packages, `skill_bridge` + `json_cli`) —
    only when no usable remote endpoint exists
 
-Do not keep a local mcp-proxy / CLI wrapper if a remote endpoint is available
-(example: Aliyun OpenAPI MCP remote over `alibabacloud.mcp-proxy`). Product-scoped
-hosted marketplace URLs (e.g. Tencent MCP 广场 SSE) count as remote and beat
-stdio. Document how the operator gets the URL or token in `setup_hints`.
+Do not keep a local mcp-proxy / CLI wrapper if a remote endpoint is available.
+Product-scoped hosted marketplace URLs (e.g. Tencent MCP 广场 SSE) count as
+remote and beat stdio. Document how the operator gets the URL or token in
+`setup_hints`.
+
+Exception: **阿里云** ships as `stdio` + AccessKey (`alibabacloud.mcp-proxy`)
+because Aliyun’s remote OpenAPI MCP OAuth/DCR path is impractical for Portunus
+(redirect URI / Custom OAuth friction). Prefer remote again if that path becomes
+reliable.

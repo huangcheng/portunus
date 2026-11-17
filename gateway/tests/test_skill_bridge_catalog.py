@@ -281,6 +281,262 @@ def test_fastmail_oauth_seed_shape():
     assert "offline_access" in spec["scopes"]
 
 
+def test_aliyun_stdio_accesskey_only():
+    from portunus_gateway.catalog import DEFAULT_APPS, egress_for_slug, validate_spec
+
+    assert not any(a["slug"] == "aliyun-ak" for a in DEFAULT_APPS)
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "aliyun")
+    assert raw["connection"] == "stdio"
+    assert raw["label"] == "阿里云"
+    spec = validate_spec("stdio", raw["spec"])
+    assert spec["command"] == "uvx"
+    assert spec["args"] == ["alibabacloud.mcp-proxy==0.2.17"]
+    env_by_name = {e["name"]: e for e in spec["env"]}
+    assert env_by_name["ALIBABA_CLOUD_ACCESS_KEY_ID"]["secret"] is True
+    assert env_by_name["ALIBABA_CLOUD_ACCESS_KEY_SECRET"]["secret"] is True
+    assert env_by_name["ALIBABACLOUD_MCP_SERVER_URL"]["secret"] is False
+    assert egress_for_slug("aliyun") == "domestic"
+
+
+@pytest.mark.anyio
+async def test_aliyun_ensure_defaults_oauth_to_stdio_and_purge():
+    """OAuth aliyun → AccessKey stdio; recipe-bound aliyun-ak purged; custom slug kept."""
+    import uuid
+
+    from portunus_gateway.catalog import CatalogStore, DEFAULT_APPS, validate_spec
+    from portunus_gateway.db.models import Base, CatalogApp, Server, Tool, VaultEntry
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    seed = next(a for a in DEFAULT_APPS if a["slug"] == "aliyun")
+    want_spec = validate_spec("stdio", seed["spec"])
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+
+    recipe_ak_id = uuid.uuid4()
+    custom_id = uuid.uuid4()
+    async with sf() as s:
+        s.add(
+            CatalogApp(
+                id=uuid.uuid4(),
+                slug="aliyun",
+                label="阿里云",
+                name="阿里云",
+                description="old oauth",
+                connection="oauth",
+                popular=True,
+                categories=["Developer Tools"],
+                tags=["oauth"],
+                spec={
+                    "url_from_operator": True,
+                    "authorize_url": "https://example.com/auth",
+                    "token_url": "https://example.com/token",
+                    "scopes": ["openid"],
+                },
+                sort_order=17,
+            )
+        )
+        aliyun_srv = Server(
+            id=uuid.uuid4(),
+            name="阿里云",
+            slug="aliyun",
+            kind="remote",
+            url="https://example.com/mcp",
+            oauth={"client_id": "x"},
+            recipe_slug="aliyun",
+            vault_version=1,
+            has_oauth_refresh=True,
+        )
+        s.add(aliyun_srv)
+        s.add(
+            Tool(
+                id=uuid.uuid4(),
+                server_id=aliyun_srv.id,
+                upstream_name="old",
+                description=None,
+                schema={},
+                schema_hash="h",
+            )
+        )
+        s.add(
+            VaultEntry(
+                id=uuid.uuid4(),
+                server_id=aliyun_srv.id,
+                name="Authorization",
+                ciphertext=b"\x00" * 32,
+                key_version=1,
+            )
+        )
+        s.add(
+            CatalogApp(
+                id=uuid.uuid4(),
+                slug="aliyun-ak",
+                label="阿里云 AccessKey",
+                name="阿里云 AccessKey",
+                description="stale",
+                connection="stdio",
+                popular=False,
+                categories=[],
+                tags=[],
+                spec=want_spec,
+                sort_order=18,
+            )
+        )
+        s.add(
+            Server(
+                id=recipe_ak_id,
+                name="aliyun-ak catalog",
+                slug="aliyun-ak",
+                kind="stdio",
+                command="uvx",
+                args=["alibabacloud.mcp-proxy==0.2.0"],
+                recipe_slug="aliyun-ak",
+            )
+        )
+        await s.commit()
+
+    store = CatalogStore(sf)
+    await store.ensure_defaults()
+
+    async with sf() as s:
+        row = (
+            await s.execute(select(CatalogApp).where(CatalogApp.slug == "aliyun"))
+        ).scalar_one()
+        assert row.connection == "stdio"
+        assert row.spec == want_spec
+        assert "accesskey" in (row.tags or [])
+        assert (
+            await s.execute(select(CatalogApp).where(CatalogApp.slug == "aliyun-ak"))
+        ).scalar_one_or_none() is None
+        assert (
+            await s.execute(select(Server).where(Server.id == recipe_ak_id))
+        ).scalar_one_or_none() is None
+        srv = (
+            await s.execute(select(Server).where(Server.slug == "aliyun"))
+        ).scalar_one()
+        assert srv.kind == "stdio"
+        assert srv.command == want_spec["command"]
+        assert list(srv.args or []) == list(want_spec["args"])
+        assert srv.url is None
+        assert srv.oauth is None
+        assert srv.has_oauth_refresh is False
+        assert srv.enabled is False
+        assert int(srv.vault_version) >= 2
+        assert (
+            await s.execute(select(Tool).where(Tool.server_id == srv.id))
+        ).scalars().all() == []
+        assert (
+            await s.execute(
+                select(VaultEntry).where(
+                    VaultEntry.server_id == srv.id, VaultEntry.name == "Authorization"
+                )
+            )
+        ).scalar_one_or_none() is None
+        # Custom operator server on the freed slug (no recipe) must survive a reboot.
+        s.add(
+            Server(
+                id=custom_id,
+                name="custom ak",
+                slug="aliyun-ak",
+                kind="stdio",
+                command="uvx",
+                args=["noop"],
+                recipe_slug=None,
+            )
+        )
+        await s.commit()
+
+    await store.ensure_defaults()
+    async with sf() as s:
+        assert (
+            await s.execute(select(Server).where(Server.id == custom_id))
+        ).scalar_one_or_none() is not None
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_aliyun_ensure_defaults_repoints_stdio_args():
+    import uuid
+
+    from portunus_gateway.catalog import CatalogStore, DEFAULT_APPS, validate_spec
+    from portunus_gateway.db.models import Base, CatalogApp, Server, Tool
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    seed = next(a for a in DEFAULT_APPS if a["slug"] == "aliyun")
+    want_spec = validate_spec("stdio", seed["spec"])
+    stale_args = ["alibabacloud.mcp-proxy==0.2.0"]
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with sf() as s:
+        stale_spec = dict(want_spec)
+        stale_spec["args"] = list(stale_args)
+        s.add(
+            CatalogApp(
+                id=uuid.uuid4(),
+                slug="aliyun",
+                label=seed["label"],
+                name=seed["name"],
+                description=seed["description"],
+                connection="stdio",
+                popular=True,
+                categories=list(seed.get("categories") or []),
+                tags=list(seed.get("tags") or []),
+                spec=stale_spec,
+                sort_order=17,
+            )
+        )
+        srv_id = uuid.uuid4()
+        s.add(
+            Server(
+                id=srv_id,
+                name="阿里云",
+                slug="aliyun",
+                kind="stdio",
+                command="uvx",
+                args=list(stale_args),
+                recipe_slug="aliyun",
+                vault_version=3,
+            )
+        )
+        s.add(
+            Tool(
+                id=uuid.uuid4(),
+                server_id=srv_id,
+                upstream_name="stale",
+                description=None,
+                schema={},
+                schema_hash="h",
+            )
+        )
+        await s.commit()
+
+    store = CatalogStore(sf)
+    await store.ensure_defaults()
+
+    async with sf() as s:
+        row = (
+            await s.execute(select(CatalogApp).where(CatalogApp.slug == "aliyun"))
+        ).scalar_one()
+        assert row.spec == want_spec
+        srv = (
+            await s.execute(select(Server).where(Server.slug == "aliyun"))
+        ).scalar_one()
+        assert list(srv.args or []) == list(want_spec["args"])
+        assert int(srv.vault_version) == 4
+        assert (
+            await s.execute(select(Tool).where(Tool.server_id == srv.id))
+        ).scalars().all() == []
+
+    await engine.dispose()
+
+
 def test_infisical_stdio_seed_shape():
     from portunus_gateway.catalog import DEFAULT_APPS, egress_for_slug, validate_spec
 

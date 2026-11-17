@@ -94,7 +94,10 @@ function appStatus(app: CatalogApp, server: Server | null): {
     return { active, configured: active };
   }
   if (isStdioApp(app)) {
-    const required = parseEnvRows(app.spec.env).map((r) => r.name);
+    // Non-secret env (optional URLs / host defaults) must not block "Live".
+    const required = parseEnvRows(app.spec.env)
+      .filter((r) => r.secret)
+      .map((r) => r.name);
     if (required.length) {
       const names = new Set(server?.env_names ?? []);
       const active = required.every((n) => names.has(n));
@@ -1459,7 +1462,7 @@ function SkillBridgeManagePanel({
         setCurrent(updated);
       } else {
         for (const def of secretDefs) {
-          if (!env[def.name]) throw new Error(`${def.label} is required`);
+          if (def.secret && !env[def.name]) throw new Error(`${def.label} is required`);
         }
         const created = await api.createServer({
           name: app.name,
@@ -1899,6 +1902,8 @@ function StdioManagePanel({
           return;
         }
         for (const def of secretDefs) {
+          // Non-secret optional fields (e.g. Aliyun MCP Server URL) may stay empty.
+          if (!def.secret) continue;
           if (!current.env_names.includes(def.name) && !payload[def.name]) {
             throw new Error(`${def.label} is required`);
           }
@@ -1907,7 +1912,7 @@ function StdioManagePanel({
         setCurrent(updated);
       } else {
         for (const def of secretDefs) {
-          if (!env[def.name]) throw new Error(`${def.label} is required`);
+          if (def.secret && !env[def.name]) throw new Error(`${def.label} is required`);
         }
         const created = await api.createServer({
           name: app.name,

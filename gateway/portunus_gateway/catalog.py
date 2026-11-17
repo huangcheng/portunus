@@ -312,32 +312,43 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "label": "阿里云",
         "name": "阿里云",
         "description": (
-            "Alibaba Cloud OpenAPI MCP (remote) — paste Core Streamable HTTP from "
-            "api.aliyun.com/mcp, then Authorize (no local mcp-proxy)."
+            "Alibaba Cloud OpenAPI MCP via local mcp-proxy + AccessKey. "
+            "Optional Core Streamable HTTP URL."
         ),
-        "connection": "oauth",
+        "connection": "stdio",
+        "egress": "domestic",
         "popular": True,
         "categories": ["Developer Tools"],
-        "tags": ["aliyun", "alibaba", "oauth", "mcp", "openapi"],
+        "tags": ["aliyun", "alibaba", "stdio", "mcp", "openapi", "accesskey"],
         "sort_order": 17,
         "spec": {
-            # Console is api.aliyun.com/mcp; each account gets its own Streamable HTTP URL.
-            "url_from_operator": True,
-            "authorize_url": "https://signin.aliyun.com/oauth2/v1/auth",
-            "token_url": "https://oauth.aliyun.com/v1/token",
-            "registration_endpoint": (
-                "https://openapi-mcp.cn-hangzhou.aliyuncs.com/register"
-            ),
-            "token_endpoint_auth_method": "none",
-            "resource": "https://openapi-mcp.cn-hangzhou.aliyuncs.com",
-            # AS metadata issuer (authorize host is signin.aliyun.com).
-            "issuer": "https://openapi-mcp.cn-hangzhou.aliyuncs.com",
-            "scopes": ["openid", "/internal/acs/openapi"],
+            "command": "uvx",
+            "args": ["alibabacloud.mcp-proxy==0.2.17"],
+            "env": [
+                {
+                    "name": "ALIBABA_CLOUD_ACCESS_KEY_ID",
+                    "label": "AccessKey ID",
+                    "secret": True,
+                },
+                {
+                    "name": "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+                    "label": "AccessKey Secret",
+                    "secret": True,
+                },
+                {
+                    "name": "ALIBABACLOUD_MCP_SERVER_URL",
+                    "label": "MCP Server URL (optional Core Streamable HTTP)",
+                    "secret": False,
+                },
+            ],
             "setup_hints": [
                 (
-                    "Open [api.aliyun.com/mcp](https://api.aliyun.com/mcp) → **Core** → "
-                    "copy **Streamable HTTP**, paste below, then Authorize. "
-                    "Enable public access on the Core endpoint if Probe cannot reach it."
+                    "Create a RAM user AccessKey with "
+                    "`AliyunOpenAPIMCPServerStaticCredentialAccess`. "
+                    "Paste AK ID/Secret. Optionally set MCP Server URL to your Core "
+                    "Streamable HTTP from [api.aliyun.com/mcp](https://api.aliyun.com/mcp) "
+                    "(blank = auto-discover). First-time accounts may need Aliyun’s "
+                    "static-credential pre-check."
                 ),
             ],
         },
@@ -399,10 +410,13 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "resource": "https://mcp.vercel.com/",
             # No issuer: Vercel omits RFC 9207 iss on the authorize redirect
             # (callback got=''), so an explicit issuer rejects every success.
-            "scopes": ["openid"],
+            # PRM lists only openid; AS still supports offline_access for refresh tokens.
+            "scopes": ["openid", "offline_access"],
             "setup_hints": [
                 (
-                    "Authorize uses Portunus CIMD (no Vercel client review). Docs: "
+                    "Authorize uses Portunus CIMD (no Vercel client review). "
+                    "Reauthorize after scope changes so Vercel issues a refresh token. "
+                    "Docs: "
                     "[vercel.com/docs/agent-resources/vercel-mcp]"
                     "(https://vercel.com/docs/agent-resources/vercel-mcp)."
                 ),
@@ -1228,7 +1242,7 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
             "authorize_url": _require_https(spec, "authorize_url"),
             "token_url": _require_https(spec, "token_url"),
         }
-        # Aliyun-style: account-specific Streamable HTTP URL pasted at Connect.
+        # Operator pastes an account-specific Streamable HTTP / MCP URL at Connect.
         url_from_operator = bool(spec.get("url_from_operator"))
         if url_from_operator:
             out["url_from_operator"] = True
@@ -1789,8 +1803,33 @@ class CatalogStore:
                     await s.commit()
                     log.info("tencentcloud uvx args: aligned to seed pin")
 
-        # aliyun: stdio mcp-proxy → remote OpenAPI MCP OAuth (no local CLI).
+        # aliyun: OAuth remote → stdio mcp-proxy + AccessKey only.
         async with self._sf() as s:
+            dirty = False
+            # Drop short-lived aliyun-ak catalog/server rows if any were seeded.
+            for stale_slug in ("aliyun-ak",):
+                stale_app = (
+                    await s.execute(
+                        select(CatalogApp).where(CatalogApp.slug == stale_slug)
+                    )
+                ).scalar_one_or_none()
+                if stale_app is not None:
+                    await s.delete(stale_app)
+                    dirty = True
+                for srv in (
+                    await s.execute(
+                        select(Server).where(
+                            Server.slug == stale_slug,
+                            Server.recipe_slug == stale_slug,
+                        )
+                    )
+                ).scalars().all():
+                    await s.execute(delete(Tool).where(Tool.server_id == srv.id))
+                    await s.execute(
+                        delete(VaultEntry).where(VaultEntry.server_id == srv.id)
+                    )
+                    await s.delete(srv)
+                    dirty = True
             seed = next((a for a in DEFAULT_APPS if a["slug"] == "aliyun"), None)
             row = (
                 await s.execute(select(CatalogApp).where(CatalogApp.slug == "aliyun"))
@@ -1798,28 +1837,21 @@ class CatalogStore:
             if (
                 seed is not None
                 and row is not None
-                and seed.get("connection") == "oauth"
+                and seed.get("connection") == "stdio"
                 and isinstance(seed.get("spec"), dict)
-                and (
-                    row.connection == "stdio"
-                    or (
-                        row.connection == "oauth"
-                        and isinstance(row.spec, dict)
-                        and row.spec.get("command")
-                    )
-                )
+                and row.connection == "oauth"
             ):
-                row.connection = "oauth"
+                want_spec = validate_spec("stdio", seed["spec"])
+                row.connection = "stdio"
                 row.description = seed["description"]
                 row.tags = _normalize_labels(seed.get("tags"), field="tags")
-                row.spec = validate_spec("oauth", seed["spec"])
+                row.spec = want_spec
                 linked = (
                     await s.execute(select(Server).where(Server.slug == "aliyun"))
                 ).scalars().all()
                 for srv in linked:
                     if srv.kind not in ("stdio", "remote"):
                         continue
-                    # Drop AccessKey / proxy env; operator re-Connects via OAuth.
                     stale_env = (
                         await s.execute(
                             select(VaultEntry).where(
@@ -1827,9 +1859,6 @@ class CatalogStore:
                                 VaultEntry.name.in_(
                                     sorted(
                                         {
-                                            "ALIBABA_CLOUD_ACCESS_KEY_ID",
-                                            "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
-                                            "ALIBABACLOUD_MCP_SERVER_URL",
                                             "Authorization",
                                             "portunus.oauth_client_secret",
                                             "portunus.oauth_refresh_token",
@@ -1842,22 +1871,58 @@ class CatalogStore:
                     for entry in stale_env:
                         await s.delete(entry)
                     await s.execute(delete(Tool).where(Tool.server_id == srv.id))
-                    srv.kind = "remote"
-                    srv.command = None
-                    srv.args = []
-                    # URL comes from Connect (url_from_operator).
+                    srv.kind = "stdio"
+                    srv.command = want_spec["command"]
+                    srv.args = list(want_spec.get("args") or [])
                     srv.url = None
-                    srv.oauth = {
-                        k: v
-                        for k, v in row.spec.items()
-                        if k not in {"url", "url_from_operator", "setup_hints"}
-                    }
+                    srv.oauth = None
                     srv.has_oauth_refresh = False
                     srv.token_expires_at = None
                     srv.enabled = False
                     srv.vault_version = int(srv.vault_version or 0) + 1
+                dirty = True
+                log.info("aliyun migration: OAuth remote → AccessKey mcp-proxy")
+            elif (
+                seed is not None
+                and row is not None
+                and seed.get("connection") == "stdio"
+                and isinstance(seed.get("spec"), dict)
+                and row.connection == "stdio"
+            ):
+                # Keep pin / env defs / tags aligned with seed; bump linked servers.
+                want_spec = validate_spec("stdio", seed["spec"])
+                want_tags = _normalize_labels(seed.get("tags"), field="tags")
+                want_command = want_spec.get("command")
+                want_args = list(want_spec.get("args") or [])
+                if (
+                    row.spec != want_spec
+                    or row.description != seed["description"]
+                    or list(row.tags or []) != want_tags
+                ):
+                    row.spec = want_spec
+                    row.description = seed["description"]
+                    row.tags = want_tags
+                    dirty = True
+                    log.info("aliyun stdio seed: aligned mcp-proxy pin")
+                if want_command and want_args:
+                    linked = (
+                        await s.execute(
+                            select(Server).where(
+                                Server.slug == "aliyun", Server.kind == "stdio"
+                            )
+                        )
+                    ).scalars().all()
+                    for srv in linked:
+                        if srv.command != want_command:
+                            continue
+                        if list(srv.args or []) == want_args:
+                            continue
+                        srv.args = list(want_args)
+                        await s.execute(delete(Tool).where(Tool.server_id == srv.id))
+                        srv.vault_version = int(srv.vault_version or 0) + 1
+                        dirty = True
+            if dirty:
                 await s.commit()
-                log.info("aliyun migration: stdio mcp-proxy → remote OAuth MCP")
 
         # vercel: CIMD + resource slash; drop issuer (Vercel omits RFC 9207 iss).
         _STALE_VERCEL_ISSUERS = frozenset({"https://vercel.com", "https://vercel.com/"})
@@ -1889,6 +1954,14 @@ class CatalogStore:
                         patched["url"] = want["url"]
                     if "issuer" not in want and patched.get("issuer") in _STALE_VERCEL_ISSUERS:
                         patched.pop("issuer", None)
+                    if list(want.get("scopes") or []) and list(
+                        patched.get("scopes") or []
+                    ) != list(want.get("scopes") or []):
+                        patched["scopes"] = list(want["scopes"])
+                    if want.get("setup_hints") and patched.get("setup_hints") != want.get(
+                        "setup_hints"
+                    ):
+                        patched["setup_hints"] = want["setup_hints"]
                     if patched != live:
                         try:
                             row.spec = validate_spec("oauth", patched)
@@ -1923,12 +1996,19 @@ class CatalogStore:
                     if "issuer" not in want and oauth.get("issuer") in _STALE_VERCEL_ISSUERS:
                         oauth.pop("issuer", None)
                         patched_o = True
+                    if list(want.get("scopes") or []) and list(
+                        oauth.get("scopes") or []
+                    ) != list(want.get("scopes") or []):
+                        oauth["scopes"] = list(want["scopes"])
+                        patched_o = True
                     if patched_o:
                         srv.oauth = oauth
                         dirty = True
                 if dirty:
                     await s.commit()
-                    log.info("vercel oauth metadata: CIMD + drop issuer (omits iss)")
+                    log.info(
+                        "vercel oauth metadata: aligned to seed"
+                    )
 
         # fastmail: drop CIMD (public https redirects rejected); prefer API token.
         async with self._sf() as s:

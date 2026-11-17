@@ -17,7 +17,8 @@ use_cimd = true
 token_endpoint_auth_method = "none"
 resource = "https://mcp.vercel.com/"
 # No issuer: Vercel omits RFC 9207 iss on the authorize redirect.
-scopes = ["openid"]
+# offline_access is required for a refresh token (PRM only lists openid).
+scopes = ["openid", "offline_access"]
 setup_hints = [
-  "Authorize uses Portunus CIMD (no Vercel client review). Docs: [vercel.com/docs/agent-resources/vercel-mcp](https://vercel.com/docs/agent-resources/vercel-mcp).",
+  "Authorize uses Portunus CIMD (no Vercel client review). Reauthorize after scope changes so Vercel issues a refresh token. Docs: [vercel.com/docs/agent-resources/vercel-mcp](https://vercel.com/docs/agent-resources/vercel-mcp).",
 ]

@@ -1,23 +1,31 @@
 slug = "aliyun"
 label = "阿里云"
-description = "Alibaba Cloud OpenAPI MCP (remote) — paste Core Streamable HTTP from api.aliyun.com/mcp, then Authorize (no local mcp-proxy)."
-connection = "oauth"
+description = "Alibaba Cloud OpenAPI MCP via local mcp-proxy + AccessKey. Optional Core Streamable HTTP URL."
+connection = "stdio"
 egress = "domestic"
 popular = true
 categories = ["Developer Tools"]
-tags = ["aliyun", "alibaba", "oauth", "mcp", "openapi"]
+tags = ["aliyun", "alibaba", "stdio", "mcp", "openapi", "accesskey"]
 sort_order = 17
 
 [spec]
-# Console is api.aliyun.com/mcp; paste the account Streamable HTTP endpoint at Connect.
-url_from_operator = true
-authorize_url = "https://signin.aliyun.com/oauth2/v1/auth"
-token_url = "https://oauth.aliyun.com/v1/token"
-registration_endpoint = "https://openapi-mcp.cn-hangzhou.aliyuncs.com/register"
-token_endpoint_auth_method = "none"
-resource = "https://openapi-mcp.cn-hangzhou.aliyuncs.com"
-issuer = "https://openapi-mcp.cn-hangzhou.aliyuncs.com"
-scopes = ["openid", "/internal/acs/openapi"]
+command = "uvx"
+args = ["alibabacloud.mcp-proxy==0.2.17"]
 setup_hints = [
-  "Open [api.aliyun.com/mcp](https://api.aliyun.com/mcp) → **Core** → copy **Streamable HTTP**, paste below, then Authorize. Enable public access on the Core endpoint if Probe cannot reach it.",
+  "Create a RAM user AccessKey with `AliyunOpenAPIMCPServerStaticCredentialAccess`. Paste AK ID/Secret. Optionally set MCP Server URL to your Core Streamable HTTP from [api.aliyun.com/mcp](https://api.aliyun.com/mcp) (blank = auto-discover). First-time accounts may need Aliyun’s static-credential pre-check.",
 ]
+
+[[spec.env]]
+name = "ALIBABA_CLOUD_ACCESS_KEY_ID"
+label = "AccessKey ID"
+secret = true
+
+[[spec.env]]
+name = "ALIBABA_CLOUD_ACCESS_KEY_SECRET"
+label = "AccessKey Secret"
+secret = true
+
+[[spec.env]]
+name = "ALIBABACLOUD_MCP_SERVER_URL"
+label = "MCP Server URL (optional Core Streamable HTTP)"
+secret = false
