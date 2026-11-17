@@ -25,6 +25,8 @@ export type AppIconId =
   | "vultr"
   | "vercel"
   | "fastmail"
+  | "infisical"
+  | "doppler"
   | "tencentcloud"
   | "flyai"
   | "youdaonote"
@@ -59,6 +61,8 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "vultr") return "vultr";
   if (slug === "vercel") return "vercel";
   if (slug === "fastmail") return "fastmail";
+  if (slug === "infisical") return "infisical";
+  if (slug === "doppler") return "doppler";
   if (slug === "tencentcloud") return "tencentcloud";
   if (slug === "flyai" || slug === "fliggy" || slug === "feizhu") return "flyai";
   if (slug === "youdaonote" || slug === "youdao") return "youdaonote";
@@ -93,6 +97,8 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   vultr: "vultr.png",
   vercel: "vercel.svg",
   fastmail: "fastmail.svg",
+  infisical: "infisical.png",
+  doppler: "doppler.png",
   tencentcloud: "tencentcloud.png",
   flyai: "flyai.png",
   youdaonote: "youdaonote.png",

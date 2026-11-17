@@ -1,0 +1,22 @@
+slug = "doppler"
+label = "Doppler"
+description = "Doppler secrets manager MCP (projects, configs, secrets) via a service token. Scope the token read-only in Doppler."
+connection = "stdio"
+egress = "overseas"
+popular = true
+categories = ["Developer Tools"]
+tags = ["doppler", "secrets", "stdio", "mcp"]
+sort_order = 23
+
+[spec]
+command = "npx"
+# Trailing package flags like --read-only are rejected by Portunus argv grammar; use a read-only token instead.
+args = ["-y", "--ignore-scripts", "@dopplerhq/mcp-server@1.0.5"]
+setup_hints = [
+  "Create a scoped Service Token in Doppler (Workplace → Access); prefer read-only. Docs: [Doppler MCP Server](https://docs.doppler.com/docs/mcp). Connect either Doppler or Infisical as your secrets backend — not both.",
+]
+
+[[spec.env]]
+name = "DOPPLER_TOKEN"
+label = "Service Token"
+secret = true

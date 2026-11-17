@@ -1,0 +1,35 @@
+slug = "infisical"
+label = "Infisical"
+description = "Infisical secrets manager MCP (list/get/create secrets, projects). Cloud or self-hosted — set Host URL at Connect."
+connection = "stdio"
+egress = "any"
+popular = true
+categories = ["Developer Tools"]
+tags = ["infisical", "secrets", "stdio", "mcp"]
+sort_order = 22
+
+[spec]
+command = "npx"
+args = ["-y", "--ignore-scripts", "@infisical/mcp@0.1.0"]
+setup_hints = [
+  "Create a Machine Identity with Universal Auth, then paste Client ID + Secret. For self-hosted Infisical, set Host URL to your instance (https://…). Docs: [Infisical MCP server](https://github.com/Infisical/infisical-mcp-server). Connect either Infisical or Doppler as your secrets backend — not both.",
+]
+
+[[spec.env]]
+name = "INFISICAL_HOST_URL"
+label = "Host URL (cloud or self-hosted)"
+secret = false
+
+[[spec.env]]
+name = "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID"
+label = "Machine Identity Client ID"
+secret = true
+
+[[spec.env]]
+name = "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET"
+label = "Machine Identity Client Secret"
+secret = true
+
+[spec.env_defaults]
+INFISICAL_HOST_URL = "https://app.infisical.com"
+INFISICAL_AUTH_METHOD = "universal-auth"

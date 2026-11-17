@@ -1860,7 +1860,12 @@ function StdioManagePanel({
 
   useEffect(() => {
     setCurrent(server);
-    setValues({});
+    // Prefill non-secret fields that have catalog env_defaults (e.g. Infisical Host URL).
+    const initial: Record<string, string> = {};
+    for (const def of secretDefs) {
+      if (!def.secret && envDefaults[def.name]) initial[def.name] = envDefaults[def.name];
+    }
+    setValues(initial);
     setRevealed({});
     setError("");
     setNotice("");
@@ -1890,7 +1895,7 @@ function StdioManagePanel({
           if (env[def.name]) payload[def.name] = env[def.name];
         }
         if (!Object.keys(payload).length) {
-          setNotice("Already connected. Enter a new secret only when rotating.");
+          setNotice("Already connected. Enter a new value only when rotating.");
           return;
         }
         for (const def of secretDefs) {

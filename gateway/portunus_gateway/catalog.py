@@ -55,6 +55,7 @@ OVERSEAS_EGRESS_SLUGS = frozenset(
         "vultr",
         "vercel",
         "fastmail",
+        "doppler",
     }
 )
 DOMESTIC_EGRESS_SLUGS = frozenset(
@@ -443,6 +444,91 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "[Connecting AI tools via Fastmail's MCP server]"
                     "(https://www.fastmail.help/hc/en-us/articles/"
                     "15869557281295-Connecting-AI-tools-via-Fastmail-s-MCP-server)."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "infisical",
+        "label": "Infisical",
+        "name": "Infisical",
+        "description": (
+            "Infisical secrets manager MCP (list/get/create secrets, projects). "
+            "Cloud or self-hosted — set Host URL at Connect."
+        ),
+        "connection": "stdio",
+        "egress": "any",
+        "popular": True,
+        "categories": ["Developer Tools"],
+        "tags": ["infisical", "secrets", "stdio", "mcp"],
+        "sort_order": 22,
+        "spec": {
+            "command": "npx",
+            "args": ["-y", "--ignore-scripts", "@infisical/mcp@0.1.0"],
+            "env": [
+                {
+                    "name": "INFISICAL_HOST_URL",
+                    "label": "Host URL (cloud or self-hosted)",
+                    "secret": False,
+                },
+                {
+                    "name": "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID",
+                    "label": "Machine Identity Client ID",
+                    "secret": True,
+                },
+                {
+                    "name": "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET",
+                    "label": "Machine Identity Client Secret",
+                    "secret": True,
+                },
+            ],
+            "env_defaults": {
+                "INFISICAL_HOST_URL": "https://app.infisical.com",
+                "INFISICAL_AUTH_METHOD": "universal-auth",
+            },
+            "setup_hints": [
+                (
+                    "Create a Machine Identity with Universal Auth, then paste Client ID "
+                    "+ Secret. For self-hosted Infisical, set Host URL to your instance "
+                    "(https://…). Docs: "
+                    "[Infisical MCP server]"
+                    "(https://github.com/Infisical/infisical-mcp-server). "
+                    "Connect either Infisical or Doppler as your secrets backend — not both."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "doppler",
+        "label": "Doppler",
+        "name": "Doppler",
+        "description": (
+            "Doppler secrets manager MCP (projects, configs, secrets) via a "
+            "service token. Scope the token read-only in Doppler."
+        ),
+        "connection": "stdio",
+        "egress": "overseas",
+        "popular": True,
+        "categories": ["Developer Tools"],
+        "tags": ["doppler", "secrets", "stdio", "mcp"],
+        "sort_order": 23,
+        "spec": {
+            "command": "npx",
+            # Trailing --read-only is rejected by argv grammar; use a read-only token.
+            "args": ["-y", "--ignore-scripts", "@dopplerhq/mcp-server@1.0.5"],
+            "env": [
+                {
+                    "name": "DOPPLER_TOKEN",
+                    "label": "Service Token",
+                    "secret": True,
+                },
+            ],
+            "setup_hints": [
+                (
+                    "Create a scoped Service Token in Doppler (Workplace → Access); "
+                    "prefer read-only. Docs: "
+                    "[Doppler MCP Server](https://docs.doppler.com/docs/mcp). "
+                    "Connect either Doppler or Infisical as your secrets backend — not both."
                 ),
             ],
         },

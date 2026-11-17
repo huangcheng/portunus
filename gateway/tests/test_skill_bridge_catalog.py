@@ -281,6 +281,36 @@ def test_fastmail_oauth_seed_shape():
     assert "offline_access" in spec["scopes"]
 
 
+def test_infisical_stdio_seed_shape():
+    from portunus_gateway.catalog import DEFAULT_APPS, egress_for_slug, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "infisical")
+    assert raw["connection"] == "stdio"
+    spec = validate_spec("stdio", raw["spec"])
+    assert spec["command"] == "npx"
+    assert spec["args"] == ["-y", "--ignore-scripts", "@infisical/mcp@0.1.0"]
+    env_by_name = {e["name"]: e for e in spec["env"]}
+    assert env_by_name["INFISICAL_HOST_URL"]["secret"] is False
+    assert env_by_name["INFISICAL_UNIVERSAL_AUTH_CLIENT_ID"]["secret"] is True
+    assert env_by_name["INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET"]["secret"] is True
+    assert spec["env_defaults"]["INFISICAL_HOST_URL"] == "https://app.infisical.com"
+    assert spec["env_defaults"]["INFISICAL_AUTH_METHOD"] == "universal-auth"
+    # Self-host can be domestic or overseas.
+    assert egress_for_slug("infisical") == "any"
+
+
+def test_doppler_stdio_seed_shape():
+    from portunus_gateway.catalog import DEFAULT_APPS, egress_for_slug, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "doppler")
+    assert raw["connection"] == "stdio"
+    spec = validate_spec("stdio", raw["spec"])
+    assert spec["command"] == "npx"
+    assert spec["args"] == ["-y", "--ignore-scripts", "@dopplerhq/mcp-server@1.0.5"]
+    assert any(e["name"] == "DOPPLER_TOKEN" and e["secret"] for e in spec["env"])
+    assert egress_for_slug("doppler") == "overseas"
+
+
 def test_github_oauth_seed_shape():
     from portunus_gateway.catalog import DEFAULT_APPS, validate_spec
 
