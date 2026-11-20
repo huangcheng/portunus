@@ -26,8 +26,17 @@ WEBDAV_MCP_PACKAGE = "webdav-mcp-server@1.0.4"
 # siblings; see deploy notes). Absolute path so the closed argv grammar admits it
 # via binary_allowlist. Bridges a pasted rclone remote config to webdav-mcp-server.
 RCLONE_SHIM = "/var/lib/portunus/skills/rclone-shim/shim"
-WEBDAV_MCP_ARGS = ["-y", "--ignore-scripts", WEBDAV_MCP_PACKAGE]
 
+# Portunus-owned Entra app (personal MSA only). Client secret stays off-git —
+# operators paste it at Connect (or seal via vault/env on the gateway host).
+MS_GRAPH_CLIENT_ID = "2cfb730c-0b20-4ddd-8e87-a67a77db4546"
+MS_GRAPH_AUTHORIZE_URL = (
+    "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
+)
+MS_GRAPH_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+MS_GRAPH_MAIL_URL = "portunus-graph://mail"
+MS_GRAPH_ONEDRIVE_URL = "portunus-graph://onedrive"
+WEBDAV_MCP_ARGS = ["-y", "--ignore-scripts", WEBDAV_MCP_PACKAGE]
 # Soft affinity for catalog Connect when the operator leaves preferred_regions empty.
 # Portable tags only — each deploy labels runners via PORTUNUS_REGIONS
 # (e.g. ``overseas`` / ``domestic``). SiteHealth still fails over on network errors.
@@ -58,6 +67,7 @@ OVERSEAS_EGRESS_SLUGS = frozenset(
         "doppler",
         "linear",
         "proton-drive",
+        "outlook-mail",
     }
 )
 DOMESTIC_EGRESS_SLUGS = frozenset(
@@ -687,6 +697,44 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         },
     },
     {
+        "slug": "outlook-mail",
+        "label": "Outlook Mail",
+        "name": "Outlook Mail",
+        "description": (
+            "Personal Outlook / Hotmail mail via Microsoft Graph (first-party "
+            "portunus-graph adapter). Authorize with a Microsoft account."
+        ),
+        "connection": "oauth",
+        "egress": "overseas",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["outlook", "mail", "microsoft", "graph", "oauth"],
+        "sort_order": 25,
+        "spec": {
+            "url": MS_GRAPH_MAIL_URL,
+            "authorize_url": MS_GRAPH_AUTHORIZE_URL,
+            "token_url": MS_GRAPH_TOKEN_URL,
+            "client_id": MS_GRAPH_CLIENT_ID,
+            "token_endpoint_auth_method": "client_secret_post",
+            "scopes": [
+                "openid",
+                "profile",
+                "offline_access",
+                "User.Read",
+                "Mail.ReadWrite",
+                "Mail.Send",
+            ],
+            "setup_hints": [
+                (
+                    "Uses the Portunus Entra app (personal Microsoft accounts). "
+                    "Paste the Entra **client secret** at Connect, then Authorize. "
+                    "Redirect URI must be this gateway's `/api/oauth/callback`. "
+                    "Docs: [Microsoft Graph mail](https://learn.microsoft.com/graph/api/resources/mail-api-overview)."
+                ),
+            ],
+        },
+    },
+    {
         "slug": "nutstore",
         "label": "Nutstore",
         "name": "Nutstore",
@@ -1104,27 +1152,35 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "label": "OneDrive",
         "name": "OneDrive",
         "description": (
-            "OneDrive files via rclone (paste your `rclone config show onedrive` "
-            "output at Connect; tokens stay encrypted in the gateway vault)."
+            "OneDrive files via Microsoft Graph (first-party portunus-graph adapter). "
+            "Authorize with a Microsoft account; no rclone paste."
         ),
-        "connection": "stdio",
+        "connection": "oauth",
+        "egress": "overseas",
         "popular": True,
         "categories": ["Storage"],
-        "tags": ["onedrive", "microsoft", "files", "rclone"],
+        "tags": ["onedrive", "microsoft", "files", "graph", "oauth"],
         "sort_order": 36,
         "spec": {
-            "command": RCLONE_SHIM,
-            "args": [],
-            "env": [
-                {
-                    "name": "RCLONE_REMOTE_CONFIG",
-                    "label": (
-                        "rclone remote config — run `rclone config show onedrive` "
-                        "(authorize first with `rclone authorize \"onedrive\"`)"
-                    ),
-                    "secret": True,
-                    "multiline": True,
-                },
+            "url": MS_GRAPH_ONEDRIVE_URL,
+            "authorize_url": MS_GRAPH_AUTHORIZE_URL,
+            "token_url": MS_GRAPH_TOKEN_URL,
+            "client_id": MS_GRAPH_CLIENT_ID,
+            "token_endpoint_auth_method": "client_secret_post",
+            "scopes": [
+                "openid",
+                "profile",
+                "offline_access",
+                "User.Read",
+                "Files.ReadWrite",
+            ],
+            "setup_hints": [
+                (
+                    "Uses the Portunus Entra app (personal Microsoft accounts). "
+                    "Paste the Entra **client secret** at Connect, then Authorize. "
+                    "Redirect URI must be this gateway's `/api/oauth/callback`. "
+                    "Docs: [OneDrive Graph](https://learn.microsoft.com/graph/api/resources/onedrive)."
+                ),
             ],
         },
     },
@@ -1307,6 +1363,30 @@ def _require_https(spec: dict[str, Any], key: str) -> str:
     return val
 
 
+def _require_oauth_mcp_url(spec: dict[str, Any], key: str = "url") -> str:
+    """HTTPS remote MCP URL, or first-party ``portunus-graph://`` adapter."""
+    val = _require_str(spec, key)
+    if val.startswith("https://"):
+        return val
+    if val.lower().startswith("portunus-graph://"):
+        from portunus_shared import PortunusError
+
+        from .graph_builtin import parse_graph_builtin_url
+
+        try:
+            parse_graph_builtin_url(val)
+        except PortunusError as e:
+            raise RegistryError(
+                422, "invalid_request", f"spec.{key}: {e.message or e}"
+            ) from None
+        return val
+    raise RegistryError(
+        422,
+        "invalid_request",
+        f"spec.{key} must be an https URL or portunus-graph:// adapter",
+    )
+
+
 # Connect drawer presentation: optional per-app prose in [spec]. Caps mirror
 # _normalize_labels style. Link targets inside [label](url) must be https://.
 SETUP_HINTS_MAX = 8
@@ -1386,9 +1466,9 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
             out["url_from_operator"] = True
             url_hint = spec.get("url")
             if url_hint is not None and url_hint != "":
-                out["url"] = _require_https({"url": url_hint}, "url")
+                out["url"] = _require_oauth_mcp_url({"url": url_hint}, "url")
         else:
-            out["url"] = _require_https(spec, "url")
+            out["url"] = _require_oauth_mcp_url(spec, "url")
         scopes = spec.get("scopes", [])
         if not isinstance(scopes, list) or not all(isinstance(s, str) and s for s in scopes):
             raise RegistryError(422, "invalid_request", "spec.scopes must be a list of strings")
@@ -1704,7 +1784,7 @@ class CatalogStore:
                 a["slug"]: a
                 for a in DEFAULT_APPS
                 if a.get("connection") == "stdio"
-                and a["slug"] in ("box", "onedrive", "tencentcloud")
+                and a["slug"] in ("box", "tencentcloud")
             }
             rows = (
                 await s.execute(select(CatalogApp).where(CatalogApp.slug.in_(list(seed_by_slug))))
@@ -1835,6 +1915,66 @@ class CatalogStore:
                     srv.vault_version = int(srv.vault_version or 0) + 1
                 await s.commit()
                 log.info("gdrive migration: switched catalog row to Drive MCP oauth")
+
+        # onedrive: rclone stdio → first-party Graph oauth (portunus-graph://onedrive).
+        async with self._sf() as s:
+            seed = next((a for a in DEFAULT_APPS if a["slug"] == "onedrive"), None)
+            row = (
+                await s.execute(select(CatalogApp).where(CatalogApp.slug == "onedrive"))
+            ).scalar_one_or_none()
+            if (
+                seed is not None
+                and row is not None
+                and seed.get("connection") == "oauth"
+                and isinstance(row.spec, dict)
+                and (
+                    row.connection == "stdio"
+                    or row.spec.get("command") == RCLONE_SHIM
+                )
+            ):
+                row.connection = "oauth"
+                row.description = seed["description"]
+                row.tags = _normalize_labels(seed.get("tags"), field="tags")
+                row.spec = validate_spec("oauth", seed["spec"])
+                linked = (
+                    await s.execute(select(Server).where(Server.slug == "onedrive"))
+                ).scalars().all()
+                for srv in linked:
+                    if srv.kind != "stdio" or srv.command != RCLONE_SHIM:
+                        continue
+                    stale_env = (
+                        await s.execute(
+                            select(VaultEntry).where(
+                                VaultEntry.server_id == srv.id,
+                                VaultEntry.name.in_(
+                                    sorted(
+                                        {
+                                            "RCLONE_REMOTE_CONFIG",
+                                            "Authorization",
+                                            "portunus.oauth_client_secret",
+                                            "portunus.oauth_refresh_token",
+                                        }
+                                    )
+                                ),
+                            )
+                        )
+                    ).scalars().all()
+                    for entry in stale_env:
+                        await s.delete(entry)
+                    await s.execute(delete(Tool).where(Tool.server_id == srv.id))
+                    srv.kind = "remote"
+                    srv.command = None
+                    srv.args = []
+                    srv.url = seed["spec"]["url"]
+                    srv.oauth = {
+                        k: v for k, v in row.spec.items() if k not in {"url", "setup_hints"}
+                    }
+                    srv.has_oauth_refresh = False
+                    srv.token_expires_at = None
+                    srv.enabled = False
+                    srv.vault_version = int(srv.vault_version or 0) + 1
+                await s.commit()
+                log.info("onedrive migration: switched catalog row to Graph oauth")
 
         # vultr: repair known-bad oauth resource and drop issuer.
         # …/mcp as resource makes Vultr authorize return server_error. An explicit

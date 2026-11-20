@@ -1182,7 +1182,7 @@ class RemoteProxy:
     def bind_refresh(self, refresh_oauth: Callable[[uuid.UUID], Any]) -> None:
         self.refresh_oauth = refresh_oauth
 
-    async def _client(self, server_id: uuid.UUID) -> RemoteClient:
+    async def _client(self, server_id: uuid.UUID) -> RemoteClient | Any:
         async with self._sf() as s:
             server = await s.get(Server, server_id)
             if server is None:
@@ -1214,6 +1214,14 @@ class RemoteProxy:
                     headers[row.name] = value
             except (VaultError, UnicodeDecodeError):
                 raise RegistryError(500, "vault_error", "cannot decrypt server headers") from None
+        from .graph_builtin import GraphBuiltinClient, is_graph_builtin_url
+
+        if is_graph_builtin_url(url):
+            return GraphBuiltinClient(
+                url,
+                headers=headers,
+                timeout_s=float(self.policy.timeout_s),
+            )
         return RemoteClient(
             url,
             headers=headers,

@@ -7,6 +7,7 @@ export type AppIconId =
   | "nutstore"
   | "koofr"
   | "onedrive"
+  | "outlook-mail"
   | "gdrive"
   | "yandex"
   | "drime"
@@ -47,6 +48,7 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "nutstore") return "nutstore";
   if (slug === "koofr") return "koofr";
   if (slug === "onedrive") return "onedrive";
+  if (slug === "outlook-mail" || slug === "outlook") return "outlook-mail";
   if (slug === "gdrive" || slug === "google-drive" || slug === "googledrive") return "gdrive";
   if (slug === "yandex") return "yandex";
   if (slug === "drime") return "drime";
@@ -88,6 +90,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   nutstore: "nutstore.png",
   koofr: "koofr.png",
   onedrive: "onedrive.svg",
+  "outlook-mail": "outlook-mail.svg",
   gdrive: "gdrive.png",
   yandex: "yandex.png",
   drime: "drime.png",

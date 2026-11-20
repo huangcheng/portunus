@@ -203,10 +203,10 @@ async def test_auth_none_skill_app_not_flagged_auth_required(db, pepper_file):
 
 
 def test_rclone_drive_seeds_shape():
-    """Box/OneDrive/Yandex/Drime/MEGA ship as rclone-shim stdio apps with a multiline config paste."""
+    """Box/Yandex/Drime/MEGA ship as rclone-shim stdio apps with a multiline config paste."""
     from portunus_gateway.catalog import DEFAULT_APPS, RCLONE_SHIM, validate_spec
 
-    for slug in ("box", "onedrive", "yandex", "drime", "mega"):
+    for slug in ("box", "yandex", "drime", "mega"):
         raw = next(a for a in DEFAULT_APPS if a["slug"] == slug)
         assert raw["connection"] == "stdio"
         spec = validate_spec("stdio", raw["spec"])
@@ -235,6 +235,32 @@ def test_gdrive_oauth_drive_mcp_seed_shape():
     assert preferred_regions_for_slug("gdrive") == ["overseas"]
 
 
+def test_ms_graph_oauth_seeds_shape():
+    from portunus_gateway.catalog import (
+        DEFAULT_APPS,
+        MS_GRAPH_CLIENT_ID,
+        preferred_regions_for_slug,
+        validate_spec,
+    )
+
+    mail = next(a for a in DEFAULT_APPS if a["slug"] == "outlook-mail")
+    drive = next(a for a in DEFAULT_APPS if a["slug"] == "onedrive")
+    assert mail["connection"] == "oauth"
+    assert drive["connection"] == "oauth"
+    mail_spec = validate_spec("oauth", mail["spec"])
+    drive_spec = validate_spec("oauth", drive["spec"])
+    assert mail_spec["url"] == "portunus-graph://mail"
+    assert drive_spec["url"] == "portunus-graph://onedrive"
+    assert mail_spec["client_id"] == drive_spec["client_id"] == MS_GRAPH_CLIENT_ID
+    assert mail_spec["token_endpoint_auth_method"] == "client_secret_post"
+    assert "Mail.Send" in mail_spec["scopes"]
+    assert "Files.ReadWrite" in drive_spec["scopes"]
+    assert "Files.ReadWrite" not in mail_spec["scopes"]
+    assert "Mail.Send" not in drive_spec["scopes"]
+    assert preferred_regions_for_slug("outlook-mail") == ["overseas"]
+    assert preferred_regions_for_slug("onedrive") == ["overseas"]
+
+
 def test_egress_preferred_regions_for_catalog_slugs():
     from portunus_gateway.catalog import (
         DOMESTIC_PREFERRED_REGIONS,
@@ -248,6 +274,7 @@ def test_egress_preferred_regions_for_catalog_slugs():
         "drime",
         "box",
         "onedrive",
+        "outlook-mail",
         "gdrive",
         "mega",
         "raindrop",

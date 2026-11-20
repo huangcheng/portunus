@@ -257,7 +257,20 @@ def validate_remote_url(url: str | None) -> str:
     if len(url) > 2048:
         raise RegistryError(422, "invalid_url", "url too long")
     # Full SSRF checks run at probe/invoke time; create only rejects obvious junk.
+    # ``portunus-graph://`` is a first-party Graph adapter (not fetched as HTTP).
     low = url.lower()
+    if low.startswith("portunus-graph://"):
+        from portunus_shared import PortunusError
+
+        from .graph_builtin import parse_graph_builtin_url
+
+        try:
+            parse_graph_builtin_url(url)
+        except PortunusError as e:
+            raise RegistryError(422, "invalid_url", e.message or str(e)) from None
+        if "\x00" in url or "\r" in url or "\n" in url:
+            raise RegistryError(422, "invalid_url", "invalid url")
+        return url
     if not (low.startswith("https://") or low.startswith("http://")):
         raise RegistryError(422, "invalid_url", "url must be http(s)")
     if "\x00" in url or "\r" in url or "\n" in url:
