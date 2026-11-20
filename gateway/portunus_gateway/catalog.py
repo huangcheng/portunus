@@ -57,6 +57,7 @@ OVERSEAS_EGRESS_SLUGS = frozenset(
         "fastmail",
         "doppler",
         "linear",
+        "proton-drive",
     }
 )
 DOMESTIC_EGRESS_SLUGS = frozenset(
@@ -76,6 +77,7 @@ DOMESTIC_EGRESS_SLUGS = frozenset(
         "tencentcloud",
         "flyai",
         "xunlei",
+        "agent-mail",
     }
 )
 
@@ -168,10 +170,18 @@ CUBOX_MANIFEST: dict[str, Any] = _load_packaged_manifest("cubox.example.yaml")
 FLYAI_MANIFEST: dict[str, Any] = _load_packaged_manifest("flyai.example.yaml")
 # 光鸭云盘 json_cli — skill tree shipped under third_party/; runners mount/copy it.
 GUANGYAPAN_MANIFEST: dict[str, Any] = _load_packaged_manifest("guangyapan.example.yaml")
+# Proton Drive — official CLI via skill-bridge (browser oauth_link; no hosted MCP).
+PROTON_DRIVE_MANIFEST: dict[str, Any] = _load_packaged_manifest("proton-drive.example.yaml")
+# 腾讯 Agent Mail — agently-cli via skill-bridge (browser oauth_link; no hosted MCP).
+AGENT_MAIL_MANIFEST: dict[str, Any] = _load_packaged_manifest("agent-mail.example.yaml")
 # Default paths on Portunus runners (see deploy). Overridable via Connect env.
 GUANGYAPAN_SKILL_ROOT = "/var/lib/portunus/skills/guangyapan-drive"
 GUANGYAPAN_STATE_DIR = "/var/lib/portunus/skill-state/guangyapan"
 CUBOX_STATE_DIR = "/var/lib/portunus/skill-state/cubox"
+PROTON_DRIVE_SKILL_ROOT = "/var/lib/portunus/skills/proton-drive"
+PROTON_DRIVE_STATE_DIR = "/var/lib/portunus/skill-state/proton-drive"
+AGENT_MAIL_SKILL_ROOT = "/var/lib/portunus/skills/agent-mail"
+AGENT_MAIL_STATE_DIR = "/var/lib/portunus/skill-state/agent-mail"
 # Seeded once when the table is empty. Operators can edit/delete afterward.
 # ``categories`` drive browse filters (Composio-style); ``tags`` are freeform chips.
 DEFAULT_APPS: list[dict[str, Any]] = [
@@ -608,6 +618,71 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                 "sharing.write",
                 "file_requests.read",
                 "file_requests.write",
+            ],
+        },
+    },
+    {
+        "slug": "proton-drive",
+        "label": "Proton Drive",
+        "name": "Proton Drive",
+        "description": (
+            "Proton Drive via official CLI (skill-bridge): browser Connect, then "
+            "list/upload/download/share. No hosted MCP; prefers overseas runners."
+        ),
+        "connection": "skill_bridge",
+        "egress": "overseas",
+        "popular": True,
+        "categories": ["Storage"],
+        "tags": ["proton", "drive", "json_cli", "oauth_link"],
+        "sort_order": 22,
+        "spec": {
+            "manifest": PROTON_DRIVE_MANIFEST,
+            "secrets": [],
+            "env_defaults": {
+                "SKILL_ROOT": PROTON_DRIVE_SKILL_ROOT,
+                "STATE_DIR": PROTON_DRIVE_STATE_DIR,
+                "PROTON_DRIVE_BIN": "/usr/local/bin/proton-drive",
+                "PROTON_DRIVE_CREDENTIALS_STORE": "unsafe_file",
+            },
+            "setup_hints": [
+                (
+                    "Connect opens a Proton account.proton.me sign-in link (another device is fine). "
+                    "CLI docs: [proton.me/support/drive-cli](https://proton.me/support/drive-cli). "
+                    "Fleet sync installs `/usr/local/bin/proton-drive` into runners; Contabo already "
+                    "has the host binary."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "agent-mail",
+        "label": "Agent Mail",
+        "name": "Agent Mail",
+        "description": (
+            "Tencent Agent Mail (Agently) via official CLI (skill-bridge): browser Connect, "
+            "then list/read/search/send mail. No hosted MCP; prefers domestic runners."
+        ),
+        "connection": "skill_bridge",
+        "egress": "domestic",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["tencent", "mail", "json_cli", "oauth_link", "agently"],
+        "sort_order": 23,
+        "spec": {
+            "manifest": AGENT_MAIL_MANIFEST,
+            "secrets": [],
+            "env_defaults": {
+                "SKILL_ROOT": AGENT_MAIL_SKILL_ROOT,
+                "STATE_DIR": AGENT_MAIL_STATE_DIR,
+            },
+            "setup_hints": [
+                (
+                    "Connect opens an Agent Mail authorize link (WeChat / QQ Mail OAuth; another "
+                    "device is fine). CLI docs: "
+                    "[agent.qq.com/doc/cli-setup.md](https://agent.qq.com/doc/cli-setup.md). "
+                    "Runners need Node + `agently-cli` on PATH (or npx). Connect pins "
+                    "HOME=STATE_DIR so the CLI keychain/session matches tool calls."
+                ),
             ],
         },
     },

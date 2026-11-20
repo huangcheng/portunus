@@ -275,24 +275,34 @@ class CliIdentity(BaseModel):
 
 
 class CliProvision(BaseModel):
-    """How fleet sync installs ``cli.command[0]`` onto runners (auto-discovered).
+    """How fleet sync installs a vendor binary onto runners (auto-discovered).
 
-    Ops host downloads; runners never curl GitHub themselves (domestic egress).
-    ``asset`` may contain ``{arch}`` (amd64|arm64) and ``{version}`` / ``{tag}``.
+    Ops host downloads; runners never curl vendor CDNs themselves when possible.
+    ``asset`` / ``url`` may contain ``{arch}`` (amd64|arm64 → github; x64|arm64 for
+    Proton-style URLs via ``{arch}`` substitution in provision-vendor-clis) and
+    ``{version}`` / ``{tag}``.
     """
 
     model_config = {"extra": "forbid"}
 
-    kind: Literal["github_release"] = "github_release"
-    repo: str = Field(min_length=3, max_length=200)  # owner/name
-    tag: str = Field(min_length=1, max_length=64)
-    asset: str = Field(min_length=1, max_length=200)
-    # File basename inside a .tar.gz / .zip; default = basename of command[0].
+    kind: Literal["github_release", "http_file"] = "github_release"
+    # github_release
+    repo: str | None = Field(default=None, max_length=200)  # owner/name
+    tag: str | None = Field(default=None, max_length=64)
+    asset: str | None = Field(default=None, max_length=200)
+    # http_file — direct URL (e.g. Proton Drive CLI index).
+    url: str | None = Field(default=None, max_length=500)
+    sha512: str | None = Field(default=None, max_length=128)
+    # Absolute install path when ``cli.command[0]`` is a relative node wrapper.
+    dest: str | None = Field(default=None, max_length=200)
+    # File basename inside a .tar.gz / .zip; default = basename of dest/command[0].
     binary: str | None = Field(default=None, max_length=128)
 
     @field_validator("repo")
     @classmethod
-    def _repo_shape(cls, v: str) -> str:
+    def _repo_shape(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
         parts = v.split("/")
         if len(parts) != 2 or not all(parts):
             raise ValueError("provision.repo must be owner/name")
@@ -305,6 +315,46 @@ class CliProvision(BaseModel):
             raise ValueError("provision.binary must be a file basename, not a path")
         return v
 
+    @field_validator("dest")
+    @classmethod
+    def _dest_absolute(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        if not v.startswith("/"):
+            raise ValueError("provision.dest must be an absolute path")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def _url_https(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        if not v.startswith("https://"):
+            raise ValueError("provision.url must be https://")
+        return v
+
+    @field_validator("sha512")
+    @classmethod
+    def _sha512_hex(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        h = v.strip().lower()
+        if len(h) != 128 or any(c not in "0123456789abcdef" for c in h):
+            raise ValueError("provision.sha512 must be 128 lowercase hex chars")
+        return h
+
+    @model_validator(mode="after")
+    def _kind_fields(self) -> CliProvision:
+        if self.kind == "github_release":
+            if not (self.repo and self.tag and self.asset):
+                raise ValueError("github_release provision requires repo, tag, and asset")
+        elif self.kind == "http_file":
+            if not self.url:
+                raise ValueError("http_file provision requires url")
+            if not self.dest:
+                raise ValueError("http_file provision requires dest (absolute install path)")
+        return self
+
 
 class CliSpec(BaseModel):
     model_config = {"extra": "forbid"}
@@ -314,7 +364,8 @@ class CliSpec(BaseModel):
     identity: CliIdentity = Field(default_factory=CliIdentity)
     # "run_operation" wraps one MCP tool call as CLI `run` with a single operation
     run_wrapper: Literal["run_operation", "raw"] = "run_operation"
-    # Required when command[0] is an absolute path fleet sync must install.
+    # Required when command[0] is an absolute path fleet sync must install,
+    # or when a sidecar binary (provision.dest) must be installed for a node wrapper.
     provision: CliProvision | None = None
 
     @field_validator("command")
@@ -332,11 +383,13 @@ class CliSpec(BaseModel):
             raise ValueError(
                 f"cli.command[0]={head!r} is absolute; set cli.provision so fleet sync can install it"
             )
-        if self.provision is not None and not head.startswith("/"):
-            raise ValueError(
-                f"cli.provision is set but command[0]={head!r} is not absolute "
-                "(fleet sync only installs absolute destinations)"
-            )
+        if self.provision is not None:
+            dest = self.provision.dest or (head if head.startswith("/") else None)
+            if not dest or not dest.startswith("/"):
+                raise ValueError(
+                    "cli.provision needs an absolute install path "
+                    "(command[0] absolute, or provision.dest)"
+                )
         return self
 
 

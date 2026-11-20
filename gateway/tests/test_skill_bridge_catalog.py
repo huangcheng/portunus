@@ -633,6 +633,89 @@ def test_validate_cubox_skill_bridge_spec():
     assert folder["cli"] == ["folder", "list"]
 
 
+def test_validate_proton_drive_auth_seed():
+    from portunus_gateway.catalog import (
+        DEFAULT_APPS,
+        PROTON_DRIVE_MANIFEST,
+        PROTON_DRIVE_SKILL_ROOT,
+        PROTON_DRIVE_STATE_DIR,
+        preferred_regions_for_slug,
+        validate_spec,
+    )
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "proton-drive")
+    assert raw["connection"] == "skill_bridge"
+    assert raw["egress"] == "overseas"
+    assert preferred_regions_for_slug("proton-drive") == ["overseas"]
+    out = validate_spec(
+        "skill_bridge",
+        {
+            "manifest": PROTON_DRIVE_MANIFEST,
+            "secrets": [],
+            "env_defaults": {
+                "SKILL_ROOT": PROTON_DRIVE_SKILL_ROOT,
+                "STATE_DIR": PROTON_DRIVE_STATE_DIR,
+                "PROTON_DRIVE_BIN": "/usr/local/bin/proton-drive",
+                "PROTON_DRIVE_CREDENTIALS_STORE": "unsafe_file",
+            },
+        },
+    )
+    assert out["manifest"]["auth"]["type"] == "oauth_link"
+    assert out["manifest"]["auth"]["browser_capture"] is True
+    assert out["manifest"]["auth"]["token_paste"] is False
+    names = {t["name"] for t in out["manifest"]["tools"]}
+    assert {
+        "fs_list",
+        "fs_upload",
+        "fs_download",
+        "sharing_status",
+        "photo_timeline",
+        "album_list",
+        "album_photos",
+    } <= names
+    assert "login" not in names
+
+
+def test_validate_agent_mail_auth_seed():
+    from portunus_gateway.catalog import (
+        AGENT_MAIL_MANIFEST,
+        AGENT_MAIL_SKILL_ROOT,
+        AGENT_MAIL_STATE_DIR,
+        DEFAULT_APPS,
+        preferred_regions_for_slug,
+        validate_spec,
+    )
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "agent-mail")
+    assert raw["connection"] == "skill_bridge"
+    assert raw["egress"] == "domestic"
+    assert preferred_regions_for_slug("agent-mail") == ["domestic"]
+    out = validate_spec(
+        "skill_bridge",
+        {
+            "manifest": AGENT_MAIL_MANIFEST,
+            "secrets": [],
+            "env_defaults": {
+                "SKILL_ROOT": AGENT_MAIL_SKILL_ROOT,
+                "STATE_DIR": AGENT_MAIL_STATE_DIR,
+            },
+        },
+    )
+    assert out["manifest"]["auth"]["type"] == "oauth_link"
+    assert out["manifest"]["auth"]["browser_capture"] is True
+    assert out["manifest"]["auth"]["token_paste"] is False
+    names = {t["name"] for t in out["manifest"]["tools"]}
+    assert {
+        "me",
+        "message_list",
+        "message_read",
+        "message_search",
+        "message_send",
+        "attachment_upload",
+    } <= names
+    assert "login" not in names
+
+
 def test_raindrop_http_seed_shape():
     from portunus_gateway.catalog import DEFAULT_APPS, validate_spec
 

@@ -1,0 +1,234 @@
+# 腾讯 Agent Mail (Agently) — official agently-cli via skill-bridge (no hosted MCP).
+# Auth: browser oauth_link (Connect). MCP tools are post-auth mail ops.
+# Do not expose auth login/logout as MCP tools.
+
+name: agent-mail
+version: "1.0.18"
+backend: json_cli
+
+auth:
+  type: oauth_link
+  login_env: {}
+  actions:
+    login: login
+    status: login-status
+    logout: logout
+  browser_capture: true
+  capture_timeout_s: 180
+  poll_interval_s: 2
+  token_paste: false
+  pending_codes: [-114, -106]
+  success_code: 0
+  connect_hint: "Open the Agent Mail authorize link (WeChat / QQ Mail OAuth; another device is fine). Keep Connect open until login finishes. Docs: https://agent.qq.com/doc/cli-setup.md"
+
+cli:
+  command: ["node", "scripts/agent-mail.cjs"]
+  cwd: ${SKILL_ROOT}
+  identity: {}
+  run_wrapper: raw
+
+tools:
+  - name: me
+    description: Current Agent Mail mailbox address and aliases
+    cli: ["+me"]
+    input: {}
+
+  - name: message_list
+    description: List messages in a folder (default inbox)
+    cli: ["message", "+list"]
+    input:
+      dir:
+        type: string
+        description: "Folder: inbox, sent, trash, spam"
+      limit:
+        type: integer
+        description: Max messages to return (max 50)
+      is_unread:
+        type: boolean
+        description: Only unread when true
+      has_attachments:
+        type: boolean
+        description: Only messages with attachments when true
+      cursor:
+        type: string
+        description: Pagination cursor from a previous list
+      after:
+        type: string
+        description: Only messages after this ISO 8601 time
+      before:
+        type: string
+        description: Only messages before this ISO 8601 time
+
+  - name: message_read
+    description: Read a message by id (body, recipients, attachments)
+    cli: ["message", "+read"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Message id (msg_…)
+
+  - name: message_search
+    description: Search messages by query and filters
+    cli: ["message", "+search"]
+    input:
+      q:
+        type: string
+        description: Search query
+      sender:
+        type: string
+        description: Filter by From address (wrapper maps to --from)
+      to:
+        type: string
+      dir:
+        type: string
+        description: "Folder: inbox, sent, trash, spam"
+      limit:
+        type: integer
+      is_unread:
+        type: boolean
+      has_attachments:
+        type: boolean
+      cursor:
+        type: string
+      search_in:
+        type: string
+        description: SEARCH_IN_ALL | SEARCH_IN_SUBJECT | SEARCH_IN_CONTENT
+      after:
+        type: string
+      before:
+        type: string
+
+  - name: message_send
+    description: "Send a message (two-step: preview returns confirmation_token; only re-run with confirmation_token after explicit user approval). Paths are relative to STATE_DIR/scratch on the runner."
+    cli: ["message", "+send"]
+    input:
+      to:
+        type: array
+        required: true
+        description: Recipient email(s)
+        items:
+          type: string
+      cc:
+        type: array
+        items:
+          type: string
+      bcc:
+        type: array
+        items:
+          type: string
+      subject:
+        type: string
+        required: true
+      body:
+        type: string
+        description: Plain or HTML body (avoid leading '-' — use body_file for Markdown lists)
+      body_file:
+        type: string
+        description: UTF-8 body file path relative to STATE_DIR/scratch
+      attachment:
+        type: array
+        description: Relative file path(s) under STATE_DIR/scratch to attach
+        items:
+          type: string
+      confirmation_token:
+        type: string
+        description: Token from the preview step to confirm send
+
+  - name: message_reply
+    description: "Reply to a message (two-step: only re-run with confirmation_token after explicit user approval)"
+    cli: ["message", "+reply"]
+    input:
+      id:
+        type: string
+        required: true
+      body:
+        type: string
+      cc:
+        type: array
+        items:
+          type: string
+      bcc:
+        type: array
+        items:
+          type: string
+      attachment:
+        type: array
+        items:
+          type: string
+      confirmation_token:
+        type: string
+
+  - name: message_forward
+    description: "Forward a message (two-step: only re-run with confirmation_token after explicit user approval)"
+    cli: ["message", "+forward"]
+    input:
+      id:
+        type: string
+        required: true
+      to:
+        type: array
+        required: true
+        items:
+          type: string
+      body:
+        type: string
+      cc:
+        type: array
+        items:
+          type: string
+      bcc:
+        type: array
+        items:
+          type: string
+      confirmation_token:
+        type: string
+
+  - name: message_trash
+    description: "Move a message to trash (two-step: only re-run with confirmation_token after explicit user approval)"
+    cli: ["message", "+trash"]
+    input:
+      id:
+        type: string
+        required: true
+      confirmation_token:
+        type: string
+
+  - name: message_delete
+    description: "Permanently delete from trash (pass id) or empty trash (all=true); two-step confirmation_token after user approval"
+    cli: ["message", "+delete"]
+    input:
+      id:
+        type: string
+        description: Message id in trash (required unless all=true)
+      all:
+        type: boolean
+        description: Empty trash when true (do not combine with id)
+      confirmation_token:
+        type: string
+
+  - name: attachment_upload
+    description: Upload an attachment under STATE_DIR/scratch; returns file_id (also pass paths via message_send attachment[])
+    cli: ["attachment", "+upload"]
+    input:
+      file:
+        type: string
+        required: true
+        description: Relative path under STATE_DIR/scratch
+
+  - name: attachment_download
+    description: Download an attachment into STATE_DIR/scratch (or output subdir)
+    cli: ["attachment", "+download"]
+    input:
+      msg:
+        type: string
+        required: true
+        description: Message id
+      att:
+        type: string
+        required: true
+        description: Attachment id
+      output:
+        type: string
+        description: Relative output directory under STATE_DIR/scratch
+

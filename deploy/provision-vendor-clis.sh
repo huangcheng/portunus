@@ -100,6 +100,49 @@ fetch_github_release() {
   install -m 755 "$found" "$out"
 }
 
+# Direct HTTPS binary (e.g. Proton Drive CLI). ``{arch}`` → x64|arm64 (Proton) or amd64|arm64.
+fetch_http_file() {
+  local url_tmpl="$1" arch="$2" out="$3" expect_sha="$4"
+  local parch="$arch"
+  case "$arch" in
+    amd64) parch=x64 ;;
+    arm64) parch=arm64 ;;
+  esac
+  local url="${url_tmpl//\{arch\}/$parch}"
+  if [[ -x "$out" ]]; then
+    if [[ -n "$expect_sha" ]]; then
+      local got
+      got="$(sha512sum "$out" | awk '{print $1}')"
+      if [[ "$got" == "$expect_sha" ]]; then
+        return 0
+      fi
+      echo "  cache checksum mismatch — re-fetch $url"
+    else
+      return 0
+    fi
+  fi
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/portunus-cli.XXXXXX")"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+  echo "  fetch $url"
+  if ! curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 -o "$tmp/asset" "$url"; then
+    echo "download failed: $url" >&2
+    return 1
+  fi
+  if [[ -n "$expect_sha" ]]; then
+    local got
+    got="$(sha512sum "$tmp/asset" | awk '{print $1}')"
+    if [[ "$got" != "$expect_sha" ]]; then
+      echo "sha512 mismatch for $url" >&2
+      echo "  expected $expect_sha" >&2
+      echo "  got      $got" >&2
+      return 1
+    fi
+  fi
+  install -m 755 "$tmp/asset" "$out"
+}
+
 resolve_runner() {
   local host="$1"
   local override="${PORTUNUS_RUNNER_CONTAINER:-}"
@@ -148,24 +191,59 @@ for host in "$@"; do
   }
 
   for line in "${SPECS[@]}"; do
-    # Parse once per record (avoid 7× python startups per host×spec).
-    IFS=$'\t' read -r name dest kind repo tag asset binary < <(
-      "$PYTHON" -c 'import json,sys
-o=json.loads(sys.argv[1])
-print("\t".join(str(o[k]) for k in ("name","dest","kind","repo","tag","asset","binary")))' "$line"
-    )
-    echo "  $name → $dest"
-    [[ "$kind" == "github_release" ]] || {
-      echo "FAIL: unsupported kind $kind for $name" >&2
-      fail=1
-      continue
-    }
-    cache_bin="$CACHE_DIR/${name}-${tag}-${asset//\//_}-linux-${RARCH}"
-    if ! fetch_github_release "$repo" "$tag" "$asset" "$RARCH" "$cache_bin" "$binary"; then
-      echo "FAIL: download $name" >&2
-      fail=1
-      continue
-    fi
+    # Parse via stdin JSON (argv breaks on long URLs / braces in some shells).
+    eval "$("$PYTHON" -c 'import json,sys,shlex
+o=json.load(sys.stdin)
+def q(k):
+    return shlex.quote(str(o.get(k) or ""))
+print(
+    "name="+q("name"),
+    "dest="+q("dest"),
+    "kind="+q("kind"),
+    "repo="+q("repo"),
+    "tag="+q("tag"),
+    "asset="+q("asset"),
+    "binary="+q("binary"),
+    "url="+q("url"),
+    "sha512="+q("sha512"),
+    sep="; ",
+)' <<<"$line")"
+    echo "  $name → $dest ($kind)"
+    cache_bin=""
+    case "$kind" in
+      github_release)
+        cache_bin="$CACHE_DIR/${name}-${tag}-${asset//\//_}-linux-${RARCH}"
+        if ! fetch_github_release "$repo" "$tag" "$asset" "$RARCH" "$cache_bin" "$binary"; then
+          echo "FAIL: download $name" >&2
+          fail=1
+          continue
+        fi
+        ;;
+      http_file)
+        # Proton publishes linux-x64 checksums in the manifest; skip arm64 until dual hashes exist.
+        if [[ "$RARCH" == "arm64" && -n "$sha512" ]]; then
+          echo "FAIL: $name http_file sha512 is pinned to linux-x64; arm64 not configured" >&2
+          fail=1
+          continue
+        fi
+        if [[ -z "$url" ]]; then
+          echo "FAIL: $name http_file missing url" >&2
+          fail=1
+          continue
+        fi
+        cache_bin="$CACHE_DIR/${name}-http-${RARCH}-${binary}"
+        if ! fetch_http_file "$url" "$RARCH" "$cache_bin" "$sha512"; then
+          echo "FAIL: download $name" >&2
+          fail=1
+          continue
+        fi
+        ;;
+      *)
+        echo "FAIL: unsupported kind $kind for $name" >&2
+        fail=1
+        continue
+        ;;
+    esac
     if ! rsync -az -e "ssh ${SSH_OPTS[*]}" "$cache_bin" "$host:$remote_tmp/$binary"; then
       echo "FAIL: upload $name to $host" >&2
       fail=1

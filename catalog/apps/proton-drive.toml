@@ -1,0 +1,21 @@
+slug = "proton-drive"
+label = "Proton Drive"
+description = "Proton Drive via official CLI (skill-bridge): browser Connect, then list/upload/download/share. No hosted MCP; prefers overseas runners."
+connection = "skill_bridge"
+egress = "overseas"
+popular = true
+categories = ["Storage"]
+tags = ["proton", "drive", "json_cli", "oauth_link"]
+sort_order = 22
+
+[spec]
+manifest = "proton-drive.example.yaml"
+secrets = []
+setup_hints = [
+  "Connect opens a Proton account.proton.me sign-in link (another device is fine). CLI docs: [proton.me/support/drive-cli](https://proton.me/support/drive-cli). Fleet sync installs `/usr/local/bin/proton-drive` into runners; Contabo already has the host binary. Drive files live under `/my-files`; Photos/Albums use `photo_timeline` / `album_list` (not `fs_size`/`fs_list` on `/photos`).",
+]
+[spec.env_defaults]
+SKILL_ROOT = "/var/lib/portunus/skills/proton-drive"
+STATE_DIR = "/var/lib/portunus/skill-state/proton-drive"
+PROTON_DRIVE_BIN = "/usr/local/bin/proton-drive"
+PROTON_DRIVE_CREDENTIALS_STORE = "unsafe_file"

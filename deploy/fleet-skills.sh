@@ -112,6 +112,8 @@ state_slug_for() {
   case "$1" in
     guangyapan-drive) echo guangyapan ;;
     quarkclouddrive) echo quark ;;
+    proton-drive) echo proton-drive ;;
+    agent-mail) echo agent-mail ;;
     rclone-shim) echo rclone ;;
     *) echo "$1" ;;
   esac
@@ -122,6 +124,8 @@ entrypoint_for() {
   case "$1" in
     guangyapan-drive) echo bin/guangyapan.mjs ;;
     quarkclouddrive) echo scripts/quark-drive.cjs ;;
+    proton-drive) echo scripts/proton-drive.cjs ;;
+    agent-mail) echo scripts/agent-mail.cjs ;;
     rclone-shim) echo shim ;;
     *) echo "" ;;
   esac

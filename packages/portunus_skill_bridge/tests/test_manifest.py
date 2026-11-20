@@ -12,6 +12,8 @@ CUBOX = ROOT / "manifests" / "cubox.example.yaml"
 FLYAI = ROOT / "manifests" / "flyai.example.yaml"
 IMA = ROOT / "manifests" / "ima.example.yaml"
 QQMUSIC = ROOT / "manifests" / "qqmusic.example.yaml"
+PROTON = ROOT / "manifests" / "proton-drive.example.yaml"
+AGENT_MAIL = ROOT / "manifests" / "agent-mail.example.yaml"
 
 
 def test_load_weread_example():
@@ -68,6 +70,57 @@ def test_load_cubox_example():
     assert {t.name for t in m.tools} >= {"folder_list", "card_list", "card_rag", "save"}
 
 
+def test_load_proton_drive_example():
+    m = load_manifest(PROTON)
+    assert m.backend == "json_cli"
+    assert m.auth.type == "oauth_link"
+    assert m.auth.wants_browser_capture()
+    assert m.auth.token_paste is False
+    assert m.cli is not None
+    assert m.cli.command == ["node", "scripts/proton-drive.cjs"]
+    assert m.cli.provision is not None
+    assert m.cli.provision.kind == "http_file"
+    assert m.cli.provision.dest == "/usr/local/bin/proton-drive"
+    assert {
+        "fs_list",
+        "fs_upload",
+        "fs_download",
+        "sharing_status",
+        "photo_timeline",
+        "album_list",
+        "album_photos",
+    } <= {t.name for t in m.tools}
+    assert "login" not in {t.name for t in m.tools}
+
+
+def test_load_agent_mail_example():
+    m = load_manifest(AGENT_MAIL)
+    assert m.backend == "json_cli"
+    assert m.auth.type == "oauth_link"
+    assert m.auth.wants_browser_capture()
+    assert m.auth.token_paste is False
+    assert m.cli is not None
+    assert m.cli.command == ["node", "scripts/agent-mail.cjs"]
+    assert m.cli.provision is None
+    assert m.cli.identity.agent_name is None
+    assert {
+        "me",
+        "message_list",
+        "message_read",
+        "message_search",
+        "message_send",
+        "message_reply",
+        "message_forward",
+        "message_trash",
+        "message_delete",
+        "attachment_upload",
+        "attachment_download",
+    } <= {t.name for t in m.tools}
+    assert "login" not in {t.name for t in m.tools}
+    send = next(t for t in m.tools if t.name == "message_send")
+    assert "confirmation_token" in send.input
+
+
 def test_absolute_cli_requires_provision():
     from portunus_skill_bridge.manifest import Manifest
 
@@ -82,7 +135,7 @@ def test_absolute_cli_requires_provision():
         )
 
 
-def test_provision_requires_absolute_command():
+def test_provision_requires_absolute_dest():
     from portunus_skill_bridge.manifest import Manifest
 
     with pytest.raises(Exception, match="absolute"):
@@ -91,8 +144,9 @@ def test_provision_requires_absolute_command():
                 "name": "x",
                 "backend": "json_cli",
                 "cli": {
-                    "command": ["cubox-cli"],
+                    "command": ["node", "scripts/x.cjs"],
                     "provision": {
+                        "kind": "github_release",
                         "repo": "OLCUBO/cubox-cli",
                         "tag": "v1.0.10",
                         "asset": "cubox-cli-{version}-linux-{arch}.tar.gz",
@@ -101,6 +155,31 @@ def test_provision_requires_absolute_command():
                 "tools": [{"name": "t", "description": "d", "cli": "t"}],
             }
         )
+
+
+def test_http_file_provision_with_node_wrapper():
+    from portunus_skill_bridge.manifest import Manifest
+
+    m = Manifest.model_validate(
+        {
+            "name": "x",
+            "backend": "json_cli",
+            "cli": {
+                "command": ["node", "scripts/x.cjs"],
+                "provision": {
+                    "kind": "http_file",
+                    "url": "https://example.com/bin/{arch}",
+                    "sha512": "a" * 128,
+                    "dest": "/usr/local/bin/x",
+                    "binary": "x",
+                },
+            },
+            "tools": [{"name": "t", "description": "d", "cli": "t"}],
+        }
+    )
+    assert m.cli is not None
+    assert m.cli.provision is not None
+    assert m.cli.provision.dest == "/usr/local/bin/x"
 
 
 def test_load_flyai_example():

@@ -34,6 +34,14 @@ def _manifests_dir() -> Path:
     raise SystemExit("discover-vendor-clis: no manifests dir found")
 
 
+def _emit(rec: dict) -> None:
+    dest = str(rec.get("dest") or "")
+    if not dest.startswith("/"):
+        print(f"skip {rec.get('name')}: dest must be absolute", file=sys.stderr)
+        return
+    print(json.dumps(rec, separators=(",", ":")))
+
+
 def main() -> int:
     # Prefer packaged loader (validates schema); fall back to PyYAML if unavailable.
     root = Path(__file__).resolve().parent.parent
@@ -59,21 +67,37 @@ def main() -> int:
                 continue
             if m.cli is None or m.cli.provision is None:
                 continue
-            dest = m.cli.command[0]
             prov = m.cli.provision
+            dest = prov.dest or m.cli.command[0]
             binary = prov.binary or Path(dest).name
-            tag = prov.tag
-            version = tag[1:] if tag.startswith("v") and len(tag) > 1 else tag
-            asset = prov.asset.replace("{version}", version).replace("{tag}", tag)
-            rec = {
-                "name": m.name,
-                "dest": dest,
-                "kind": prov.kind,
-                "repo": prov.repo,
-                "tag": tag,
-                "asset": asset,
-                "binary": binary,
-            }
+            kind = prov.kind
+            if kind == "github_release":
+                tag = prov.tag or ""
+                version = tag[1:] if tag.startswith("v") and len(tag) > 1 else tag
+                asset = (prov.asset or "").replace("{version}", version).replace("{tag}", tag)
+                rec = {
+                    "name": m.name,
+                    "dest": dest,
+                    "kind": kind,
+                    "repo": prov.repo or "",
+                    "tag": tag,
+                    "asset": asset,
+                    "binary": binary,
+                    "url": "",
+                    "sha512": "",
+                }
+            else:
+                rec = {
+                    "name": m.name,
+                    "dest": dest,
+                    "kind": kind,
+                    "repo": "",
+                    "tag": "",
+                    "asset": "",
+                    "binary": binary,
+                    "url": prov.url or "",
+                    "sha512": prov.sha512 or "",
+                }
         else:
             try:
                 import yaml  # type: ignore
@@ -97,38 +121,61 @@ def main() -> int:
             cmd = cli.get("command") or []
             if not isinstance(prov, dict) or not isinstance(cmd, list) or not cmd:
                 continue
-            dest = str(cmd[0])
-            repo = prov.get("repo")
-            tag = prov.get("tag")
-            asset_raw = prov.get("asset")
-            if not all(isinstance(x, str) and x.strip() for x in (repo, tag, asset_raw)):
-                print(f"skip {path.name}: provision needs non-empty repo/tag/asset", file=sys.stderr)
-                continue
-            tag_s = str(tag).strip()
-            version = tag_s[1:] if tag_s.startswith("v") and len(tag_s) > 1 else tag_s
-            asset = str(asset_raw).replace("{version}", version).replace("{tag}", tag_s)
+            kind = str(prov.get("kind") or "github_release")
+            dest = str(prov.get("dest") or cmd[0])
             binary = prov.get("binary") or Path(dest).name
             if not isinstance(binary, str) or "/" in binary or "\\" in binary:
                 print(f"skip {path.name}: provision.binary must be a basename", file=sys.stderr)
                 continue
-            rec = {
-                "name": data.get("name") or path.stem,
-                "dest": dest,
-                "kind": prov.get("kind") or "github_release",
-                "repo": str(repo).strip(),
-                "tag": tag_s,
-                "asset": asset,
-                "binary": binary,
-            }
+            if kind == "github_release":
+                repo = prov.get("repo")
+                tag = prov.get("tag")
+                asset_raw = prov.get("asset")
+                if not all(isinstance(x, str) and x.strip() for x in (repo, tag, asset_raw)):
+                    print(f"skip {path.name}: provision needs non-empty repo/tag/asset", file=sys.stderr)
+                    continue
+                tag_s = str(tag).strip()
+                version = tag_s[1:] if tag_s.startswith("v") and len(tag_s) > 1 else tag_s
+                asset = str(asset_raw).replace("{version}", version).replace("{tag}", tag_s)
+                rec = {
+                    "name": data.get("name") or path.stem,
+                    "dest": dest,
+                    "kind": kind,
+                    "repo": str(repo).strip(),
+                    "tag": tag_s,
+                    "asset": asset,
+                    "binary": binary,
+                    "url": "",
+                    "sha512": "",
+                }
+            elif kind == "http_file":
+                url = prov.get("url")
+                if not isinstance(url, str) or not url.startswith("https://"):
+                    print(f"skip {path.name}: http_file needs https url", file=sys.stderr)
+                    continue
+                rec = {
+                    "name": data.get("name") or path.stem,
+                    "dest": dest,
+                    "kind": kind,
+                    "repo": "",
+                    "tag": "",
+                    "asset": "",
+                    "binary": binary,
+                    "url": url,
+                    "sha512": str(prov.get("sha512") or ""),
+                }
+            else:
+                print(f"skip {path.name}: unsupported kind {kind}", file=sys.stderr)
+                continue
 
-        if not dest.startswith("/"):
+        if not str(rec["dest"]).startswith("/"):
             print(f"skip {path.name}: dest must be absolute", file=sys.stderr)
             continue
-        if dest in seen_dest:
-            print(f"skip {path.name}: duplicate dest {dest}", file=sys.stderr)
+        if rec["dest"] in seen_dest:
+            print(f"skip {path.name}: duplicate dest {rec['dest']}", file=sys.stderr)
             continue
-        seen_dest.add(dest)
-        print(json.dumps(rec, separators=(",", ":")))
+        seen_dest.add(rec["dest"])
+        _emit(rec)
     return 0
 
 

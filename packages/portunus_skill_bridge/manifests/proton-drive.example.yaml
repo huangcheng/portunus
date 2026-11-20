@@ -1,0 +1,222 @@
+# Proton Drive — official proton-drive CLI via skill-bridge (no hosted MCP).
+# Auth: browser oauth_link (Connect). MCP tools are post-auth filesystem/sharing.
+# Do not expose auth login/logout as MCP tools.
+
+name: proton-drive
+version: "0.9.0"
+backend: json_cli
+
+auth:
+  type: oauth_link
+  login_env:
+    PROTON_DRIVE_CREDENTIALS_STORE: unsafe_file
+  actions:
+    login: login
+    status: login-status
+    logout: logout
+  browser_capture: true
+  capture_timeout_s: 180
+  poll_interval_s: 2
+  token_paste: false
+  pending_codes: [-114, -106]
+  success_code: 0
+  connect_hint: "Open the Proton sign-in link (another device is fine). Keep Connect open until login finishes. Session stays on the runner under STATE_DIR."
+
+cli:
+  command: ["node", "scripts/proton-drive.cjs"]
+  cwd: ${SKILL_ROOT}
+  identity: {}
+  run_wrapper: raw
+  provision:
+    kind: http_file
+    url: "https://proton.me/download/drive/cli/0.9.0/linux-{arch}/proton-drive"
+    sha512: "3533025ba69ae112b64e3e01fbcc1ad0688136a4043f6cf6a72886967d85fdcd9ec235479c2e113171614be5225bfba93427509a05ca5aa6071d924fa7e91ca8"
+    dest: /usr/local/bin/proton-drive
+    binary: proton-drive
+
+tools:
+  - name: fs_list
+    description: "List Drive paths (/ = section roots; /my-files = files). /photos and /albums are not listable — use photo_timeline / album_list."
+    cli: fs-list
+    input:
+      path:
+        type: string
+        required: true
+        description: Remote POSIX path under Drive (not /photos or /albums)
+      type:
+        type: string
+        description: "Optional filter: file|folder|album|photo"
+
+  - name: fs_info
+    description: "Metadata for a concrete Drive path under /my-files (not section roots like /photos)"
+    cli: fs-info
+    input:
+      path:
+        type: string
+        required: true
+
+  - name: fs_size
+    description: "Folder/file size under /my-files (not /photos, /albums, or other section roots — use photo_timeline / album_list for Photos)"
+    cli: fs-size
+    input:
+      path:
+        type: string
+        required: true
+        description: Concrete path (e.g. /my-files or /my-files/Docs)
+
+  - name: fs_mkdir
+    description: Create a folder under parentPath
+    cli: fs-mkdir
+    input:
+      parent_path:
+        type: string
+        required: true
+      name:
+        type: string
+        required: true
+
+  - name: fs_upload
+    description: Upload a local file/folder on the runner into a remote parent path
+    cli: fs-upload
+    input:
+      local_path:
+        type: string
+        required: true
+      parent_path:
+        type: string
+        required: true
+      file_conflict_strategy:
+        type: string
+        description: create-new-revision|rename|replace|skip
+      folder_conflict_strategy:
+        type: string
+        description: merge|rename|replace|skip
+
+  - name: fs_download
+    description: Download remote path(s) into a local folder on the runner
+    cli: fs-download
+    input:
+      path:
+        type: string
+        required: true
+      local_folder:
+        type: string
+        required: true
+      file_conflict_strategy:
+        type: string
+      folder_conflict_strategy:
+        type: string
+
+  - name: fs_rename
+    description: Rename a remote node in place
+    cli: fs-rename
+    input:
+      path:
+        type: string
+        required: true
+      new_name:
+        type: string
+        required: true
+
+  - name: fs_move
+    description: Move a remote path into a target parent
+    cli: fs-move
+    input:
+      path:
+        type: string
+        required: true
+      target_parent_path:
+        type: string
+        required: true
+
+  - name: fs_copy
+    description: Copy a remote path into a target parent
+    cli: fs-copy
+    input:
+      path:
+        type: string
+        required: true
+      target_parent_path:
+        type: string
+        required: true
+      name:
+        type: string
+        description: Optional new name for a single source
+
+  - name: fs_trash
+    description: Move a remote path to Trash
+    cli: fs-trash
+    input:
+      path:
+        type: string
+        required: true
+
+  - name: fs_restore
+    description: Restore a path from Trash
+    cli: fs-restore
+    input:
+      path:
+        type: string
+        required: true
+
+  - name: fs_delete
+    description: Permanently delete a path (usually already in Trash)
+    cli: fs-delete
+    input:
+      path:
+        type: string
+        required: true
+
+  - name: sharing_status
+    description: Show sharing members and link settings for a path
+    cli: sharing-status
+    input:
+      path:
+        type: string
+        required: true
+
+  - name: sharing_invite
+    description: Invite a user by email to a path
+    cli: sharing-invite
+    input:
+      path:
+        type: string
+        required: true
+      user:
+        type: string
+        required: true
+        description: Proton email
+      role:
+        type: string
+      message:
+        type: string
+
+  - name: invitation_list
+    description: List pending invitations received
+    cli: invitation-list
+    input: {}
+
+  - name: photo_timeline
+    description: List photos in the Proton Photos library timeline (use instead of fs_list /photos)
+    cli: photo-timeline
+    input:
+      load_details:
+        type: boolean
+        description: Include extra photo details when true
+
+  - name: album_list
+    description: List Proton Photo albums (use instead of fs_list /albums)
+    cli: album-list
+    input: {}
+
+  - name: album_photos
+    description: List photos in an album path from album_list
+    cli: album-photos
+    input:
+      path:
+        type: string
+        required: true
+        description: Album path from album_list
+      load_details:
+        type: boolean
+        description: Include extra photo details when true

@@ -1,0 +1,19 @@
+slug = "agent-mail"
+label = "Agent Mail"
+description = "Tencent Agent Mail (Agently) via official CLI (skill-bridge): browser Connect, then list/read/search/send mail. No hosted MCP; prefers domestic runners."
+connection = "skill_bridge"
+egress = "domestic"
+popular = true
+categories = ["Productivity"]
+tags = ["tencent", "mail", "json_cli", "oauth_link", "agently"]
+sort_order = 23
+
+[spec]
+manifest = "agent-mail.example.yaml"
+secrets = []
+setup_hints = [
+  "Connect opens an Agent Mail authorize link (WeChat / QQ Mail OAuth; another device is fine). CLI docs: [agent.qq.com/doc/cli-setup.md](https://agent.qq.com/doc/cli-setup.md). Runners need Node + `agently-cli` on PATH (or npx). Connect pins HOME=STATE_DIR so the CLI keychain/session matches tool calls.",
+]
+[spec.env_defaults]
+SKILL_ROOT = "/var/lib/portunus/skills/agent-mail"
+STATE_DIR = "/var/lib/portunus/skill-state/agent-mail"

@@ -35,6 +35,8 @@ export type AppIconId =
   | "weknora"
   | "pikpak"
   | "qqmusic"
+  | "xunlei"
+  | "proton-drive"
   | "generic";
 
 export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
@@ -72,6 +74,8 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "weknora") return "weknora";
   if (slug === "pikpak") return "pikpak";
   if (slug === "qqmusic" || slug === "qq-music") return "qqmusic";
+  if (slug === "xunlei" || slug === "thunder") return "xunlei";
+  if (slug === "proton-drive" || slug === "protondrive" || slug === "proton") return "proton-drive";
   return "generic";
 }
 
@@ -109,6 +113,8 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   weknora: "weknora.png",
   pikpak: "pikpak.png",
   qqmusic: "qqmusic.png",
+  xunlei: "xunlei.png",
+  "proton-drive": "proton-drive.png",
 };
 
 export function AppBrandMark({
