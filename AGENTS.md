@@ -44,7 +44,8 @@ Product-scoped hosted marketplace URLs (e.g. Tencent MCP 广场 SSE) count as
 remote and beat stdio. Document how the operator gets the URL or token in
 `setup_hints`.
 
-Exception: **阿里云** ships as `stdio` + AccessKey (`alibabacloud.mcp-proxy`)
-because Aliyun’s remote OpenAPI MCP OAuth/DCR path is impractical for Portunus
-(redirect URI / Custom OAuth friction). Prefer remote again if that path becomes
-reliable.
+**阿里云** remote OAuth cannot use DCR: `/register` always returns the official
+client and ignores custom `redirect_uris` (→ `redirect_uri_mismatch` for
+Portunus). Use Custom OAuth — operator pastes a RAM OAuth 2.1 Web/Native Client
+ID (no secret; PKCE) registered with Portunus’s callback, and sets Core →
+自定义 OAuth to that app.

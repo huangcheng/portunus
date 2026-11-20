@@ -191,6 +191,10 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
       if (issuer) out.issuer = issuer;
       const method = String(spec.token_endpoint_auth_method ?? "").trim();
       if (method) out.token_endpoint_auth_method = method;
+      const authScheme = String(spec.authorization_scheme ?? "").trim();
+      if (authScheme) out.authorization_scheme = authScheme;
+      const scopeDelim = String(spec.scope_delimiter ?? "").trim();
+      if (scopeDelim) out.scope_delimiter = scopeDelim;
       if (spec.use_cimd === true) out.use_cimd = true;
       if (spec.allow_bearer_token === true) out.allow_bearer_token = true;
       if (spec.url_from_operator === true) {

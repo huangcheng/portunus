@@ -1,0 +1,28 @@
+slug = "yandex-mail"
+label = "Yandex Mail"
+description = "Yandex Mail via official Yandex 360 MCP (read/search/drafts/labels; no send). Paste the OAuth token from Yandex’s Mail MCP page."
+connection = "oauth"
+egress = "overseas"
+popular = true
+categories = ["Productivity"]
+tags = ["yandex", "mail", "mcp", "oauth"]
+sort_order = 27
+
+[spec]
+url = "https://mcp.360.yandex.net/v1/mail/mcp"
+authorize_url = "https://oauth.yandex.ru/authorize"
+token_url = "https://oauth.yandex.ru/token"
+token_endpoint_auth_method = "client_secret_post"
+authorization_scheme = "OAuth"
+allow_bearer_token = true
+scopes = [
+  "mail:messages.read",
+  "mail:messages.write",
+  "mail:folders.read",
+  "mail:folders.write",
+  "mail:labels.read",
+  "mail:labels.write",
+]
+setup_hints = [
+  "On the [Yandex Mail MCP](https://yandex.ru/dev/yandex-360/mcp/ru/mail) docs page, use **Get OAuth token**, then paste it at Connect. Self-registered OAuth apps currently get MCP ``tools/list`` 403. No send.",
+]

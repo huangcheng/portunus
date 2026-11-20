@@ -1,0 +1,31 @@
+slug = "vivaldi-mail"
+label = "Vivaldi Mail"
+description = "Vivaldi.net webmail via Himalaya IMAP/SMTP (shared himalaya-shim). Paste address + password (or app password if 2FA is on)."
+connection = "skill_bridge"
+egress = "overseas"
+popular = true
+categories = ["Productivity"]
+tags = ["vivaldi", "mail", "imap", "smtp", "himalaya"]
+sort_order = 27
+
+[spec]
+manifest = "himalaya.example.yaml"
+setup_hints = [
+  "Use your full ``@vivaldi.net`` address. With 2FA off, the account password works; with 2FA on, create an app password on Vivaldi.net. Hosts default to imap.vivaldi.net / smtp.vivaldi.net. Docs: [help.vivaldi.com](https://help.vivaldi.com/services/webmail/setting-up-vivaldi-mail-in-a-mail-client/).",
+]
+
+[[spec.secrets]]
+name = "MAIL_ADDRESS"
+label = "Vivaldi Mail address"
+secret = false
+
+[[spec.secrets]]
+name = "MAIL_PASSWORD"
+label = "Password or app password"
+secret = true
+
+[spec.env_defaults]
+IMAP_URL = "imaps://imap.vivaldi.net:993"
+SMTP_URL = "smtps://smtp.vivaldi.net:465"
+SKILL_ROOT = "/var/lib/portunus/skills/himalaya-shim"
+STATE_DIR = "/var/lib/portunus/skill-state/vivaldi-mail"

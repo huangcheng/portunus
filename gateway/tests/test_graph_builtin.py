@@ -42,11 +42,26 @@ async def test_list_tools_without_auth():
     assert ei.value.code == "auth_required"
 
 
-async def test_onedrive_tool_catalog():
+async def test_list_tools_with_bad_bearer_raises():
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url).startswith("https://graph.microsoft.com/v1.0/me")
+        return httpx.Response(401, text="unauthorized")
+
     client = GraphBuiltinClient(
-        "portunus-graph://onedrive",
-        headers={"Authorization": "Bearer x"},
+        "portunus-graph://mail",
+        headers={"Authorization": "Bearer dead"},
+        transport=httpx.MockTransport(handler),
     )
+    with pytest.raises(PortunusError) as ei:
+        await client.list_tools()
+    assert ei.value.code == "auth_required"
+
+
+async def test_onedrive_tool_catalog():
+    # No vaulted bearer → static catalog only (pre-Connect preview).
+    client = GraphBuiltinClient("portunus-graph://onedrive", headers={})
     tools = await client.list_tools()
     names = {t["name"] for t in tools}
     assert "list_children" in names and "upload_text" in names

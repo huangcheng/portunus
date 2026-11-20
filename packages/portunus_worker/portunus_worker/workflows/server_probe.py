@@ -3,6 +3,12 @@
 Probe activities run on ``portunus-probe`` (gateway-embedded sole-client pool).
 Per-server failures stay in activities so one hung probe cannot stall the queue.
 Site pick / GFW failover lives in ``Registry.probe`` (preferred_regions + SiteHealth).
+
+**Credential health:** this workflow *is* the fleet credential check. First-party
+builtins (Graph / JMAP) and remote MCP ``tools/list`` must authenticate when a
+vault Authorization is present so revoked tokens / bad passwords become
+``auth_required`` here — do not add a parallel Temporal “credential-health”
+loop. OAuth access-token renewal stays in ``OAuthRefreshWorkflow``.
 """
 
 from __future__ import annotations

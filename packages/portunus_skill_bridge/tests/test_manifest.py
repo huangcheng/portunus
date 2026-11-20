@@ -93,6 +93,24 @@ def test_load_proton_drive_example():
     assert "login" not in {t.name for t in m.tools}
 
 
+def test_load_himalaya_example():
+    m = load_manifest(ROOT / "manifests" / "himalaya.example.yaml")
+    assert m.backend == "json_cli"
+    assert m.auth.type == "none"
+    assert m.cli is not None
+    assert m.cli.command == ["/var/lib/portunus/skills/himalaya-shim/run"]
+    assert m.cli.provision is not None
+    assert m.cli.provision.repo == "pimalaya/himalaya"
+    assert "{gnu_arch}" in (m.cli.provision.asset or "")
+    assert {
+        "mailbox_list",
+        "envelope_list",
+        "envelope_search",
+        "message_read",
+        "message_send",
+    } <= {t.name for t in m.tools}
+
+
 def test_load_agent_mail_example():
     m = load_manifest(AGENT_MAIL)
     assert m.backend == "json_cli"

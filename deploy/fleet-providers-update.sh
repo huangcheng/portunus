@@ -10,9 +10,9 @@
 #   PORTUNUS_FLEET_HOSTS="runner-a runner-b" deploy/fleet-providers-update.sh
 #
 # --components LIST  Comma-separated subset of:
-#                      rclone, skills, clis, skill_bridge
-#                    (default: all four). Order is always
-#                      rclone → skills → clis → skill_bridge.
+#                      rclone, skills, clis, himalaya, skill_bridge
+#                    (default: all). Order is always
+#                      rclone → skills → clis → himalaya → skill_bridge.
 # --from DIR         Passed through to fleet-skills.sh as skill-tree source.
 #
 # Env:
@@ -28,7 +28,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 SSH_OPTS=(-o ConnectTimeout=15 -o BatchMode=yes)
-COMPONENTS="rclone,skills,clis,skill_bridge"
+COMPONENTS="rclone,skills,clis,himalaya,skill_bridge"
 FROM=""
 
 while [[ $# -gt 0 ]]; do
@@ -70,6 +70,7 @@ done
 want_rclone=0
 want_skills=0
 want_clis=0
+want_himalaya=0
 want_bridge=0
 IFS=',' read -r -a _parts <<<"$COMPONENTS"
 for raw in "${_parts[@]}"; do
@@ -79,13 +80,14 @@ for raw in "${_parts[@]}"; do
     rclone) want_rclone=1 ;;
     skills|skill|trees) want_skills=1 ;;
     clis|cli|tools|vendor|vendor_clis|vendor-clis) want_clis=1 ;;
+    himalaya|himalaya-shim|imap) want_himalaya=1 ;;
     skill_bridge|skill-bridge|bridge) want_bridge=1 ;;
     *)
-      echo "unknown component: $raw (want rclone,skills,clis,skill_bridge)" >&2
+      echo "unknown component: $raw (want rclone,skills,clis,himalaya,skill_bridge)" >&2
       exit 2 ;;
   esac
 done
-[[ $want_rclone -eq 1 || $want_skills -eq 1 || $want_clis -eq 1 || $want_bridge -eq 1 ]] || {
+[[ $want_rclone -eq 1 || $want_skills -eq 1 || $want_clis -eq 1 || $want_himalaya -eq 1 || $want_bridge -eq 1 ]] || {
   echo "no components selected" >&2
   exit 2
 }
@@ -100,7 +102,7 @@ if [[ -z "${PORTUNUS_RCLONE_CACHE:-}" ]]; then
   fi
 fi
 
-echo "components: rclone=$want_rclone skills=$want_skills clis=$want_clis skill_bridge=$want_bridge"
+echo "components: rclone=$want_rclone skills=$want_skills clis=$want_clis himalaya=$want_himalaya skill_bridge=$want_bridge"
 echo "hosts: ${HOSTS[*]}"
 echo "rclone cache: $PORTUNUS_RCLONE_CACHE"
 
@@ -109,6 +111,7 @@ fail=0
 st_rclone=na
 st_skills=na
 st_clis=na
+st_himalaya=na
 st_bridge=na
 
 run_component() {
@@ -152,6 +155,19 @@ fi
 if [[ "$want_clis" -eq 1 ]]; then
   echo "=== provision vendor CLIs (cubox-cli, …) ==="
   run_component clis st_clis bash "$HERE/provision-vendor-clis.sh" "${HOSTS[@]}"
+fi
+
+if [[ "$want_himalaya" -eq 1 ]]; then
+  echo "=== provision himalaya-shim (IMAP/SMTP) ==="
+  if [[ -z "${PORTUNUS_HIMALAYA_CACHE:-}" ]]; then
+    if [[ -w "$HERE/himalaya-shim" ]]; then
+      export PORTUNUS_HIMALAYA_CACHE="$HERE/himalaya-shim"
+    else
+      export PORTUNUS_HIMALAYA_CACHE="/var/lib/portunus/cache/himalaya"
+      mkdir -p "$PORTUNUS_HIMALAYA_CACHE"
+    fi
+  fi
+  run_component himalaya st_himalaya bash "$HERE/provision-himalaya-shim.sh" "${HOSTS[@]}"
 fi
 
 resolve_skill_bridge_src() {
@@ -212,7 +228,7 @@ if [[ "$want_bridge" -eq 1 ]]; then
 fi
 
 # Machine-readable summary for Temporal activity / operators.
-echo "COMPONENT_STATUS rclone=$st_rclone skills=$st_skills clis=$st_clis skill_bridge=$st_bridge"
+echo "COMPONENT_STATUS rclone=$st_rclone skills=$st_skills clis=$st_clis himalaya=$st_himalaya skill_bridge=$st_bridge"
 
 if [[ "$fail" -ne 0 ]]; then
   echo "fleet-providers-update: one or more steps failed" >&2

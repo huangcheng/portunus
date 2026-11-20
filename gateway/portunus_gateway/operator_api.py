@@ -159,7 +159,12 @@ class EnableBody(BaseModel):
 class BearerTokenBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    token: str = Field(min_length=1, max_length=8192)
+    token: str = Field(min_length=1, max_length=16384)
+    # Optional refresh material (QQ Mail / Codex mcp login). Also accepted inside
+    # ``token`` when it is a JSON object with access_token / refresh_token / client_id.
+    refresh_token: str | None = Field(default=None, max_length=8192)
+    client_id: str | None = Field(default=None, max_length=512)
+    expires_in: int | None = Field(default=None, ge=1, le=31_536_000)
 
 
 class OAuthStartBody(BaseModel):
@@ -394,7 +399,14 @@ async def set_server_token(
     registry: Registry = Depends(get_registry),
 ) -> dict[str, Any]:
     """Paste a bearer token (or full ``Authorization`` value) into the vault."""
-    return await registry.set_bearer_token(server_id, body.token, actor)
+    return await registry.set_bearer_token(
+        server_id,
+        body.token,
+        actor,
+        refresh_token=body.refresh_token,
+        client_id=body.client_id,
+        expires_in=body.expires_in,
+    )
 
 
 @router.post("/servers/{server_id}/oauth/start")
@@ -490,6 +502,7 @@ async def oauth_start(
         redirect_uri=redirect_uri,
         resource=cfg.get("resource"),
         issuer=cfg.get("issuer"),
+        scope_delimiter=str(cfg.get("scope_delimiter") or " "),
     )
     await _audit(registry, actor, "server.oauth_start", str(server_id), {})
     return started

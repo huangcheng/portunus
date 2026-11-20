@@ -50,8 +50,10 @@ from .oauth import (
     OAUTH_REFRESH_TOKEN_NAME,
     OAuthError,
     TokenBundle,
+    apply_authorization_scheme,
     canonicalize_authorization,
     oauth_public_view,
+    parse_pasted_oauth_credentials,
     refresh_access_token,
     validate_oauth_config,
 )
@@ -1000,6 +1002,66 @@ class Registry:
     def _recipe_url_is_credential_static(recipe_slug: str) -> bool | None:
         return RegistryStore._recipe_spec_flag_static(recipe_slug, "url_is_credential")
 
+    async def _oauth_recipe_blob(self, recipe_slug: str) -> dict[str, Any] | None:
+        """OAuth endpoint fields from a catalog recipe (for refresh-capable token paste)."""
+        key = (recipe_slug or "").casefold()
+        if not key:
+            return None
+        spec: dict[str, Any] | None = None
+        try:
+            from .toml_catalog import get_loaded
+
+            loaded = get_loaded()
+        except Exception:  # noqa: BLE001
+            loaded = None
+        if loaded is not None:
+            for recipe in loaded.recipes:
+                if recipe.slug.casefold() == key and recipe.enabled:
+                    if recipe.connection == "oauth" and isinstance(recipe.spec, dict):
+                        spec = dict(recipe.spec)
+                    break
+        if spec is None:
+            from .catalog import DEFAULT_APPS
+
+            for app in DEFAULT_APPS:
+                if str(app.get("slug", "")).casefold() != key:
+                    continue
+                if app.get("connection") == "oauth" and isinstance(app.get("spec"), dict):
+                    spec = dict(app["spec"])
+                break
+        if spec is None:
+            async with self._sf() as s:
+                row = (
+                    await s.execute(select(CatalogApp).where(CatalogApp.slug == key))
+                ).scalar_one_or_none()
+                if (
+                    row is not None
+                    and row.connection == "oauth"
+                    and isinstance(row.spec, dict)
+                ):
+                    spec = dict(row.spec)
+        if not spec:
+            return None
+        out: dict[str, Any] = {}
+        for key_name in (
+            "authorize_url",
+            "token_url",
+            "scopes",
+            "resource",
+            "issuer",
+            "registration_endpoint",
+            "token_endpoint_auth_method",
+            "authorization_scheme",
+            "scope_delimiter",
+            "use_cimd",
+            "client_id",
+        ):
+            if key_name in spec and spec[key_name] not in (None, ""):
+                out[key_name] = spec[key_name]
+        if not out.get("authorize_url") or not out.get("token_url"):
+            return None
+        return out
+
     async def _catalog_has_slug(self, slug: str) -> bool:
         if self._static_catalog_has_slug(slug):
             return True
@@ -1911,24 +1973,102 @@ class Registry:
 
         return await self._commit_probe(server_id, actor, incoming, audit_extra)
 
-    async def set_bearer_token(self, server_id: uuid.UUID, token: str, actor: str) -> dict[str, Any]:
-        """Paste-token: store ``Authorization`` in the vault (operator session required)."""
-        if not isinstance(token, str) or not token.strip() or "\x00" in token:
-            raise RegistryError(422, "invalid_request", "token required")
-        token = token.strip()
+    async def set_bearer_token(
+        self,
+        server_id: uuid.UUID,
+        token: str,
+        actor: str,
+        *,
+        refresh_token: str | None = None,
+        client_id: str | None = None,
+        expires_in: int | None = None,
+    ) -> dict[str, Any]:
+        """Paste-token: store ``Authorization`` (and optional refresh) in the vault.
+
+        ``token`` may be a bare access token or JSON with ``access_token`` /
+        ``refresh_token`` / ``client_id`` / ``expires_in`` (QQ Mail / Codex mcp login).
+        Explicit ``refresh_token`` / ``client_id`` / ``expires_in`` kwargs override JSON.
+        Access-only paste clears any prior refresh token; refresh paste keeps it so
+        ``OAuthRefreshWorkflow`` can renew.
+        """
+        try:
+            pasted = parse_pasted_oauth_credentials(token)
+        except OAuthError as e:
+            raise RegistryError(e.status, e.code, e.message) from e
+        access = pasted.access_token
+        refresh = (
+            refresh_token.strip()
+            if isinstance(refresh_token, str) and refresh_token.strip()
+            else pasted.refresh_token
+        )
+        cid = (
+            client_id.strip()
+            if isinstance(client_id, str) and client_id.strip()
+            else pasted.client_id
+        )
+        exp = expires_in if isinstance(expires_in, int) and expires_in > 0 else pasted.expires_in
         value = canonicalize_authorization(
-            token if token.lower().startswith("bearer ") else f"Bearer {token}"
+            access
+            if access.lower().startswith(("bearer ", "oauth "))
+            else f"Bearer {access}"
         )
         async with self._sf() as s:
             server = await self._get_server(s, server_id)
             if server.kind != "remote":
                 raise RegistryError(400, "unsupported", "only remote servers take a bearer token")
+            # Yandex MCP needs ``OAuth <token>`` even when the operator pastes a raw token.
+            scheme = None
+            if isinstance(server.oauth, dict):
+                scheme = server.oauth.get("authorization_scheme")
+            try:
+                value = apply_authorization_scheme(value, scheme)
+            except OAuthError as e:
+                raise RegistryError(e.status, e.code, e.message) from e
+            # Hydrate oauth endpoints from the catalog recipe when paste includes
+            # refresh/client_id but the server was created without oauth metadata.
+            if (refresh or cid) and (
+                not isinstance(server.oauth, dict)
+                or not server.oauth.get("token_url")
+                or not server.oauth.get("authorize_url")
+            ):
+                recipe = await self._oauth_recipe_blob(server.recipe_slug or server.slug)
+                if recipe is not None:
+                    base = dict(recipe)
+                    if isinstance(server.oauth, dict):
+                        base.update({k: v for k, v in server.oauth.items() if v not in (None, "")})
+                    try:
+                        server.oauth = validate_oauth_config(base)
+                    except OAuthError as e:
+                        raise RegistryError(e.status, e.code, e.message) from e
+            if cid:
+                oauth = dict(server.oauth) if isinstance(server.oauth, dict) else {}
+                oauth["client_id"] = cid
+                try:
+                    server.oauth = validate_oauth_config(oauth)
+                except OAuthError as e:
+                    raise RegistryError(e.status, e.code, e.message) from e
             await self._upsert_vault(s, server, AUTH_HEADER_NAME, value)
-            # Paste is not an OAuth refresh cycle — drop any stale refresh token.
-            await self._delete_vault(s, server_id, OAUTH_REFRESH_TOKEN_NAME)
-            server.has_oauth_refresh = False
-            server.token_expires_at = None
-            s.add(self._audit(actor, "server.auth_token", server_id, None))
+            if refresh:
+                await self._upsert_vault(s, server, OAUTH_REFRESH_TOKEN_NAME, refresh)
+                server.has_oauth_refresh = True
+                if exp is not None and exp > 0:
+                    server.token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(exp))
+                else:
+                    server.token_expires_at = None
+                detail = {
+                    "has_refresh": True,
+                    "has_client_id": bool(
+                        isinstance(server.oauth, dict) and server.oauth.get("client_id")
+                    ),
+                    "expires_in": exp,
+                }
+            else:
+                # Access-only paste is not an OAuth refresh cycle — drop stale refresh.
+                await self._delete_vault(s, server_id, OAUTH_REFRESH_TOKEN_NAME)
+                server.has_oauth_refresh = False
+                server.token_expires_at = None
+                detail = None
+            s.add(self._audit(actor, "server.auth_token", server_id, detail))
             await s.commit()
             names = await self._env_names(s, server_id)
         await self.clear_error_and_reprobe(server_id, actor)
@@ -1963,7 +2103,15 @@ class Registry:
             server = await self._get_server(s, server_id)
             if server.kind != "remote":
                 raise RegistryError(400, "unsupported", "only remote servers support oauth")
-            await self._upsert_vault(s, server, AUTH_HEADER_NAME, authorization.strip())
+            # Yandex MCP (and similar) need ``OAuth <token>`` despite token_type=bearer.
+            scheme = None
+            if isinstance(server.oauth, dict):
+                scheme = server.oauth.get("authorization_scheme")
+            try:
+                authorization = apply_authorization_scheme(authorization.strip(), scheme)
+            except OAuthError as e:
+                raise RegistryError(e.status, e.code, e.message) from e
+            await self._upsert_vault(s, server, AUTH_HEADER_NAME, authorization)
             if bundle.refresh_token:
                 await self._upsert_vault(s, server, OAUTH_REFRESH_TOKEN_NAME, bundle.refresh_token)
                 server.has_oauth_refresh = True

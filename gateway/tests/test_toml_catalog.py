@@ -136,8 +136,15 @@ def test_packaged_apps_cover_default_apps() -> None:
     enabled = {r.slug for r in loaded.recipes if r.enabled}
     want = {a["slug"] for a in DEFAULT_APPS}
     assert want <= enabled, f"missing TOML recipes: {sorted(want - enabled)}"
+    # Intentional delists use enabled=false in TOML; other disable reasons are bugs.
     disabled = [r for r in loaded.recipes if not r.enabled]
-    assert not disabled, [(r.slug, r.disable_reasons) for r in disabled]
+    unexpected = [
+        (r.slug, r.disable_reasons)
+        for r in disabled
+        if r.disable_reasons != ["disabled_in_toml"]
+    ]
+    assert not unexpected, unexpected
+    assert "tencentcloud" in {r.slug for r in disabled}
 
 
 def test_skill_bridge_toml_secrets_are_objects() -> None:

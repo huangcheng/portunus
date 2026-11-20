@@ -52,12 +52,17 @@ COPY gateway gateway
 COPY deploy/fleet-skills.sh deploy/fleet-skills.sh
 COPY deploy/fleet-providers-update.sh deploy/fleet-providers-update.sh
 COPY deploy/provision-rclone-shim.sh deploy/provision-rclone-shim.sh
+COPY deploy/provision-himalaya-shim.sh deploy/provision-himalaya-shim.sh
 COPY deploy/provision-vendor-clis.sh deploy/provision-vendor-clis.sh
 COPY deploy/discover-vendor-clis.py deploy/discover-vendor-clis.py
 COPY deploy/rclone-shim/shim deploy/rclone-shim/shim
+COPY deploy/himalaya-shim/run deploy/himalaya-shim/run
+COPY deploy/himalaya-shim/himalaya_config.py deploy/himalaya-shim/himalaya_config.py
 RUN chmod 755 deploy/fleet-skills.sh deploy/fleet-providers-update.sh \
-      deploy/provision-rclone-shim.sh deploy/provision-vendor-clis.sh \
-      deploy/discover-vendor-clis.py deploy/rclone-shim/shim
+      deploy/provision-rclone-shim.sh deploy/provision-himalaya-shim.sh \
+      deploy/provision-vendor-clis.sh \
+      deploy/discover-vendor-clis.py deploy/rclone-shim/shim \
+      deploy/himalaya-shim/run
 # Re-declare so this layer sees the index (ARG scope is per-stage otherwise).
 ARG PIP_INDEX
 # uv 0.13 reads UV_DEFAULT_INDEX; keep UV_INDEX_URL as a compat alias.

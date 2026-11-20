@@ -18,9 +18,11 @@ from portunus_gateway.oauth import (
     OAuthError,
     OAuthPending,
     OAuthStore,
+    apply_authorization_scheme,
     canonicalize_authorization,
     exchange_code,
     new_pkce,
+    parse_pasted_oauth_credentials,
     refresh_access_token,
     validate_oauth_config,
 )
@@ -180,6 +182,32 @@ async def test_refresh_access_token_keeps_prior_refresh_when_omitted():
     assert body["refresh_token"] == ["rt-old"]
 
 
+def test_parse_pasted_oauth_credentials_json_and_bare():
+    bare = parse_pasted_oauth_credentials("atok")
+    assert bare.access_token == "atok"
+    assert bare.refresh_token is None
+    blob = parse_pasted_oauth_credentials(
+        json.dumps(
+            {
+                "access_token": "a1",
+                "refresh_token": "r1",
+                "client_id": "cid-qq",
+                "expires_in": 3600,
+            }
+        )
+    )
+    assert blob.access_token == "a1"
+    assert blob.refresh_token == "r1"
+    assert blob.client_id == "cid-qq"
+    assert blob.expires_in == 3600
+    nested = parse_pasted_oauth_credentials(
+        json.dumps({"tokens": {"accessToken": "a2", "refreshToken": "r2", "clientId": "c2"}})
+    )
+    assert nested.access_token == "a2"
+    assert nested.refresh_token == "r2"
+    assert nested.client_id == "c2"
+
+
 async def test_create_remote_with_oauth_and_paste_token(http):
     client, registry, _app = http
     r = await client.post(
@@ -234,6 +262,67 @@ async def test_create_remote_with_oauth_and_paste_token(http):
                 )
             )
         ).scalar_one_or_none() is not None
+
+
+async def test_paste_token_json_keeps_refresh_and_client_id(http):
+    client, registry, _app = http
+    r = await client.post(
+        "/api/servers",
+        json={
+            "name": "QQ-like",
+            "slug": "qq-like-paste",
+            "kind": "remote",
+            "url": "https://api.mail.qq.com/mcp",
+            "oauth": {
+                "authorize_url": "https://wx.mail.qq.com/oauth/authorize",
+                "token_url": "https://wx.mail.qq.com/oauth/token",
+                "registration_endpoint": "https://wx.mail.qq.com/oauth/register",
+                "token_endpoint_auth_method": "none",
+                "scopes": ["mail:read"],
+            },
+        },
+    )
+    assert r.status_code == 201, r.text
+    sid = uuid.UUID(r.json()["id"])
+
+    tr = await client.post(
+        f"/api/servers/{sid}/auth/token",
+        json={
+            "token": json.dumps(
+                {
+                    "access_token": "at-qq",
+                    "refresh_token": "rt-qq",
+                    "client_id": "dcr-client",
+                    "expires_in": 120,
+                }
+            )
+        },
+    )
+    assert tr.status_code == 200, tr.text
+    body = tr.json()
+    assert body["has_auth"] is True
+    assert body["has_refresh_token"] is True
+    assert body["oauth"]["client_id"] == "dcr-client"
+
+    async with async_session() as s:
+        refresh_row = (
+            await s.execute(
+                select(VaultEntry).where(
+                    VaultEntry.server_id == sid, VaultEntry.name == OAUTH_REFRESH_TOKEN_NAME
+                )
+            )
+        ).scalar_one()
+        plain = registry.vault.open(
+            bytes(refresh_row.ciphertext),
+            vault_entry_id=str(refresh_row.id),
+            key_version=refresh_row.key_version,
+        ).decode()
+        assert plain == "rt-qq"
+
+    # Access-only paste clears refresh.
+    tr2 = await client.post(f"/api/servers/{sid}/auth/token", json={"token": "only-access"})
+    assert tr2.status_code == 200, tr2.text
+    assert tr2.json()["has_refresh_token"] is False
 
 
 async def test_oauth_start_and_callback_stores_token(http, monkeypatch):
@@ -695,6 +784,59 @@ def test_canonicalize_authorization_rewrites_lowercase_bearer():
     assert canonicalize_authorization("BEARER abc") == "Bearer abc"
     assert canonicalize_authorization("Bearer abc") == "Bearer abc"
     assert canonicalize_authorization("Basic abc") == "Basic abc"
+    # Yandex MCP wants ``OAuth <token>`` — do not rewrite that scheme.
+    assert canonicalize_authorization("OAuth ya-tok") == "OAuth ya-tok"
+
+
+def test_apply_authorization_scheme_rewrites_bearer_to_oauth():
+    assert apply_authorization_scheme("Bearer tok", "OAuth") == "OAuth tok"
+    assert apply_authorization_scheme("bearer tok", "OAuth") == "OAuth tok"
+    assert apply_authorization_scheme("OAuth tok", "OAuth") == "OAuth tok"
+    assert apply_authorization_scheme("Bearer tok", None) == "Bearer tok"
+    with pytest.raises(OAuthError):
+        apply_authorization_scheme("Bearer tok", "Bearer\nInjected")
+
+
+def test_validate_oauth_config_accepts_scheme_and_comma_delimiter():
+    ok = validate_oauth_config(
+        {
+            "authorize_url": "https://oauth.yandex.ru/authorize",
+            "token_url": "https://oauth.yandex.ru/token",
+            "client_id": "cid",
+            "scopes": ["cloud_api:disk.read", "cloud_api:disk.write"],
+            "authorization_scheme": "OAuth",
+            "scope_delimiter": ",",
+            "token_endpoint_auth_method": "client_secret_post",
+        }
+    )
+    assert ok is not None
+    assert ok["authorization_scheme"] == "OAuth"
+    assert ok["scope_delimiter"] == ","
+    with pytest.raises(OAuthError):
+        validate_oauth_config(
+            {
+                "authorize_url": "https://oauth.yandex.ru/authorize",
+                "token_url": "https://oauth.yandex.ru/token",
+                "client_id": "cid",
+                "scopes": [],
+                "scope_delimiter": ";",
+            }
+        )
+
+
+def test_oauth_store_start_joins_scopes_with_comma():
+    store = OAuthStore()
+    started = store.start(
+        server_id=uuid.uuid4(),
+        authorize_url="https://oauth.yandex.ru/authorize",
+        token_url="https://oauth.yandex.ru/token",
+        client_id="cid",
+        scopes=["cloud_api:disk.read", "cloud_api:disk.write"],
+        redirect_uri="https://portunus.example/cb",
+        scope_delimiter=",",
+    )
+    qs = parse_qs(urlparse(started["authorize_url"]).query)
+    assert qs["scope"] == ["cloud_api:disk.read,cloud_api:disk.write"]
 
 
 async def test_exchange_code_canonicalizes_lowercase_token_type():

@@ -1,0 +1,140 @@
+# Himalaya IMAP/SMTP — shared skill-bridge for provider catalog apps (qqmail-imap, …).
+# Auth: paste mailbox address + app password / 授权码; IMAP/SMTP URLs from recipe env_defaults.
+# Do not expose login/configure as MCP tools.
+
+name: himalaya
+version: "1.0.0"
+backend: json_cli
+
+auth:
+  type: none
+  connect_hint: "Paste mailbox address and app password (or provider 授权码). IMAP/SMTP hosts come from the catalog recipe."
+
+cli:
+  # Wrapper writes Connect env into a Himalaya config then execs the binary beside it.
+  command: ["/var/lib/portunus/skills/himalaya-shim/run"]
+  cwd: ${SKILL_ROOT}
+  identity: {}
+  run_wrapper: raw
+  provision:
+    kind: github_release
+    repo: pimalaya/himalaya
+    tag: v2.2.1
+    # {gnu_arch} → x86_64|aarch64 (Himalaya asset names; see provision-vendor-clis.sh)
+    asset: himalaya.{gnu_arch}-linux.tgz
+    dest: /var/lib/portunus/skills/himalaya-shim/himalaya
+    binary: himalaya
+
+tools:
+  - name: mailbox_list
+    description: List mailboxes (folders) on the account
+    cli: ["mailbox", "list"]
+    input:
+      counts:
+        type: boolean
+        description: Include TOTAL/UNREAD (slower on IMAP)
+
+  - name: envelope_list
+    description: List message envelopes in a mailbox (most recent first)
+    cli: ["envelope", "list"]
+    input:
+      mailbox:
+        type: string
+        description: Mailbox name, alias, or role (default inbox)
+      page:
+        type: integer
+        description: Page number starting at 1
+      page_size:
+        type: integer
+        description: Envelopes per page
+
+  - name: envelope_search
+    description: Search envelopes in a mailbox with Himalaya query language
+    cli: ["envelope", "search"]
+    input:
+      query:
+        type: string
+        required: true
+        description: Search query (e.g. from:alice subject:meeting)
+      mailbox:
+        type: string
+        description: Mailbox name, alias, or role (default inbox)
+      page:
+        type: integer
+      page_size:
+        type: integer
+
+  - name: message_read
+    description: Read a message by envelope/message id
+    cli: ["message", "read"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Message id from envelope_list
+      mailbox:
+        type: string
+        description: Mailbox containing the message (default inbox)
+
+  - name: message_send
+    description: Compose and send a new message
+    cli: ["message", "compose", "--send"]
+    input:
+      to:
+        type: string
+        required: true
+        description: Recipient address (repeatable via comma-separated list)
+      subject:
+        type: string
+        required: true
+        description: Subject line
+      body:
+        type: string
+        required: true
+        description: Plain-text body
+      cc:
+        type: string
+        description: Cc recipients
+      bcc:
+        type: string
+        description: Bcc recipients
+
+  - name: message_move
+    description: Move message(s) to another mailbox
+    cli: ["message", "move"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Message id
+      source_mailbox:
+        type: string
+        description: Source mailbox (default inbox; shim maps to --from)
+      to:
+        type: string
+        required: true
+        description: Destination mailbox
+
+  - name: message_delete
+    description: Delete a message (trash first when the backend supports it)
+    cli: ["message", "delete"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Message id
+      mailbox:
+        type: string
+        description: Source mailbox (default inbox)
+
+  - name: attachment_list
+    description: List attachments on a message
+    cli: ["attachment", "list"]
+    input:
+      id:
+        type: string
+        required: true
+        description: Message id
+      mailbox:
+        type: string
+        description: Mailbox containing the message

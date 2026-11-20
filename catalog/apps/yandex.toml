@@ -1,19 +1,24 @@
 slug = "yandex"
 label = "Yandex Disk"
-description = "Yandex Disk files via rclone (paste your `rclone config show yandex` output at Connect; authorize first with `rclone authorize \"yandex\"`)."
-connection = "stdio"
+description = "Yandex Disk via official Yandex 360 MCP. Paste the OAuth token from Yandex’s Disk MCP page (third-party OAuth apps get 403 on tools/list)."
+connection = "oauth"
 egress = "overseas"
 popular = true
 categories = ["Storage"]
-tags = ["yandex", "disk", "files", "rclone"]
+tags = ["yandex", "disk", "files", "mcp", "oauth"]
 sort_order = 37
 
 [spec]
-command = "/var/lib/portunus/skills/rclone-shim/shim"
-args = []
-
-[[spec.env]]
-name = "RCLONE_REMOTE_CONFIG"
-label = "rclone remote config — run `rclone config show yandex` (authorize first with `rclone authorize \"yandex\"`)"
-secret = true
-multiline = true
+url = "https://mcp.360.yandex.net/v1/disk/mcp"
+authorize_url = "https://oauth.yandex.ru/authorize"
+token_url = "https://oauth.yandex.ru/token"
+token_endpoint_auth_method = "client_secret_post"
+authorization_scheme = "OAuth"
+allow_bearer_token = true
+scopes = [
+  "cloud_api:disk.read",
+  "cloud_api:disk.write",
+]
+setup_hints = [
+  "On the [Yandex Disk MCP](https://yandex.ru/dev/yandex-360/mcp/ru/disk) docs page, use **Get OAuth token**, then paste it at Connect (stored as ``Authorization: OAuth …``). Self-registered OAuth apps currently get MCP ``tools/list`` 403. Needs Yandex 360.",
+]

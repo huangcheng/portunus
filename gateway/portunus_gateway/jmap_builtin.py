@@ -122,7 +122,14 @@ def _email_addrs(addrs: list[Any]) -> list[dict[str, str]]:
 class JmapBuiltinClient:
     """Drop-in for ``RemoteClient`` against ``portunus-jmap://…`` URLs."""
 
-    def __init__(self, url: str, *, headers: dict[str, str], timeout_s: float = 60.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        timeout_s: float = 60.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.url = url
         self.profile = parse_jmap_builtin_url(url)
         if self.profile is None:
@@ -134,11 +141,32 @@ class JmapBuiltinClient:
                 break
         self._auth = auth.strip()
         self._timeout_s = float(timeout_s)
+        self._transport = transport
         self._session: dict[str, Any] | None = None
         self._account_id: str | None = None
         self._api_url: str | None = None
 
+    def _http(self, budget: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=self._transport,
+            timeout=httpx.Timeout(budget),
+            follow_redirects=True,
+            trust_env=False,
+        )
+
     async def list_tools(self) -> list[dict[str, Any]]:
+        # Static tool schemas — but when Authorization is present, hit the JMAP
+        # session endpoint so a revoked/wrong app password fails probe as
+        # auth_required (not only later on invoke).
+        if self._auth:
+            budget = float(self._timeout_s)
+            try:
+                async with self._http(budget) as http:
+                    await self._ensure_session(http)
+            except PortunusError:
+                raise
+            except httpx.HTTPError as e:
+                raise PortunusError("upstream_crash", f"jmap session failed: {e}") from e
         return list(_MAIL_TOOLS)
 
     async def call_tool(
@@ -159,11 +187,7 @@ class JmapBuiltinClient:
             )
         budget = float(self._timeout_s if timeout_s is None else timeout_s)
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(budget),
-                follow_redirects=True,
-                trust_env=False,
-            ) as http:
+            async with self._http(budget) as http:
                 await self._ensure_session(http)
                 return await self._dispatch(http, name, arguments or {})
         except PortunusError:

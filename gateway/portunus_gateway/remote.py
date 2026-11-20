@@ -107,6 +107,67 @@ def _rpc_error_of(data: bytes) -> dict[str, Any] | None:
     return err if isinstance(err, dict) else None
 
 
+def _format_rpc_error(err: Mapping[str, Any]) -> str:
+    """Human-readable upstream JSON-RPC error (code + message; unwrap nested QQ Mail JSON)."""
+    code = err.get("code")
+    msg = err.get("message")
+    detail = ""
+    if isinstance(msg, str) and msg.strip():
+        detail = msg.strip()
+        # QQ Mail (and similar) nest ``{"content":[{"text":"{...40101...}"}]}`` as a string.
+        try:
+            outer = json.loads(detail)
+        except (ValueError, TypeError):
+            outer = None
+        if isinstance(outer, dict):
+            content = outer.get("content")
+            if isinstance(content, list) and content:
+                first = content[0]
+                text = first.get("text") if isinstance(first, dict) else None
+                if isinstance(text, str) and text.strip():
+                    try:
+                        inner = json.loads(text)
+                    except (ValueError, TypeError):
+                        inner = None
+                    if isinstance(inner, dict):
+                        nested = inner.get("error")
+                        if isinstance(nested, dict):
+                            ncode = nested.get("code")
+                            nmsg = nested.get("message")
+                            if isinstance(nmsg, str) and nmsg.strip():
+                                detail = (
+                                    f"{nmsg.strip()} (vendor {ncode})"
+                                    if ncode is not None
+                                    else nmsg.strip()
+                                )
+                            elif ncode is not None:
+                                detail = f"vendor error {ncode}"
+                    if detail == msg.strip() and text.strip():
+                        detail = text.strip()[:300]
+    if detail:
+        return f"upstream JSON-RPC error {code}: {detail[:400]}"
+    return f"upstream JSON-RPC error {code}"
+
+
+def _portunus_error_from_rpc(err: Mapping[str, Any]) -> PortunusError:
+    """Map a JSON-RPC error object to PortunusError (auth when the peer says token bad)."""
+    text = _format_rpc_error(err).casefold()
+    if any(
+        needle in text
+        for needle in (
+            "invalid or expired access token",
+            "invalid_token",
+            "expired access token",
+            "unauthorized",
+            "auth required",
+            "authentication required",
+            "vendor 40101",
+        )
+    ):
+        return PortunusError("auth_required", _format_rpc_error(err))
+    return PortunusError("upstream_crash", _format_rpc_error(err))
+
+
 def _drop_invalid_x_mcp_header_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Exclude tools whose ``inputSchema`` carries an invalid ``x-mcp-header`` annotation.
 
@@ -783,9 +844,7 @@ class _ClassicSseSession:
                     self._pending.pop(mid, None)
                     if "error" in obj:
                         err = obj["error"] if isinstance(obj["error"], dict) else {}
-                        raise PortunusError(
-                            "upstream_crash", f"upstream JSON-RPC error {err.get('code')}"
-                        )
+                        raise _portunus_error_from_rpc(err)
                     result = obj.get("result")
                     if not isinstance(result, dict):
                         raise PortunusError("upstream_crash", "malformed JSON-RPC result")
@@ -799,7 +858,7 @@ class _ClassicSseSession:
             raise PortunusError("upstream_timeout", "SSE response timed out") from None
         if "error" in msg:
             err = msg["error"] if isinstance(msg["error"], dict) else {}
-            raise PortunusError("upstream_crash", f"upstream JSON-RPC error {err.get('code')}")
+            raise _portunus_error_from_rpc(err)
         result = msg.get("result")
         if not isinstance(result, dict):
             raise PortunusError("upstream_crash", "malformed JSON-RPC result")
@@ -1116,7 +1175,7 @@ class _Session:
         msg = _extract_response(response, data, mid)
         if "error" in msg:
             err = msg["error"] if isinstance(msg["error"], dict) else {}
-            raise PortunusError("upstream_crash", f"upstream JSON-RPC error {err.get('code')}")
+            raise _portunus_error_from_rpc(err)
         result = msg.get("result")
         if not isinstance(result, dict):
             raise PortunusError("upstream_crash", "malformed JSON-RPC result")

@@ -11,6 +11,7 @@ export type AppIconId =
   | "thundermail"
   | "gdrive"
   | "yandex"
+  | "yandex-mail"
   | "drime"
   | "mega"
   | "flomo"
@@ -40,6 +41,8 @@ export type AppIconId =
   | "xunlei"
   | "proton-drive"
   | "agent-mail"
+  | "qqmail"
+  | "vivaldi-mail"
   | "generic";
 
 export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
@@ -52,7 +55,8 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "outlook-mail" || slug === "outlook") return "outlook-mail";
   if (slug === "thundermail" || slug === "tb.pro" || slug === "tbpro") return "thundermail";
   if (slug === "gdrive" || slug === "google-drive" || slug === "googledrive") return "gdrive";
-  if (slug === "yandex") return "yandex";
+  if (slug === "yandex" || slug === "yandex-disk") return "yandex";
+  if (slug === "yandex-mail") return "yandex-mail";
   if (slug === "drime") return "drime";
   if (slug === "mega") return "mega";
   if (slug === "flomo") return "flomo";
@@ -82,6 +86,15 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "xunlei" || slug === "thunder") return "xunlei";
   if (slug === "proton-drive" || slug === "protondrive" || slug === "proton") return "proton-drive";
   if (slug === "agent-mail" || slug === "agentmail" || slug === "agently") return "agent-mail";
+  if (
+    slug === "qqmail" ||
+    slug === "qqmail-imap" ||
+    slug === "qq-mail" ||
+    slug === "qq-mailbox"
+  ) {
+    return "qqmail";
+  }
+  if (slug === "vivaldi-mail" || slug === "vivaldi") return "vivaldi-mail";
   return "generic";
 }
 
@@ -96,6 +109,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   thundermail: "thundermail.png",
   gdrive: "gdrive.png",
   yandex: "yandex.png",
+  "yandex-mail": "yandex-mail.svg",
   drime: "drime.png",
   mega: "mega.svg",
   flomo: "flomo.png",
@@ -124,6 +138,8 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   xunlei: "xunlei.png",
   "proton-drive": "proton-drive.png",
   "agent-mail": "agent-mail.png",
+  qqmail: "qqmail.png",
+  "vivaldi-mail": "vivaldi-mail.png",
 };
 
 export function AppBrandMark({

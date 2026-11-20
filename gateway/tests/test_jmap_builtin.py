@@ -37,3 +37,20 @@ async def test_list_tools_without_auth():
     with pytest.raises(PortunusError) as ei:
         await client.call_tool("list_messages", {})
     assert ei.value.code == "auth_required"
+
+
+async def test_list_tools_with_bad_basic_auth_raises():
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url).startswith("https://mail.thundermail.com/jmap/session")
+        return httpx.Response(401, text="unauthorized")
+
+    client = JmapBuiltinClient(
+        "portunus-jmap://thundermail",
+        headers={"Authorization": "Basic dXNlcjp3cm9uZw=="},
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(PortunusError) as ei:
+        await client.list_tools()
+    assert ei.value.code == "auth_required"

@@ -203,10 +203,10 @@ async def test_auth_none_skill_app_not_flagged_auth_required(db, pepper_file):
 
 
 def test_rclone_drive_seeds_shape():
-    """Box/Yandex/Drime/MEGA ship as rclone-shim stdio apps with a multiline config paste."""
+    """Box/Drime/MEGA ship as rclone-shim stdio apps with a multiline config paste."""
     from portunus_gateway.catalog import DEFAULT_APPS, RCLONE_SHIM, validate_spec
 
-    for slug in ("box", "yandex", "drime", "mega"):
+    for slug in ("box", "drime", "mega"):
         raw = next(a for a in DEFAULT_APPS if a["slug"] == slug)
         assert raw["connection"] == "stdio"
         spec = validate_spec("stdio", raw["spec"])
@@ -216,6 +216,36 @@ def test_rclone_drive_seeds_shape():
         assert entry["name"] == "RCLONE_REMOTE_CONFIG"
         assert entry["multiline"] is True
         assert entry["secret"] is True
+
+
+def test_yandex_oauth_mcp_seeds_shape():
+    from portunus_gateway.catalog import DEFAULT_APPS, preferred_regions_for_slug, validate_spec
+
+    disk = next(a for a in DEFAULT_APPS if a["slug"] == "yandex")
+    mail = next(a for a in DEFAULT_APPS if a["slug"] == "yandex-mail")
+    assert disk["connection"] == "oauth"
+    assert mail["connection"] == "oauth"
+    disk_spec = validate_spec("oauth", disk["spec"])
+    mail_spec = validate_spec("oauth", mail["spec"])
+    assert disk_spec["url"] == "https://mcp.360.yandex.net/v1/disk/mcp"
+    assert mail_spec["url"] == "https://mcp.360.yandex.net/v1/mail/mcp"
+    assert "client_id" not in disk_spec
+    assert "client_id" not in mail_spec
+    assert disk_spec["authorization_scheme"] == "OAuth"
+    assert mail_spec["authorization_scheme"] == "OAuth"
+    assert disk_spec.get("allow_bearer_token") is True
+    assert mail_spec.get("allow_bearer_token") is True
+    # Default space join (Yandex docs); do not set comma delimiter.
+    assert "scope_delimiter" not in disk_spec
+    assert "scope_delimiter" not in mail_spec
+    assert disk_spec["token_endpoint_auth_method"] == "client_secret_post"
+    assert "cloud_api:disk.read" in disk_spec["scopes"]
+    assert "cloud_api:disk.write" in disk_spec["scopes"]
+    assert "mail:messages.read" in mail_spec["scopes"]
+    assert "cloud_api:disk.read" not in mail_spec["scopes"]
+    assert "mail:messages.read" not in disk_spec["scopes"]
+    assert preferred_regions_for_slug("yandex") == ["overseas"]
+    assert preferred_regions_for_slug("yandex-mail") == ["overseas"]
 
 
 def test_gdrive_oauth_drive_mcp_seed_shape():
@@ -279,6 +309,7 @@ def test_egress_preferred_regions_for_catalog_slugs():
 
     for slug in (
         "yandex",
+        "yandex-mail",
         "drime",
         "box",
         "onedrive",
@@ -293,10 +324,19 @@ def test_egress_preferred_regions_for_catalog_slugs():
         "dropbox",
         "pikpak",
         "Yandex",
+        "vivaldi-mail",
     ):
         assert preferred_regions_for_slug(slug) == OVERSEAS_PREFERRED_REGIONS
         assert egress_for_slug(slug) == "overseas"
-    for slug in ("nutstore", "weiyun", "guangyapan", "cubox", "ardot", "qqmusic"):
+    for slug in (
+        "nutstore",
+        "weiyun",
+        "guangyapan",
+        "cubox",
+        "ardot",
+        "qqmusic",
+        "qqmail-imap",
+    ):
         assert preferred_regions_for_slug(slug) == DOMESTIC_PREFERRED_REGIONS
         assert egress_for_slug(slug) == "domestic"
     assert preferred_regions_for_slug("weknora") == []
@@ -318,26 +358,130 @@ def test_fastmail_oauth_seed_shape():
     assert "offline_access" in spec["scopes"]
 
 
-def test_aliyun_stdio_accesskey_only():
+def test_aliyun_oauth_core_streamable_http():
     from portunus_gateway.catalog import DEFAULT_APPS, egress_for_slug, validate_spec
 
     assert not any(a["slug"] == "aliyun-ak" for a in DEFAULT_APPS)
     raw = next(a for a in DEFAULT_APPS if a["slug"] == "aliyun")
-    assert raw["connection"] == "stdio"
+    assert raw["connection"] == "oauth"
     assert raw["label"] == "阿里云"
-    spec = validate_spec("stdio", raw["spec"])
-    assert spec["command"] == "uvx"
-    assert spec["args"] == ["alibabacloud.mcp-proxy==0.2.17"]
-    env_by_name = {e["name"]: e for e in spec["env"]}
-    assert env_by_name["ALIBABA_CLOUD_ACCESS_KEY_ID"]["secret"] is True
-    assert env_by_name["ALIBABA_CLOUD_ACCESS_KEY_SECRET"]["secret"] is True
-    assert env_by_name["ALIBABACLOUD_MCP_SERVER_URL"]["secret"] is False
+    spec = validate_spec("oauth", raw["spec"])
+    assert spec.get("url_from_operator") is True
+    assert spec["authorize_url"] == "https://signin.aliyun.com/oauth2/v1/auth"
+    assert spec["token_url"] == "https://oauth.aliyun.com/v1/token"
+    # Fake DCR must not be advertised — Aliyun ignores custom redirect_uris.
+    assert "registration_endpoint" not in spec
+    assert "issuer" not in spec  # Aliyun omits RFC 9207 iss on callback
+    assert spec["token_endpoint_auth_method"] == "none"
+    assert spec["resource"] == "https://openapi-mcp.cn-hangzhou.aliyuncs.com"
+    assert spec["scopes"] == ["openid", "/acs/mcp-server"]
     assert egress_for_slug("aliyun") == "domestic"
 
 
+def test_tencentcloud_delisted_from_default_apps():
+    from portunus_gateway.catalog import DEFAULT_APPS, egress_for_slug
+    from portunus_gateway.toml_catalog import load_apps_dir, packaged_apps_dir
+
+    assert not any(a["slug"] == "tencentcloud" for a in DEFAULT_APPS)
+    # Domestic affinity still applies to any leftover connected server.
+    assert egress_for_slug("tencentcloud") == "domestic"
+    loaded = load_apps_dir(packaged_apps_dir())
+    recipe = next(r for r in loaded.recipes if r.slug == "tencentcloud")
+    assert recipe.enabled is False
+    assert recipe.disable_reasons == ["disabled_in_toml"]
+
+
 @pytest.mark.anyio
-async def test_aliyun_ensure_defaults_oauth_to_stdio_and_purge():
-    """OAuth aliyun → AccessKey stdio; recipe-bound aliyun-ak purged; custom slug kept."""
+async def test_aliyun_ensure_defaults_clears_fake_dcr_client():
+    """Aliyun /register returns official client_id; wipe it so Connect asks for Custom OAuth."""
+    import uuid
+
+    from portunus_gateway.catalog import CatalogStore, DEFAULT_APPS, validate_spec
+    from portunus_gateway.db.models import Base, CatalogApp, Server
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    seed = next(a for a in DEFAULT_APPS if a["slug"] == "aliyun")
+    want_spec = validate_spec("oauth", seed["spec"])
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with sf() as s:
+        s.add(
+            CatalogApp(
+                id=uuid.uuid4(),
+                slug="aliyun",
+                label=seed["label"],
+                name=seed["name"],
+                description="stale dcr",
+                connection="oauth",
+                popular=True,
+                categories=list(seed.get("categories") or []),
+                tags=list(seed.get("tags") or []),
+                spec={
+                    **want_spec,
+                    "registration_endpoint": (
+                        "https://openapi-mcp.cn-hangzhou.aliyuncs.com/register"
+                    ),
+                    "token_endpoint_auth_method": "none",
+                    "scopes": ["openid", "/internal/acs/openapi"],
+                },
+                sort_order=17,
+            )
+        )
+        s.add(
+            Server(
+                id=uuid.uuid4(),
+                name="阿里云",
+                slug="aliyun",
+                kind="remote",
+                url="https://openapi-mcp.cn-hangzhou.aliyuncs.com/accounts/x/id/y/mcp",
+                oauth={
+                    "authorize_url": want_spec["authorize_url"],
+                    "token_url": want_spec["token_url"],
+                    "client_id": "4071151845732613353",
+                    "issuer": "https://openapi-mcp.cn-hangzhou.aliyuncs.com",
+                    "registration_endpoint": (
+                        "https://openapi-mcp.cn-hangzhou.aliyuncs.com/register"
+                    ),
+                    "token_endpoint_auth_method": "none",
+                    "scopes": ["openid", "/internal/acs/openapi"],
+                },
+                recipe_slug="aliyun",
+                vault_version=1,
+                enabled=True,
+            )
+        )
+        await s.commit()
+
+    store = CatalogStore(sf)
+    await store.ensure_defaults()
+
+    async with sf() as s:
+        row = (
+            await s.execute(select(CatalogApp).where(CatalogApp.slug == "aliyun"))
+        ).scalar_one()
+        assert row.spec == want_spec
+        assert "registration_endpoint" not in row.spec
+        assert "issuer" not in row.spec
+        srv = (
+            await s.execute(select(Server).where(Server.slug == "aliyun"))
+        ).scalar_one()
+        assert isinstance(srv.oauth, dict)
+        assert "client_id" not in srv.oauth
+        assert "registration_endpoint" not in srv.oauth
+        assert "issuer" not in srv.oauth
+        assert srv.oauth.get("token_endpoint_auth_method") == "none"
+        assert srv.oauth.get("scopes") == ["openid", "/acs/mcp-server"]
+
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_aliyun_ensure_defaults_stdio_to_oauth_and_purge():
+    """AccessKey stdio aliyun → Core oauth; recipe-bound aliyun-ak purged; custom slug kept."""
     import uuid
 
     from portunus_gateway.catalog import CatalogStore, DEFAULT_APPS, validate_spec
@@ -346,7 +490,7 @@ async def test_aliyun_ensure_defaults_oauth_to_stdio_and_purge():
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     seed = next(a for a in DEFAULT_APPS if a["slug"] == "aliyun")
-    want_spec = validate_spec("stdio", seed["spec"])
+    want_spec = validate_spec("oauth", seed["spec"])
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -361,16 +505,18 @@ async def test_aliyun_ensure_defaults_oauth_to_stdio_and_purge():
                 slug="aliyun",
                 label="阿里云",
                 name="阿里云",
-                description="old oauth",
-                connection="oauth",
+                description="old stdio",
+                connection="stdio",
                 popular=True,
                 categories=["Developer Tools"],
-                tags=["oauth"],
+                tags=["accesskey"],
                 spec={
-                    "url_from_operator": True,
-                    "authorize_url": "https://example.com/auth",
-                    "token_url": "https://example.com/token",
-                    "scopes": ["openid"],
+                    "command": "uvx",
+                    "args": ["alibabacloud.mcp-proxy==0.2.17"],
+                    "env": [
+                        {"name": "ALIBABA_CLOUD_ACCESS_KEY_ID", "secret": True},
+                        {"name": "ALIBABA_CLOUD_ACCESS_KEY_SECRET", "secret": True},
+                    ],
                 },
                 sort_order=17,
             )
@@ -379,12 +525,11 @@ async def test_aliyun_ensure_defaults_oauth_to_stdio_and_purge():
             id=uuid.uuid4(),
             name="阿里云",
             slug="aliyun",
-            kind="remote",
-            url="https://example.com/mcp",
-            oauth={"client_id": "x"},
+            kind="stdio",
+            command="uvx",
+            args=["alibabacloud.mcp-proxy==0.2.17"],
             recipe_slug="aliyun",
             vault_version=1,
-            has_oauth_refresh=True,
         )
         s.add(aliyun_srv)
         s.add(
@@ -401,7 +546,7 @@ async def test_aliyun_ensure_defaults_oauth_to_stdio_and_purge():
             VaultEntry(
                 id=uuid.uuid4(),
                 server_id=aliyun_srv.id,
-                name="Authorization",
+                name="ALIBABA_CLOUD_ACCESS_KEY_ID",
                 ciphertext=b"\x00" * 32,
                 key_version=1,
             )
@@ -417,7 +562,11 @@ async def test_aliyun_ensure_defaults_oauth_to_stdio_and_purge():
                 popular=False,
                 categories=[],
                 tags=[],
-                spec=want_spec,
+                spec={
+                    "command": "uvx",
+                    "args": ["alibabacloud.mcp-proxy==0.2.0"],
+                    "env": [],
+                },
                 sort_order=18,
             )
         )
@@ -441,9 +590,9 @@ async def test_aliyun_ensure_defaults_oauth_to_stdio_and_purge():
         row = (
             await s.execute(select(CatalogApp).where(CatalogApp.slug == "aliyun"))
         ).scalar_one()
-        assert row.connection == "stdio"
+        assert row.connection == "oauth"
         assert row.spec == want_spec
-        assert "accesskey" in (row.tags or [])
+        assert "oauth" in (row.tags or [])
         assert (
             await s.execute(select(CatalogApp).where(CatalogApp.slug == "aliyun-ak"))
         ).scalar_one_or_none() is None
@@ -453,9 +602,9 @@ async def test_aliyun_ensure_defaults_oauth_to_stdio_and_purge():
         srv = (
             await s.execute(select(Server).where(Server.slug == "aliyun"))
         ).scalar_one()
-        assert srv.kind == "stdio"
-        assert srv.command == want_spec["command"]
-        assert list(srv.args or []) == list(want_spec["args"])
+        assert srv.kind == "remote"
+        assert srv.command is None
+        assert list(srv.args or []) == []
         assert srv.url is None
         assert srv.oauth is None
         assert srv.has_oauth_refresh is False
@@ -467,7 +616,8 @@ async def test_aliyun_ensure_defaults_oauth_to_stdio_and_purge():
         assert (
             await s.execute(
                 select(VaultEntry).where(
-                    VaultEntry.server_id == srv.id, VaultEntry.name == "Authorization"
+                    VaultEntry.server_id == srv.id,
+                    VaultEntry.name == "ALIBABA_CLOUD_ACCESS_KEY_ID",
                 )
             )
         ).scalar_one_or_none() is None
@@ -495,61 +645,45 @@ async def test_aliyun_ensure_defaults_oauth_to_stdio_and_purge():
 
 
 @pytest.mark.anyio
-async def test_aliyun_ensure_defaults_repoints_stdio_args():
+async def test_tencentcloud_ensure_defaults_delists_catalog():
     import uuid
 
-    from portunus_gateway.catalog import CatalogStore, DEFAULT_APPS, validate_spec
-    from portunus_gateway.db.models import Base, CatalogApp, Server, Tool
+    from portunus_gateway.catalog import CatalogStore
+    from portunus_gateway.db.models import Base, CatalogApp, Server
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    seed = next(a for a in DEFAULT_APPS if a["slug"] == "aliyun")
-    want_spec = validate_spec("stdio", seed["spec"])
-    stale_args = ["alibabacloud.mcp-proxy==0.2.0"]
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     sf = async_sessionmaker(engine, expire_on_commit=False)
 
     async with sf() as s:
-        stale_spec = dict(want_spec)
-        stale_spec["args"] = list(stale_args)
         s.add(
             CatalogApp(
                 id=uuid.uuid4(),
-                slug="aliyun",
-                label=seed["label"],
-                name=seed["name"],
-                description=seed["description"],
-                connection="stdio",
+                slug="tencentcloud",
+                label="腾讯云",
+                name="腾讯云",
+                description="stale",
+                connection="http",
                 popular=True,
-                categories=list(seed.get("categories") or []),
-                tags=list(seed.get("tags") or []),
-                spec=stale_spec,
-                sort_order=17,
+                categories=["Developer Tools"],
+                tags=["tencentcloud"],
+                spec={"url_from_operator": True, "url_is_credential": True},
+                sort_order=12,
             )
         )
-        srv_id = uuid.uuid4()
         s.add(
             Server(
-                id=srv_id,
-                name="阿里云",
-                slug="aliyun",
-                kind="stdio",
-                command="uvx",
-                args=list(stale_args),
-                recipe_slug="aliyun",
-                vault_version=3,
-            )
-        )
-        s.add(
-            Tool(
                 id=uuid.uuid4(),
-                server_id=srv_id,
-                upstream_name="stale",
-                description=None,
-                schema={},
-                schema_hash="h",
+                name="腾讯云",
+                slug="tencentcloud",
+                kind="remote",
+                url="https://mcp-api.tencent-cloud.com/sse/x",
+                recipe_slug="tencentcloud",
+                enabled=True,
+                vault_version=2,
             )
         )
         await s.commit()
@@ -558,18 +692,13 @@ async def test_aliyun_ensure_defaults_repoints_stdio_args():
     await store.ensure_defaults()
 
     async with sf() as s:
-        row = (
-            await s.execute(select(CatalogApp).where(CatalogApp.slug == "aliyun"))
-        ).scalar_one()
-        assert row.spec == want_spec
-        srv = (
-            await s.execute(select(Server).where(Server.slug == "aliyun"))
-        ).scalar_one()
-        assert list(srv.args or []) == list(want_spec["args"])
-        assert int(srv.vault_version) == 4
         assert (
-            await s.execute(select(Tool).where(Tool.server_id == srv.id))
-        ).scalars().all() == []
+            await s.execute(select(CatalogApp).where(CatalogApp.slug == "tencentcloud"))
+        ).scalar_one_or_none() is None
+        srv = (
+            await s.execute(select(Server).where(Server.slug == "tencentcloud"))
+        ).scalar_one()
+        assert srv.enabled is False
 
     await engine.dispose()
 
@@ -648,6 +777,123 @@ def test_linear_oauth_seed_shape():
     assert spec["issuer"] == "https://mcp.linear.app"
     assert spec["resource"] == "https://mcp.linear.app/mcp"
     assert spec["scopes"] == ["read", "write"]
+
+
+def test_qqmail_imap_himalaya_seed_shape():
+    """QQ IMAP provider shares himalaya.example.yaml + himalaya-shim run wrapper."""
+    from portunus_gateway.catalog import (
+        DEFAULT_APPS,
+        HIMALAYA_SHIM_ROOT,
+        HIMALAYA_SHIM_RUN,
+        egress_for_slug,
+        validate_spec,
+    )
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "qqmail-imap")
+    assert raw["connection"] == "skill_bridge"
+    assert raw.get("egress") == "domestic"
+    assert egress_for_slug("qqmail-imap") == "domestic"
+    spec = validate_spec("skill_bridge", raw["spec"])
+    assert spec["manifest"]["name"] == "himalaya"
+    assert spec["manifest"]["cli"]["command"] == [HIMALAYA_SHIM_RUN]
+    names = {s["name"] for s in spec["secrets"]}
+    assert names == {"MAIL_ADDRESS", "MAIL_PASSWORD"}
+    assert spec["env_defaults"]["IMAP_URL"] == "imaps://imap.qq.com:993"
+    assert spec["env_defaults"]["SMTP_URL"] == "smtps://smtp.qq.com:465"
+    assert spec["env_defaults"]["SKILL_ROOT"] == HIMALAYA_SHIM_ROOT
+    tool_names = {t["name"] for t in spec["manifest"]["tools"]}
+    assert {"mailbox_list", "envelope_list", "message_read", "message_send"} <= tool_names
+
+
+def test_vivaldi_mail_himalaya_seed_shape():
+    from portunus_gateway.catalog import (
+        DEFAULT_APPS,
+        HIMALAYA_SHIM_ROOT,
+        HIMALAYA_SHIM_RUN,
+        egress_for_slug,
+        preferred_regions_for_slug,
+        validate_spec,
+    )
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "vivaldi-mail")
+    assert raw["connection"] == "skill_bridge"
+    assert raw.get("egress") == "overseas"
+    assert egress_for_slug("vivaldi-mail") == "overseas"
+    assert preferred_regions_for_slug("vivaldi-mail") == ["overseas"]
+    spec = validate_spec("skill_bridge", raw["spec"])
+    assert spec["manifest"]["name"] == "himalaya"
+    assert spec["manifest"]["cli"]["command"] == [HIMALAYA_SHIM_RUN]
+    assert spec["env_defaults"]["IMAP_URL"] == "imaps://imap.vivaldi.net:993"
+    assert spec["env_defaults"]["SMTP_URL"] == "smtps://smtp.vivaldi.net:465"
+    assert spec["env_defaults"]["SKILL_ROOT"] == HIMALAYA_SHIM_ROOT
+    assert spec["env_defaults"]["STATE_DIR"].endswith("/vivaldi-mail")
+
+
+def test_qqmail_mcp_delisted_from_default_apps():
+    from portunus_gateway.catalog import DEFAULT_APPS
+    from portunus_gateway.toml_catalog import load_apps_dir, packaged_apps_dir
+
+    assert not any(a["slug"] == "qqmail" for a in DEFAULT_APPS)
+    loaded = load_apps_dir(packaged_apps_dir())
+    assert not any(r.slug == "qqmail" for r in loaded.recipes)
+
+
+@pytest.mark.anyio
+async def test_qqmail_ensure_defaults_delists_catalog():
+    import uuid
+
+    from portunus_gateway.catalog import CatalogStore
+    from portunus_gateway.db.models import Base, CatalogApp, Server
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with sf() as s:
+        s.add(
+            CatalogApp(
+                id=uuid.uuid4(),
+                slug="qqmail",
+                label="QQ Mail",
+                name="QQ Mail",
+                description="stale oauth mcp",
+                connection="oauth",
+                popular=True,
+                categories=["Productivity"],
+                tags=["qqmail"],
+                spec={"url": "https://api.mail.qq.com/mcp", "allow_bearer_token": True},
+                sort_order=24,
+            )
+        )
+        s.add(
+            Server(
+                id=uuid.uuid4(),
+                name="QQ Mail",
+                slug="qqmail",
+                kind="remote",
+                url="https://api.mail.qq.com/mcp",
+                recipe_slug="qqmail",
+                enabled=True,
+                vault_version=2,
+            )
+        )
+        await s.commit()
+
+    store = CatalogStore(sf)
+    await store.ensure_defaults()
+
+    async with sf() as s:
+        assert (
+            await s.execute(select(CatalogApp).where(CatalogApp.slug == "qqmail"))
+        ).scalar_one_or_none() is None
+        srv = (
+            await s.execute(select(Server).where(Server.slug == "qqmail"))
+        ).scalar_one()
+        assert srv.enabled is False
+    await engine.dispose()
 
 
 def test_validate_cubox_skill_bridge_spec():

@@ -120,6 +120,10 @@ export type OAuthConfig = {
   issuer?: string | null;
   registration_endpoint?: string | null;
   token_endpoint_auth_method?: string | null;
+  /** MCP Authorization scheme when not Bearer (e.g. Yandex ``OAuth``). */
+  authorization_scheme?: string | null;
+  /** Authorize ``scope`` join delimiter (space default; Yandex uses comma). */
+  scope_delimiter?: string | null;
   use_cimd?: boolean;
   allow_bearer_token?: boolean;
   configured: boolean;
@@ -149,6 +153,10 @@ export type OAuthBody = {
   issuer?: string;
   registration_endpoint?: string;
   token_endpoint_auth_method?: string;
+  /** MCP Authorization scheme when not Bearer (e.g. Yandex ``OAuth``). */
+  authorization_scheme?: string;
+  /** Authorize ``scope`` join delimiter (space default; Yandex uses comma). */
+  scope_delimiter?: string;
   /** Prefer CIMD over DCR when the AS advertises client_id_metadata_document_supported. */
   use_cimd?: boolean;
 };
@@ -593,8 +601,17 @@ export const api = {
     call<Tool>("PUT", `/tools/${encodeURIComponent(id)}/schema-override`, { schema }),
   clearToolSchemaOverride: (id: string) =>
     call<Tool>("DELETE", `/tools/${encodeURIComponent(id)}/schema-override`),
-  setBearerToken: (id: string, token: string) =>
-    call<Server>("POST", `/servers/${encodeURIComponent(id)}/auth/token`, { token }),
+  setBearerToken: (
+    id: string,
+    token: string,
+    opts?: { refresh_token?: string; client_id?: string; expires_in?: number },
+  ) =>
+    call<Server>("POST", `/servers/${encodeURIComponent(id)}/auth/token`, {
+      token,
+      ...(opts?.refresh_token ? { refresh_token: opts.refresh_token } : {}),
+      ...(opts?.client_id ? { client_id: opts.client_id } : {}),
+      ...(typeof opts?.expires_in === "number" ? { expires_in: opts.expires_in } : {}),
+    }),
   oauthStart: (id: string, redirect_uri: string) =>
     call<{ authorize_url: string; state: string }>(
       "POST",

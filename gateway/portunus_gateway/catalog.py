@@ -26,6 +26,8 @@ WEBDAV_MCP_PACKAGE = "webdav-mcp-server@1.0.4"
 # siblings; see deploy notes). Absolute path so the closed argv grammar admits it
 # via binary_allowlist. Bridges a pasted rclone remote config to webdav-mcp-server.
 RCLONE_SHIM = "/var/lib/portunus/skills/rclone-shim/shim"
+HIMALAYA_SHIM_ROOT = "/var/lib/portunus/skills/himalaya-shim"
+HIMALAYA_SHIM_RUN = f"{HIMALAYA_SHIM_ROOT}/run"
 
 # Microsoft identity (personal MSA / consumers). Operators register their own
 # Entra app and paste Client ID + secret at Connect — never bake a deploy-owned id.
@@ -36,6 +38,12 @@ MS_GRAPH_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/to
 MS_GRAPH_MAIL_URL = "portunus-graph://mail"
 MS_GRAPH_ONEDRIVE_URL = "portunus-graph://onedrive"
 THUNDERMAIL_JMAP_URL = "portunus-jmap://thundermail"
+# Yandex 360 official MCP (Disk + Mail). Operators register their own OAuth app
+# at oauth.yandex.ru and paste Client ID + secret at Connect.
+YANDEX_OAUTH_AUTHORIZE_URL = "https://oauth.yandex.ru/authorize"
+YANDEX_OAUTH_TOKEN_URL = "https://oauth.yandex.ru/token"
+YANDEX_DISK_MCP_URL = "https://mcp.360.yandex.net/v1/disk/mcp"
+YANDEX_MAIL_MCP_URL = "https://mcp.360.yandex.net/v1/mail/mcp"
 WEBDAV_MCP_ARGS = ["-y", "--ignore-scripts", WEBDAV_MCP_PACKAGE]
 # Soft affinity for catalog Connect when the operator leaves preferred_regions empty.
 # Portable tags only — each deploy labels runners via PORTUNUS_REGIONS
@@ -69,6 +77,8 @@ OVERSEAS_EGRESS_SLUGS = frozenset(
         "proton-drive",
         "outlook-mail",
         "thundermail",
+        "vivaldi-mail",
+        "yandex-mail",
     }
 )
 DOMESTIC_EGRESS_SLUGS = frozenset(
@@ -89,6 +99,7 @@ DOMESTIC_EGRESS_SLUGS = frozenset(
         "flyai",
         "xunlei",
         "agent-mail",
+        "qqmail-imap",
     }
 )
 
@@ -185,6 +196,7 @@ GUANGYAPAN_MANIFEST: dict[str, Any] = _load_packaged_manifest("guangyapan.exampl
 PROTON_DRIVE_MANIFEST: dict[str, Any] = _load_packaged_manifest("proton-drive.example.yaml")
 # 腾讯 Agent Mail — agently-cli via skill-bridge (browser oauth_link; no hosted MCP).
 AGENT_MAIL_MANIFEST: dict[str, Any] = _load_packaged_manifest("agent-mail.example.yaml")
+HIMALAYA_MANIFEST: dict[str, Any] = _load_packaged_manifest("himalaya.example.yaml")
 # Default paths on Portunus runners (see deploy). Overridable via Connect env.
 GUANGYAPAN_SKILL_ROOT = "/var/lib/portunus/skills/guangyapan-drive"
 GUANGYAPAN_STATE_DIR = "/var/lib/portunus/skill-state/guangyapan"
@@ -214,49 +226,6 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "resource": "https://ardot.tencent.com/mcp",
             "registration_endpoint": "https://ardot.tencent.com/oauth/register",
             "token_endpoint_auth_method": "none",
-        },
-    },
-    {
-        "slug": "tencentcloud",
-        "label": "腾讯云",
-        "name": "腾讯云",
-        "description": (
-            "Tencent Cloud CVM management MCP (instances, VPC, security groups, monitoring) "
-            "via SecretId/SecretKey."
-        ),
-        "connection": "stdio",
-        "popular": True,
-        "categories": ["Developer Tools"],
-        "tags": ["tencentcloud", "cvm", "stdio", "mcp"],
-        "sort_order": 12,
-        "spec": {
-            "command": "uvx",
-            # mcp-server-cvm 0.1.12 uses the pre-FastMCP Server.list_tools API;
-            # pin mcp so uv does not pull a breaking SDK.
-            "args": ["--with", "mcp==1.1.2", "mcp-server-cvm==0.1.12"],
-            "env": [
-                {
-                    "name": "TENCENTCLOUD_SECRET_ID",
-                    "label": "SecretId",
-                    "secret": True,
-                },
-                {
-                    "name": "TENCENTCLOUD_SECRET_KEY",
-                    "label": "SecretKey",
-                    "secret": True,
-                },
-            ],
-            "env_defaults": {"TENCENTCLOUD_REGION": "ap-guangzhou"},
-            "setup_hints": [
-                (
-                    "Create API keys in "
-                    "[CAM → API Keys](https://console.cloud.tencent.com/cam/capi). "
-                    "Package: "
-                    "[mcp-server-cvm]"
-                    "(https://github.com/TencentCloudCommunity/mcp-server/tree/main/src/mcp-server-cvm). "
-                    "Default region is ap-guangzhou."
-                ),
-            ],
         },
     },
     {
@@ -369,43 +338,38 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "label": "阿里云",
         "name": "阿里云",
         "description": (
-            "Alibaba Cloud OpenAPI MCP via local mcp-proxy + AccessKey. "
-            "Optional Core Streamable HTTP URL."
+            "Alibaba Cloud OpenAPI MCP (Core Streamable HTTP) via Custom OAuth. "
+            "Paste Core URL + RAM OAuth Client ID (Aliyun DCR ignores custom redirects; "
+            "OAuth 2.1 apps have no secret)."
         ),
-        "connection": "stdio",
+        "connection": "oauth",
         "egress": "domestic",
         "popular": True,
         "categories": ["Developer Tools"],
-        "tags": ["aliyun", "alibaba", "stdio", "mcp", "openapi", "accesskey"],
+        "tags": ["aliyun", "alibaba", "oauth", "mcp", "openapi"],
         "sort_order": 17,
         "spec": {
-            "command": "uvx",
-            "args": ["alibabacloud.mcp-proxy==0.2.17"],
-            "env": [
-                {
-                    "name": "ALIBABA_CLOUD_ACCESS_KEY_ID",
-                    "label": "AccessKey ID",
-                    "secret": True,
-                },
-                {
-                    "name": "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
-                    "label": "AccessKey Secret",
-                    "secret": True,
-                },
-                {
-                    "name": "ALIBABACLOUD_MCP_SERVER_URL",
-                    "label": "MCP Server URL (optional Core Streamable HTTP)",
-                    "secret": False,
-                },
-            ],
+            "url_from_operator": True,
+            "authorize_url": "https://signin.aliyun.com/oauth2/v1/auth",
+            "token_url": "https://oauth.aliyun.com/v1/token",
+            # Aliyun /register always returns the official client_id and does NOT bind
+            # custom redirect_uris → redirect_uri_mismatch for Portunus public callback.
+            # Operator creates a RAM OAuth 2.1 Web/Native app (no client_secret — PKCE)
+            # with our callback, then selects it as Custom OAuth on Core.
+            "token_endpoint_auth_method": "none",
+            "resource": "https://openapi-mcp.cn-hangzhou.aliyuncs.com",
+            # No issuer: Aliyun omits RFC 9207 iss on the authorize redirect
+            # (callback got=''), so an explicit issuer rejects every success.
+            # Origin anchoring on authorize_url (signin.aliyun.com) still applies.
+            "scopes": ["openid", "/acs/mcp-server"],
             "setup_hints": [
                 (
-                    "Create a RAM user AccessKey with "
-                    "`AliyunOpenAPIMCPServerStaticCredentialAccess`. "
-                    "Paste AK ID/Secret. Optionally set MCP Server URL to your Core "
-                    "Streamable HTTP from [api.aliyun.com/mcp](https://api.aliyun.com/mcp) "
-                    "(blank = auto-discover). First-time accounts may need Aliyun’s "
-                    "static-credential pre-check."
+                    "1) RAM → OAuth 企业应用: OAuth 2.1 Web/Native, callback "
+                    "``https://portunus.wuhan.dev/api/oauth/callback``, scope "
+                    "``/acs/mcp-server`` (no secret — PKCE). "
+                    "2) [api.aliyun.com/mcp](https://api.aliyun.com/mcp) Core → 自定义 OAuth "
+                    "→ that app; copy Streamable HTTP URL. "
+                    "3) Connect: paste URL + Client ID, Authorize."
                 ),
             ],
         },
@@ -693,6 +657,87 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "[agent.qq.com/doc/cli-setup.md](https://agent.qq.com/doc/cli-setup.md). "
                     "Runners need Node + `agently-cli` on PATH (or npx). Connect pins "
                     "HOME=STATE_DIR so the CLI keychain/session matches tool calls."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "qqmail-imap",
+        "label": "QQ Mail",
+        "name": "QQ Mail",
+        "description": (
+            "QQ Mail via Himalaya IMAP/SMTP (shared himalaya-shim). Paste address + 授权码 "
+            "— not the login password."
+        ),
+        "connection": "skill_bridge",
+        "egress": "domestic",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["qqmail", "qq", "mail", "imap", "smtp", "himalaya"],
+        "sort_order": 24,
+        "spec": {
+            "manifest": HIMALAYA_MANIFEST,
+            "secrets": [
+                {"name": "MAIL_ADDRESS", "label": "QQ Mail address", "secret": False},
+                {
+                    "name": "MAIL_PASSWORD",
+                    "label": "授权码 (IMAP/SMTP app password)",
+                    "secret": True,
+                },
+            ],
+            "env_defaults": {
+                "IMAP_URL": "imaps://imap.qq.com:993",
+                "SMTP_URL": "smtps://smtp.qq.com:465",
+                "SKILL_ROOT": HIMALAYA_SHIM_ROOT,
+                "STATE_DIR": "/var/lib/portunus/skill-state/qqmail-imap",
+            },
+            "setup_hints": [
+                (
+                    "In QQ Mail settings enable IMAP/SMTP and create an 授权码 "
+                    "(client authorization code). Paste your QQ address and that code at "
+                    "Connect — not your account login password. Hosts default to imap.qq.com / "
+                    "smtp.qq.com. Docs: [help.mail.qq.com](https://service.mail.qq.com/)."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "vivaldi-mail",
+        "label": "Vivaldi Mail",
+        "name": "Vivaldi Mail",
+        "description": (
+            "Vivaldi.net webmail via Himalaya IMAP/SMTP (shared himalaya-shim). "
+            "Paste address + password (or app password if 2FA is on)."
+        ),
+        "connection": "skill_bridge",
+        "egress": "overseas",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["vivaldi", "mail", "imap", "smtp", "himalaya"],
+        "sort_order": 27,
+        "spec": {
+            "manifest": HIMALAYA_MANIFEST,
+            "secrets": [
+                {"name": "MAIL_ADDRESS", "label": "Vivaldi Mail address", "secret": False},
+                {
+                    "name": "MAIL_PASSWORD",
+                    "label": "Password or app password",
+                    "secret": True,
+                },
+            ],
+            "env_defaults": {
+                "IMAP_URL": "imaps://imap.vivaldi.net:993",
+                "SMTP_URL": "smtps://smtp.vivaldi.net:465",
+                "SKILL_ROOT": HIMALAYA_SHIM_ROOT,
+                "STATE_DIR": "/var/lib/portunus/skill-state/vivaldi-mail",
+            },
+            "setup_hints": [
+                (
+                    "Use your full ``@vivaldi.net`` address. With 2FA off, the account "
+                    "password works; with 2FA on, create an app password on Vivaldi.net. "
+                    "Hosts default to imap.vivaldi.net / smtp.vivaldi.net. Docs: "
+                    "[help.vivaldi.com](https://help.vivaldi.com/services/webmail/"
+                    "setting-up-vivaldi-mail-in-a-mail-client/)."
                 ),
             ],
         },
@@ -1218,27 +1263,72 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "label": "Yandex Disk",
         "name": "Yandex Disk",
         "description": (
-            "Yandex Disk files via rclone (paste your `rclone config show yandex` "
-            "output at Connect; authorize first with `rclone authorize \"yandex\"`)."
+            "Yandex Disk via official Yandex 360 MCP. Paste the OAuth token from Yandex’s "
+            "Disk MCP page (third-party OAuth apps get 403 on tools/list)."
         ),
-        "connection": "stdio",
+        "connection": "oauth",
+        "egress": "overseas",
         "popular": True,
         "categories": ["Storage"],
-        "tags": ["yandex", "disk", "files", "rclone"],
+        "tags": ["yandex", "disk", "files", "mcp", "oauth"],
         "sort_order": 37,
         "spec": {
-            "command": RCLONE_SHIM,
-            "args": [],
-            "env": [
-                {
-                    "name": "RCLONE_REMOTE_CONFIG",
-                    "label": (
-                        "rclone remote config — run `rclone config show yandex` "
-                        "(authorize first with `rclone authorize \"yandex\"`)"
-                    ),
-                    "secret": True,
-                    "multiline": True,
-                },
+            "url": YANDEX_DISK_MCP_URL,
+            "authorize_url": YANDEX_OAUTH_AUTHORIZE_URL,
+            "token_url": YANDEX_OAUTH_TOKEN_URL,
+            "token_endpoint_auth_method": "client_secret_post",
+            "authorization_scheme": "OAuth",
+            "allow_bearer_token": True,
+            # Match Yandex’s first-party Disk MCP client scopes.
+            "scopes": [
+                "cloud_api:disk.read",
+                "cloud_api:disk.write",
+            ],
+            "setup_hints": [
+                (
+                    "On the [Yandex Disk MCP](https://yandex.ru/dev/yandex-360/mcp/ru/disk) "
+                    "docs page, use **Get OAuth token**, then paste it at Connect "
+                    "(stored as ``Authorization: OAuth …``). Self-registered OAuth apps "
+                    "currently get MCP ``tools/list`` 403. Needs Yandex 360."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "yandex-mail",
+        "label": "Yandex Mail",
+        "name": "Yandex Mail",
+        "description": (
+            "Yandex Mail via official Yandex 360 MCP (read/search/drafts/labels; no send). "
+            "Paste the OAuth token from Yandex’s Mail MCP page."
+        ),
+        "connection": "oauth",
+        "egress": "overseas",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["yandex", "mail", "mcp", "oauth"],
+        "sort_order": 27,
+        "spec": {
+            "url": YANDEX_MAIL_MCP_URL,
+            "authorize_url": YANDEX_OAUTH_AUTHORIZE_URL,
+            "token_url": YANDEX_OAUTH_TOKEN_URL,
+            "token_endpoint_auth_method": "client_secret_post",
+            "authorization_scheme": "OAuth",
+            "allow_bearer_token": True,
+            "scopes": [
+                "mail:messages.read",
+                "mail:messages.write",
+                "mail:folders.read",
+                "mail:folders.write",
+                "mail:labels.read",
+                "mail:labels.write",
+            ],
+            "setup_hints": [
+                (
+                    "On the [Yandex Mail MCP](https://yandex.ru/dev/yandex-360/mcp/ru/mail) "
+                    "docs page, use **Get OAuth token**, then paste it at Connect. "
+                    "Self-registered OAuth apps currently get MCP ``tools/list`` 403. No send."
+                ),
             ],
         },
     },
@@ -1524,6 +1614,23 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
             if method not in ("none", "client_secret_basic", "client_secret_post"):
                 raise RegistryError(422, "invalid_request", "invalid token_endpoint_auth_method")
             out["token_endpoint_auth_method"] = method
+        scheme = spec.get("authorization_scheme")
+        if scheme is not None and scheme != "":
+            if not isinstance(scheme, str) or not scheme.strip():
+                raise RegistryError(
+                    422, "invalid_request", "spec.authorization_scheme must be a non-empty string"
+                )
+            scheme = scheme.strip()
+            if not scheme.isascii() or any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in scheme):
+                raise RegistryError(422, "invalid_request", "invalid authorization_scheme")
+            out["authorization_scheme"] = scheme
+        delimiter = spec.get("scope_delimiter")
+        if delimiter is not None and delimiter != "":
+            if delimiter not in (" ", ","):
+                raise RegistryError(
+                    422, "invalid_request", "spec.scope_delimiter must be space or comma"
+                )
+            out["scope_delimiter"] = delimiter
         # client_id may be omitted: DCR (registration_endpoint), CIMD (use_cimd), or
         # paste-at-Connect apps (GitHub / Dropbox / Drive) supply it later.
         return _with_setup_hints(out, spec)
@@ -1832,7 +1939,7 @@ class CatalogStore:
                 a["slug"]: a
                 for a in DEFAULT_APPS
                 if a.get("connection") == "stdio"
-                and a["slug"] in ("box", "tencentcloud")
+                and a["slug"] in ("box",)
             }
             rows = (
                 await s.execute(select(CatalogApp).where(CatalogApp.slug.in_(list(seed_by_slug))))
@@ -2024,6 +2131,140 @@ class CatalogStore:
                 await s.commit()
                 log.info("onedrive migration: switched catalog row to Graph oauth")
 
+        # yandex: rclone stdio → official Disk MCP oauth (mcp.360.yandex.net).
+        async with self._sf() as s:
+            seed = next((a for a in DEFAULT_APPS if a["slug"] == "yandex"), None)
+            row = (
+                await s.execute(select(CatalogApp).where(CatalogApp.slug == "yandex"))
+            ).scalar_one_or_none()
+            if (
+                seed is not None
+                and row is not None
+                and seed.get("connection") == "oauth"
+                and isinstance(row.spec, dict)
+                and (
+                    row.connection == "stdio"
+                    or row.spec.get("command") == RCLONE_SHIM
+                )
+            ):
+                row.connection = "oauth"
+                row.description = seed["description"]
+                row.tags = _normalize_labels(seed.get("tags"), field="tags")
+                row.spec = validate_spec("oauth", seed["spec"])
+                linked = (
+                    await s.execute(select(Server).where(Server.slug == "yandex"))
+                ).scalars().all()
+                for srv in linked:
+                    if srv.kind != "stdio" or srv.command != RCLONE_SHIM:
+                        continue
+                    stale_env = (
+                        await s.execute(
+                            select(VaultEntry).where(
+                                VaultEntry.server_id == srv.id,
+                                VaultEntry.name.in_(
+                                    sorted(
+                                        {
+                                            "RCLONE_REMOTE_CONFIG",
+                                            "Authorization",
+                                            "portunus.oauth_client_secret",
+                                            "portunus.oauth_refresh_token",
+                                        }
+                                    )
+                                ),
+                            )
+                        )
+                    ).scalars().all()
+                    for entry in stale_env:
+                        await s.delete(entry)
+                    await s.execute(delete(Tool).where(Tool.server_id == srv.id))
+                    srv.kind = "remote"
+                    srv.command = None
+                    srv.args = []
+                    srv.url = seed["spec"]["url"]
+                    srv.oauth = {
+                        k: v for k, v in row.spec.items() if k not in {"url", "setup_hints"}
+                    }
+                    srv.has_oauth_refresh = False
+                    srv.token_expires_at = None
+                    srv.enabled = False
+                    srv.vault_version = int(srv.vault_version or 0) + 1
+                await s.commit()
+                log.info("yandex migration: switched catalog row to Disk MCP oauth")
+
+        # qqmail (official api.mail.qq.com MCP): delisted — Workbuddy-oriented OAuth/DCR
+        # paste is too brittle for Portunus. Prefer qqmail-imap (Himalaya).
+        async with self._sf() as s:
+            dirty = False
+            row = (
+                await s.execute(select(CatalogApp).where(CatalogApp.slug == "qqmail"))
+            ).scalar_one_or_none()
+            if row is not None:
+                await s.delete(row)
+                dirty = True
+            linked = (
+                await s.execute(
+                    select(Server).where(
+                        Server.slug == "qqmail",
+                        Server.recipe_slug == "qqmail",
+                    )
+                )
+            ).scalars().all()
+            for srv in linked:
+                if srv.enabled:
+                    srv.enabled = False
+                    dirty = True
+            if dirty:
+                await s.commit()
+                log.info("qqmail delist: removed catalog app; paused recipe servers")
+
+        # yandex / yandex-mail: drop mistaken comma scope_delimiter (Yandex wants spaces).
+        # Re-runs every boot — Connect used to re-paste a stale server delimiter.
+        async with self._sf() as s:
+            dirty = False
+            for slug in ("yandex", "yandex-mail"):
+                seed = next((a for a in DEFAULT_APPS if a["slug"] == slug), None)
+                if seed is None or seed.get("connection") != "oauth":
+                    continue
+                want = validate_spec("oauth", seed["spec"])
+                row = (
+                    await s.execute(select(CatalogApp).where(CatalogApp.slug == slug))
+                ).scalar_one_or_none()
+                if row is not None and isinstance(row.spec, dict) and row.spec != want:
+                    row.spec = want
+                    dirty = True
+                linked = (
+                    await s.execute(select(Server).where(Server.slug == slug))
+                ).scalars().all()
+                for srv in linked:
+                    if srv.kind != "remote" or not isinstance(srv.oauth, dict):
+                        continue
+                    oauth = dict(srv.oauth)
+                    changed = False
+                    if "scope_delimiter" in oauth:
+                        oauth.pop("scope_delimiter", None)
+                        changed = True
+                    # Keep authorize scopes aligned with the catalog seed.
+                    want_scopes = list(want.get("scopes") or [])
+                    if want_scopes and list(oauth.get("scopes") or []) != want_scopes:
+                        oauth["scopes"] = want_scopes
+                        changed = True
+                    if want.get("authorization_scheme") and oauth.get(
+                        "authorization_scheme"
+                    ) != want.get("authorization_scheme"):
+                        oauth["authorization_scheme"] = want["authorization_scheme"]
+                        changed = True
+                    if want.get("allow_bearer_token") is True and oauth.get(
+                        "allow_bearer_token"
+                    ) is not True:
+                        oauth["allow_bearer_token"] = True
+                        changed = True
+                    if changed:
+                        srv.oauth = oauth
+                        dirty = True
+            if dirty:
+                await s.commit()
+                log.info("yandex oauth: cleared comma scope_delimiter / aligned scopes")
+
         # Graph oauth recipes must not ship a deploy-owned Entra client_id (OSS
         # self-host: operators paste their own). Strip leftover baked ids from
         # catalog rows; leave Server.oauth alone so already-connected grants keep working.
@@ -2112,67 +2353,36 @@ class CatalogStore:
                         await s.commit()
                         log.info("vultr oauth metadata: repaired resource / dropped issuer")
 
-        # tencentcloud: refresh uvx args when the seed pin/with-list changes
-        # (e.g. --with mcp==1.1.2 for Server.list_tools compatibility).
-        # Narrow: only the known-stale pin (no --with mcp) so operator argv edits survive.
-        # Server repair is independent of the catalog-row diff (row may already be fixed).
-        _STALE_TENCENT_ARGS = ((), ("mcp-server-cvm==0.1.12",))
+        # tencentcloud: delisted (MCP 广场 Hosted SSE UX is poor). Drop catalog
+        # card; pause recipe-bound servers so they leave the Apps grid.
         async with self._sf() as s:
-            seed = next((a for a in DEFAULT_APPS if a["slug"] == "tencentcloud"), None)
+            dirty = False
             row = (
                 await s.execute(select(CatalogApp).where(CatalogApp.slug == "tencentcloud"))
             ).scalar_one_or_none()
-            if (
-                seed is not None
-                and seed.get("connection") == "stdio"
-                and isinstance(seed.get("spec"), dict)
-            ):
-                want_args = list(seed["spec"].get("args") or [])
-                want_command = seed["spec"].get("command")
-                dirty = False
-                if want_args and want_command:
-                    if (
-                        row is not None
-                        and row.connection == "stdio"
-                        and isinstance(row.spec, dict)
-                        and row.spec.get("command") == want_command
-                        and tuple(row.spec.get("args") or ()) in _STALE_TENCENT_ARGS
-                    ):
-                        try:
-                            row.spec = validate_spec(
-                                "stdio", {**dict(row.spec), "args": want_args}
-                            )
-                            dirty = True
-                        except RegistryError:
-                            log.warning(
-                                "tencentcloud uvx args backfill skipped (invalid)",
-                                exc_info=True,
-                            )
-                    linked = (
-                        await s.execute(
-                            select(Server).where(
-                                Server.slug == "tencentcloud", Server.kind == "stdio"
-                            )
-                        )
-                    ).scalars().all()
-                    for srv in linked:
-                        if srv.command != want_command:
-                            continue
-                        prev = tuple(srv.args or ())
-                        if prev not in _STALE_TENCENT_ARGS:
-                            continue
-                        srv.args = list(want_args)
-                        await s.execute(delete(Tool).where(Tool.server_id == srv.id))
-                        srv.vault_version = int(srv.vault_version or 0) + 1
-                        dirty = True
-                if dirty:
-                    await s.commit()
-                    log.info("tencentcloud uvx args: aligned to seed pin")
+            if row is not None:
+                await s.delete(row)
+                dirty = True
+            linked = (
+                await s.execute(
+                    select(Server).where(
+                        Server.slug == "tencentcloud",
+                        Server.recipe_slug == "tencentcloud",
+                    )
+                )
+            ).scalars().all()
+            for srv in linked:
+                if srv.enabled:
+                    srv.enabled = False
+                    dirty = True
+            if dirty:
+                await s.commit()
+                log.info("tencentcloud delist: removed catalog app; paused recipe servers")
 
-        # aliyun: OAuth remote → stdio mcp-proxy + AccessKey only.
+        # aliyun: AccessKey mcp-proxy stdio → Core Streamable HTTP oauth (url paste + DCR).
+        # Also purge short-lived aliyun-ak catalog/server rows if any remain.
         async with self._sf() as s:
             dirty = False
-            # Drop short-lived aliyun-ak catalog/server rows if any were seeded.
             for stale_slug in ("aliyun-ak",):
                 stale_app = (
                     await s.execute(
@@ -2203,12 +2413,18 @@ class CatalogStore:
             if (
                 seed is not None
                 and row is not None
-                and seed.get("connection") == "stdio"
+                and seed.get("connection") == "oauth"
                 and isinstance(seed.get("spec"), dict)
-                and row.connection == "oauth"
+                and (
+                    row.connection == "stdio"
+                    or (
+                        isinstance(row.spec, dict)
+                        and "alibabacloud.mcp-proxy" in str(row.spec.get("args") or "")
+                    )
+                )
             ):
-                want_spec = validate_spec("stdio", seed["spec"])
-                row.connection = "stdio"
+                want_spec = validate_spec("oauth", seed["spec"])
+                row.connection = "oauth"
                 row.description = seed["description"]
                 row.tags = _normalize_labels(seed.get("tags"), field="tags")
                 row.spec = want_spec
@@ -2216,7 +2432,7 @@ class CatalogStore:
                     await s.execute(select(Server).where(Server.slug == "aliyun"))
                 ).scalars().all()
                 for srv in linked:
-                    if srv.kind not in ("stdio", "remote"):
+                    if srv.kind != "stdio":
                         continue
                     stale_env = (
                         await s.execute(
@@ -2225,6 +2441,9 @@ class CatalogStore:
                                 VaultEntry.name.in_(
                                     sorted(
                                         {
+                                            "ALIBABA_CLOUD_ACCESS_KEY_ID",
+                                            "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+                                            "ALIBABACLOUD_MCP_SERVER_URL",
                                             "Authorization",
                                             "portunus.oauth_client_secret",
                                             "portunus.oauth_refresh_token",
@@ -2237,9 +2456,9 @@ class CatalogStore:
                     for entry in stale_env:
                         await s.delete(entry)
                     await s.execute(delete(Tool).where(Tool.server_id == srv.id))
-                    srv.kind = "stdio"
-                    srv.command = want_spec["command"]
-                    srv.args = list(want_spec.get("args") or [])
+                    srv.kind = "remote"
+                    srv.command = None
+                    srv.args = []
                     srv.url = None
                     srv.oauth = None
                     srv.has_oauth_refresh = False
@@ -2247,19 +2466,16 @@ class CatalogStore:
                     srv.enabled = False
                     srv.vault_version = int(srv.vault_version or 0) + 1
                 dirty = True
-                log.info("aliyun migration: OAuth remote → AccessKey mcp-proxy")
+                log.info("aliyun migration: AccessKey mcp-proxy → Core OAuth remote")
             elif (
                 seed is not None
                 and row is not None
-                and seed.get("connection") == "stdio"
+                and seed.get("connection") == "oauth"
+                and row.connection == "oauth"
                 and isinstance(seed.get("spec"), dict)
-                and row.connection == "stdio"
             ):
-                # Keep pin / env defs / tags aligned with seed; bump linked servers.
-                want_spec = validate_spec("stdio", seed["spec"])
+                want_spec = validate_spec("oauth", seed["spec"])
                 want_tags = _normalize_labels(seed.get("tags"), field="tags")
-                want_command = want_spec.get("command")
-                want_args = list(want_spec.get("args") or [])
                 if (
                     row.spec != want_spec
                     or row.description != seed["description"]
@@ -2269,24 +2485,54 @@ class CatalogStore:
                     row.description = seed["description"]
                     row.tags = want_tags
                     dirty = True
-                    log.info("aliyun stdio seed: aligned mcp-proxy pin")
-                if want_command and want_args:
-                    linked = (
-                        await s.execute(
-                            select(Server).where(
-                                Server.slug == "aliyun", Server.kind == "stdio"
-                            )
-                        )
-                    ).scalars().all()
-                    for srv in linked:
-                        if srv.command != want_command:
-                            continue
-                        if list(srv.args or []) == want_args:
-                            continue
-                        srv.args = list(want_args)
-                        await s.execute(delete(Tool).where(Tool.server_id == srv.id))
-                        srv.vault_version = int(srv.vault_version or 0) + 1
+                    log.info("aliyun oauth seed: aligned Custom OAuth metadata")
+                # Drop fake DCR client_id (Aliyun /register always returns the
+                # official OpenAPI MCP client — redirects never match Portunus).
+                # Also drop issuer: Aliyun omits RFC 9207 iss (callback got='').
+                _ALIYUN_OFFICIAL_CLIENT = "4071151845732613353"
+                _ALIYUN_STALE_ISSUERS = frozenset(
+                    {
+                        "https://openapi-mcp.cn-hangzhou.aliyuncs.com",
+                        "https://openapi-mcp.cn-hangzhou.aliyuncs.com/",
+                    }
+                )
+                linked = (
+                    await s.execute(select(Server).where(Server.slug == "aliyun"))
+                ).scalars().all()
+                for srv in linked:
+                    if srv.kind != "remote" or not isinstance(srv.oauth, dict):
+                        continue
+                    oauth = dict(srv.oauth)
+                    changed = False
+                    if oauth.pop("registration_endpoint", None) is not None:
+                        changed = True
+                    if oauth.get("issuer") in _ALIYUN_STALE_ISSUERS:
+                        oauth.pop("issuer", None)
+                        changed = True
+                    if oauth.get("client_id") == _ALIYUN_OFFICIAL_CLIENT:
+                        oauth.pop("client_id", None)
+                        changed = True
+                    if oauth.get("token_endpoint_auth_method") != want_spec.get(
+                        "token_endpoint_auth_method"
+                    ):
+                        method = want_spec.get("token_endpoint_auth_method")
+                        if method:
+                            oauth["token_endpoint_auth_method"] = method
+                        else:
+                            oauth.pop("token_endpoint_auth_method", None)
+                        changed = True
+                    if list(want_spec.get("scopes") or []) and list(
+                        oauth.get("scopes") or []
+                    ) != list(want_spec.get("scopes") or []):
+                        oauth["scopes"] = list(want_spec["scopes"])
+                        changed = True
+                    if changed:
+                        srv.oauth = oauth
+                        # Keep client_id / url so re-Authorize works without re-paste.
                         dirty = True
+                        log.info(
+                            "aliyun oauth: cleared official DCR client / issuer / registration"
+                        )
             if dirty:
                 await s.commit()
 
@@ -2449,8 +2695,8 @@ class CatalogStore:
 
         # Idempotent: add new skill_bridge seeds (e.g. weread) on existing deploys,
         # and refresh skill_bridge manifests when the packaged seed grows (tool list).
-        # Also insert missing rclone-shim stdio seeds (yandex/drime/…) and http
-        # seeds (raindrop/…) — same gap as skill_bridge: empty-DB seed only runs once.
+        # Also insert missing rclone-shim stdio seeds (drime/mega/…) and http/oauth
+        # seeds (raindrop/yandex-mail/…) — same gap as skill_bridge: empty-DB seed only runs once.
         added = 0
         refreshed = 0
         async with self._sf() as s:
@@ -2607,6 +2853,10 @@ class CatalogStore:
                     view["spec"] = merged_spec
                 out.append(view)
                 seen.add(recipe.slug)
+            # Disabled TOML recipes stay hidden even if a stale DB row remains (mode A).
+            for recipe in loaded.recipes:
+                if not recipe.enabled:
+                    seen.add(recipe.slug)
             # DB-only apps not yet migrated to TOML remain visible in mode A
             if mode == "A":
                 for r in rows:

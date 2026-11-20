@@ -44,6 +44,9 @@ deploy/docker-compose.*.local.yml
 id_rsa*
 id_ed25519*
 deploy/rclone-shim/rclone
+deploy/himalaya-shim/himalaya
+deploy/himalaya-shim/himalaya.*
+!deploy/himalaya-shim/himalaya_config.py
 deploy/rclone.zip
 deploy/rclone-v*/
 deploy/rclone.SHA256SUMS

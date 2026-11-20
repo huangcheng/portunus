@@ -1,0 +1,31 @@
+slug = "qqmail-imap"
+label = "QQ Mail"
+description = "QQ Mail via Himalaya IMAP/SMTP (shared himalaya-shim). Paste address + 授权码 — not the login password."
+connection = "skill_bridge"
+egress = "domestic"
+popular = true
+categories = ["Productivity"]
+tags = ["qqmail", "qq", "mail", "imap", "smtp", "himalaya"]
+sort_order = 24
+
+[spec]
+manifest = "himalaya.example.yaml"
+setup_hints = [
+  "In QQ Mail settings enable IMAP/SMTP and create an 授权码 (client authorization code). Paste your QQ address and that code at Connect — not your account login password. Hosts default to imap.qq.com / smtp.qq.com. Docs: [help.mail.qq.com](https://service.mail.qq.com/).",
+]
+
+[[spec.secrets]]
+name = "MAIL_ADDRESS"
+label = "QQ Mail address"
+secret = false
+
+[[spec.secrets]]
+name = "MAIL_PASSWORD"
+label = "授权码 (IMAP/SMTP app password)"
+secret = true
+
+[spec.env_defaults]
+IMAP_URL = "imaps://imap.qq.com:993"
+SMTP_URL = "smtps://smtp.qq.com:465"
+SKILL_ROOT = "/var/lib/portunus/skills/himalaya-shim"
+STATE_DIR = "/var/lib/portunus/skill-state/qqmail-imap"

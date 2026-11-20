@@ -210,7 +210,14 @@ def _recipients(addrs: list[str]) -> list[dict[str, Any]]:
 class GraphBuiltinClient:
     """Drop-in for ``RemoteClient`` against ``portunus-graph://…`` URLs."""
 
-    def __init__(self, url: str, *, headers: dict[str, str], timeout_s: float = 60.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str],
+        timeout_s: float = 60.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.url = url
         self.profile = parse_graph_builtin_url(url)
         if self.profile is None:
@@ -223,8 +230,29 @@ class GraphBuiltinClient:
         # Probe may list tools before Connect; Graph calls need a bearer.
         self._auth = auth.strip()
         self._timeout_s = float(timeout_s)
+        self._transport = transport
+
+    def _http(self, budget: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=self._transport,
+            timeout=httpx.Timeout(budget),
+            follow_redirects=False,
+            trust_env=False,
+        )
 
     async def list_tools(self) -> list[dict[str, Any]]:
+        # Static tool schemas — but when Authorization is present, hit Graph /me
+        # so a revoked/expired bearer fails Temporal probe as auth_required
+        # (not only later on invoke). Same contract as JmapBuiltinClient.
+        if self._auth:
+            budget = float(self._timeout_s)
+            try:
+                async with self._http(budget) as http:
+                    await self._request(http, "GET", "/me")
+            except PortunusError:
+                raise
+            except httpx.HTTPError as e:
+                raise PortunusError("upstream_crash", f"graph /me failed: {e}") from e
         return list(_MAIL_TOOLS if self.profile == "mail" else _ONEDRIVE_TOOLS)
 
     async def call_tool(
@@ -240,11 +268,7 @@ class GraphBuiltinClient:
             raise PortunusError("auth_required", "Microsoft Graph Authorization missing")
         budget = float(self._timeout_s if timeout_s is None else timeout_s)
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(budget),
-                follow_redirects=False,
-                trust_env=False,
-            ) as http:
+            async with self._http(budget) as http:
                 if self.profile == "mail":
                     return await self._mail(http, name, arguments or {})
                 return await self._onedrive(http, name, arguments or {})

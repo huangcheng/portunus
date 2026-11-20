@@ -66,7 +66,13 @@ echo "discovered ${#SPECS[@]} vendor CLI(s)"
 
 fetch_github_release() {
   local repo="$1" tag="$2" asset_tmpl="$3" arch="$4" out="$5" member="$6"
-  local asset="${asset_tmpl//\{arch\}/$arch}"
+  local gnu_arch="$arch"
+  case "$arch" in
+    amd64) gnu_arch=x86_64 ;;
+    arm64) gnu_arch=aarch64 ;;
+  esac
+  local asset="${asset_tmpl//\{gnu_arch\}/$gnu_arch}"
+  asset="${asset//\{arch\}/$arch}"
   if [[ -x "$out" ]]; then
     return 0
   fi

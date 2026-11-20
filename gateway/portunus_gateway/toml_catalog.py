@@ -285,6 +285,9 @@ def parse_recipe(path: Path, *, manifest_root: Path | None = None) -> Recipe:
     popular = data.get("popular", False)
     if not isinstance(popular, bool):
         raise CatalogVerifyError("popular must be a boolean")
+    enabled = data.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise CatalogVerifyError("enabled must be a boolean")
     categories = data.get("categories", [])
     tags = data.get("tags", [])
     if not isinstance(categories, list) or not all(isinstance(c, str) for c in categories):
@@ -410,6 +413,8 @@ def parse_recipe(path: Path, *, manifest_root: Path | None = None) -> Recipe:
         sort_order=sort_order,
         spec=spec,
         artifacts=artifacts,
+        enabled=enabled,
+        disable_reasons=[] if enabled else ["disabled_in_toml"],
         egress=egress,
     )
 

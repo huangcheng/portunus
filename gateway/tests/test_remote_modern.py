@@ -345,3 +345,33 @@ async def test_mcp_param_headers_survive_cross_origin_redirect():
     )
     assert redirected.headers["mcp-param-x-query"] == "v"  # mirror follows the body
     assert redirected.headers.get("x-vault-secret") is None  # credentials never do
+
+
+def test_format_rpc_error_unwraps_qqmail_nested_auth():
+    from portunus_gateway.remote import _format_rpc_error, _portunus_error_from_rpc
+
+    err = {
+        "code": -32000,
+        "message": json.dumps(
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "error": {
+                                    "code": 40101,
+                                    "message": "Invalid or expired access token",
+                                }
+                            }
+                        ),
+                    }
+                ]
+            }
+        ),
+    }
+    text = _format_rpc_error(err)
+    assert "Invalid or expired access token" in text
+    assert "40101" in text
+    mapped = _portunus_error_from_rpc(err)
+    assert mapped.code == "auth_required"

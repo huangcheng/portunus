@@ -205,6 +205,16 @@ function oauthBodyFromApp(
   const issuer =
     specString(app.spec, "issuer") || existing?.oauth?.issuer || "";
   if (issuer) body.issuer = issuer;
+  // Yandex MCP needs Authorization: OAuth <token> (not Bearer).
+  const authScheme =
+    specString(app.spec, "authorization_scheme") ||
+    existing?.oauth?.authorization_scheme ||
+    "";
+  if (authScheme) body.authorization_scheme = authScheme;
+  // Only catalog may set scope_delimiter — never revive a stale server value
+  // (Yandex rejects comma-joined scopes with invalid_scope).
+  const scopeDelim = specString(app.spec, "scope_delimiter");
+  if (scopeDelim) body.scope_delimiter = scopeDelim;
   return body;
 }
 
@@ -961,11 +971,18 @@ function OAuthManagePanel({
   const urlFromOperator = specBool(app.spec, "url_from_operator");
   const needsManualClientId =
     !specString(app.spec, "registration_endpoint") && !useCimd;
+  // Public clients (PKCE / auth method none) — e.g. Aliyun OAuth 2.1 — have no secret.
+  const authMethod =
+    specString(app.spec, "token_endpoint_auth_method") ||
+    server?.oauth?.token_endpoint_auth_method ||
+    "";
+  const needsClientSecret = needsManualClientId && authMethod !== "none";
   const [clientId, setClientId] = useState(
     server?.oauth?.client_id || specString(app.spec, "client_id"),
   );
   const [clientSecret, setClientSecret] = useState("");
   const [bearerToken, setBearerToken] = useState("");
+  const [refreshToken, setRefreshToken] = useState("");
   const [mcpUrl, setMcpUrl] = useState(server?.url || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -977,6 +994,7 @@ function OAuthManagePanel({
     setClientId(server?.oauth?.client_id || specString(app.spec, "client_id"));
     setClientSecret("");
     setBearerToken("");
+    setRefreshToken("");
     setMcpUrl(server?.url || "");
     setError("");
     setNotice("");
@@ -1006,9 +1024,12 @@ function OAuthManagePanel({
     const oauth = oauthBodyFromApp(app, clientId, current);
     const forBearer = !!opts?.forBearer || allowBearer;
     const url = resolveMcpUrl();
-    // Token paste does not need an OAuth client_id (Fastmail public redirects
-    // are not DCR/CIMD-eligible — API token is the supported path).
-    if (forBearer && !oauth.client_id) {
+    // Attach oauth metadata when DCR/CIMD/client_id is available so a pasted
+    // refresh_token can renew later (QQ Mail). Bare API-token apps (Yandex /
+    // Fastmail) have no registration_endpoint — create without oauth.
+    const canAttachOauth =
+      !!oauth.client_id || !!oauth.registration_endpoint || !!oauth.use_cimd;
+    if (forBearer && !canAttachOauth) {
       if (current) {
         if (urlFromOperator && url !== current.url) {
           const updated = await api.updateServer(current.id, { url });
@@ -1030,11 +1051,12 @@ function OAuthManagePanel({
     if (needsManualClientId && !oauth.client_id) {
       throw new Error("Client ID is required");
     }
-    const secret = clientSecret.trim() ? clientSecret.trim() : null;
+    const secret =
+      needsClientSecret && clientSecret.trim() ? clientSecret.trim() : null;
     if (current) {
       const updated = await api.updateServer(current.id, {
         oauth,
-        oauth_client_secret: secret,
+        ...(needsClientSecret ? { oauth_client_secret: secret } : {}),
         ...(urlFromOperator ? { url } : {}),
       });
       setCurrent(updated);
@@ -1046,7 +1068,7 @@ function OAuthManagePanel({
       kind: "remote",
       url,
       oauth,
-      oauth_client_secret: secret,
+      ...(needsClientSecret && secret ? { oauth_client_secret: secret } : {}),
       recipe_slug: app.slug,
     });
     setCurrent(created);
@@ -1065,11 +1087,22 @@ function OAuthManagePanel({
           return;
         }
         const target = await ensureServer({ forBearer: true });
-        const updated = await api.setBearerToken(target.id, bearerToken.trim());
+        const pasted = bearerToken.trim();
+        const refresh = refreshToken.trim();
+        const cid = clientId.trim();
+        const updated = await api.setBearerToken(target.id, pasted, {
+          ...(refresh ? { refresh_token: refresh } : {}),
+          ...(cid ? { client_id: cid } : {}),
+        });
         setCurrent(updated);
         setBearerToken("");
+        setRefreshToken("");
         setClientSecret("");
-        setNotice("API token saved. Probe tools to go live for agents.");
+        setNotice(
+          refresh || pasted.startsWith("{")
+            ? "Token saved (refresh kept when provided). Probe tools to go live for agents."
+            : "API token saved. Probe tools to go live for agents.",
+        );
         await onChanged();
         return;
       }
@@ -1129,16 +1162,41 @@ function OAuthManagePanel({
           </label>
         )}
         {allowBearer ? (
-          <label className="field">
-            MCP API token {active ? "(replace)" : ""}
-            <input
-              type="password"
-              value={bearerToken}
-              onChange={(e) => setBearerToken(e.target.value)}
-              autoComplete="off"
-              placeholder={active ? "••••••••" : "Paste MCP API token"}
-            />
-          </label>
+          <>
+            <label className="field">
+              MCP API token {active ? "(replace)" : ""}
+              <textarea
+                value={bearerToken}
+                onChange={(e) => setBearerToken(e.target.value)}
+                autoComplete="off"
+                rows={3}
+                placeholder={
+                  active
+                    ? "••••••••"
+                    : "Access token, or JSON {access_token, refresh_token, client_id}"
+                }
+              />
+            </label>
+            <label className="field">
+              Refresh token (optional — required for auto-renew)
+              <input
+                type="password"
+                value={refreshToken}
+                onChange={(e) => setRefreshToken(e.target.value)}
+                autoComplete="off"
+                placeholder="Leave blank if the JSON above already includes it"
+              />
+            </label>
+            <label className="field">
+              OAuth client ID (optional — needed with refresh token)
+              <input
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                autoComplete="off"
+                placeholder="From Codex mcp login / local DCR client"
+              />
+            </label>
+          </>
         ) : needsManualClientId ? (
           <>
             <label className="field">
@@ -1150,16 +1208,22 @@ function OAuthManagePanel({
                 autoComplete="off"
               />
             </label>
-            <label className="field">
-              Client secret {configured ? "(leave blank to keep)" : "(optional)"}
-              <input
-                type="password"
-                value={clientSecret}
-                onChange={(e) => setClientSecret(e.target.value)}
-                autoComplete="off"
-                placeholder={configured ? "••••••••" : undefined}
-              />
-            </label>
+            {needsClientSecret ? (
+              <label className="field">
+                Client secret {configured ? "(leave blank to keep)" : "(optional)"}
+                <input
+                  type="password"
+                  value={clientSecret}
+                  onChange={(e) => setClientSecret(e.target.value)}
+                  autoComplete="off"
+                  placeholder={configured ? "••••••••" : undefined}
+                />
+              </label>
+            ) : (
+              <p className="provider-hint">
+                Public client (PKCE) — no client secret.
+              </p>
+            )}
           </>
         ) : (
           <p className="provider-hint">
@@ -1181,6 +1245,9 @@ function OAuthManagePanel({
             Redirect URI: <code>{`${window.location.origin}/api/oauth/callback`}</code>
           </p>
         )}
+
+        {error && <div className="notice error">{error}</div>}
+        {notice && <div className="notice success">{notice}</div>}
 
         <div className="apps-actions">
           {(allowBearer || needsManualClientId || urlFromOperator) && (
@@ -1253,9 +1320,6 @@ function OAuthManagePanel({
           setCurrent={setCurrent}
           onChanged={onChanged}
         />
-
-        {notice && <div className="notice success">{notice}</div>}
-        {error && <div className="notice error">{error}</div>}
       </form>
     </DrawerShell>
   );

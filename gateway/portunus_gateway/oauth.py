@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import secrets
 import time
 import uuid
@@ -31,11 +32,32 @@ def canonicalize_authorization(value: str) -> str:
     (notably Linear's ``mcp.linear.app``) reject lowercase ``bearer`` with 401.
     Token endpoints often return ``token_type: "bearer"``; rewrite that to the
     conventional ``Bearer`` spelling when building/storing the header.
+    Non-Bearer schemes (e.g. Yandex MCP ``OAuth``) are left unchanged.
     """
     parts = value.split(None, 1)
     if len(parts) == 2 and parts[0].lower() == "bearer":
         return f"Bearer {parts[1]}"
     return value
+
+
+def apply_authorization_scheme(authorization: str, scheme: str | None) -> str:
+    """Rewrite the Authorization scheme after token exchange when the MCP peer needs it.
+
+    Yandex 360 MCP expects ``Authorization: OAuth <token>`` even though the token
+    endpoint returns ``token_type: bearer``.
+    """
+    value = canonicalize_authorization(authorization.strip())
+    if not scheme:
+        return value
+    if not isinstance(scheme, str) or not scheme.strip():
+        raise OAuthError(422, "invalid_oauth", "authorization_scheme must be a non-empty string")
+    scheme = scheme.strip()
+    # Visible ASCII token (%x21-7E), no whitespace — header injection otherwise.
+    if not scheme.isascii() or any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in scheme):
+        raise OAuthError(422, "invalid_oauth", "invalid authorization_scheme")
+    parts = value.split(None, 1)
+    token = parts[1] if len(parts) == 2 else value
+    return f"{scheme} {token}"
 
 
 @dataclass(frozen=True)
@@ -45,6 +67,70 @@ class TokenBundle:
     authorization: str
     refresh_token: str | None = None
     expires_in: int | None = None
+
+
+@dataclass(frozen=True)
+class PastedOAuthCredentials:
+    """Operator-pasted access token, optionally with refresh material (e.g. QQ Mail)."""
+
+    access_token: str
+    refresh_token: str | None = None
+    client_id: str | None = None
+    expires_in: int | None = None
+
+
+def parse_pasted_oauth_credentials(raw: str) -> PastedOAuthCredentials:
+    """Parse a raw access token or a JSON blob with access/refresh/client_id.
+
+    Accepts Codex / local ``mcp login`` style JSON::
+
+        {"access_token":"…","refresh_token":"…","client_id":"…","expires_in":3600}
+
+    Also accepts camelCase keys and a nested ``tokens`` object. Non-JSON input is
+    treated as a bare access token (optionally already ``Bearer …`` / ``OAuth …``).
+    """
+    if not isinstance(raw, str) or not raw.strip() or "\x00" in raw:
+        raise OAuthError(422, "invalid_request", "token required")
+    text = raw.strip()
+    data: Any = None
+    if text.startswith("{"):
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise OAuthError(422, "invalid_request", "token JSON is invalid") from e
+    if isinstance(data, dict):
+        nested = data.get("tokens")
+        if isinstance(nested, dict):
+            data = {**data, **nested}
+        access = (
+            data.get("access_token")
+            or data.get("accessToken")
+            or data.get("token")
+            or data.get("access")
+        )
+        if not isinstance(access, str) or not access.strip():
+            raise OAuthError(422, "invalid_request", "JSON token missing access_token")
+        refresh = data.get("refresh_token") or data.get("refreshToken")
+        refresh_token = (
+            refresh.strip() if isinstance(refresh, str) and refresh.strip() else None
+        )
+        cid = data.get("client_id") or data.get("clientId")
+        client_id = cid.strip() if isinstance(cid, str) and cid.strip() else None
+        expires_raw = data.get("expires_in") or data.get("expiresIn")
+        expires_in: int | None = None
+        if isinstance(expires_raw, bool):
+            expires_in = None
+        elif isinstance(expires_raw, int) and expires_raw > 0:
+            expires_in = expires_raw
+        elif isinstance(expires_raw, float) and expires_raw > 0:
+            expires_in = int(expires_raw)
+        return PastedOAuthCredentials(
+            access_token=access.strip(),
+            refresh_token=refresh_token,
+            client_id=client_id,
+            expires_in=expires_in,
+        )
+    return PastedOAuthCredentials(access_token=text)
 
 
 class OAuthError(Exception):
@@ -186,6 +272,16 @@ def validate_oauth_config(raw: Any) -> dict[str, Any] | None:
         if method not in ("none", "client_secret_basic", "client_secret_post"):
             raise OAuthError(422, "invalid_oauth", "invalid token_endpoint_auth_method")
         out["token_endpoint_auth_method"] = method
+    scheme = raw.get("authorization_scheme")
+    if scheme is not None and scheme != "":
+        # Validate via the same rules as apply_authorization_scheme.
+        apply_authorization_scheme("Bearer x", str(scheme))
+        out["authorization_scheme"] = str(scheme).strip()
+    delimiter = raw.get("scope_delimiter")
+    if delimiter is not None and delimiter != "":
+        if delimiter not in (" ", ","):
+            raise OAuthError(422, "invalid_oauth", "scope_delimiter must be space or comma")
+        out["scope_delimiter"] = delimiter
     return out
 
 
@@ -201,6 +297,8 @@ def oauth_public_view(oauth: dict[str, Any] | None) -> dict[str, Any] | None:
         "issuer": oauth.get("issuer"),
         "registration_endpoint": oauth.get("registration_endpoint"),
         "token_endpoint_auth_method": oauth.get("token_endpoint_auth_method"),
+        "authorization_scheme": oauth.get("authorization_scheme"),
+        "scope_delimiter": oauth.get("scope_delimiter"),
         "use_cimd": bool(oauth.get("use_cimd")),
         "configured": bool(oauth.get("authorize_url") and oauth.get("token_url")),
     }
@@ -230,6 +328,7 @@ class OAuthStore:
         redirect_uri: str,
         resource: str | None = None,
         issuer: str | None = None,
+        scope_delimiter: str = " ",
     ) -> dict[str, str]:
         self._purge()
         verifier, challenge = new_pkce()
@@ -254,7 +353,8 @@ class OAuthStore:
             "code_challenge_method": "S256",
         }
         if scopes:
-            params["scope"] = " ".join(scopes)
+            delim = scope_delimiter if scope_delimiter in (" ", ",") else " "
+            params["scope"] = delim.join(scopes)
         if resource:
             params["resource"] = resource
         # Merge into the query component. Concatenation drops params into a fragment
