@@ -236,12 +236,7 @@ def test_gdrive_oauth_drive_mcp_seed_shape():
 
 
 def test_ms_graph_oauth_seeds_shape():
-    from portunus_gateway.catalog import (
-        DEFAULT_APPS,
-        MS_GRAPH_CLIENT_ID,
-        preferred_regions_for_slug,
-        validate_spec,
-    )
+    from portunus_gateway.catalog import DEFAULT_APPS, preferred_regions_for_slug, validate_spec
 
     mail = next(a for a in DEFAULT_APPS if a["slug"] == "outlook-mail")
     drive = next(a for a in DEFAULT_APPS if a["slug"] == "onedrive")
@@ -251,7 +246,9 @@ def test_ms_graph_oauth_seeds_shape():
     drive_spec = validate_spec("oauth", drive["spec"])
     assert mail_spec["url"] == "portunus-graph://mail"
     assert drive_spec["url"] == "portunus-graph://onedrive"
-    assert mail_spec["client_id"] == drive_spec["client_id"] == MS_GRAPH_CLIENT_ID
+    # Self-host OSS: never bake a deploy-owned Entra client_id (paste at Connect).
+    assert "client_id" not in mail_spec
+    assert "client_id" not in drive_spec
     assert mail_spec["token_endpoint_auth_method"] == "client_secret_post"
     assert "Mail.Send" in mail_spec["scopes"]
     assert "Files.ReadWrite" in drive_spec["scopes"]
@@ -259,6 +256,17 @@ def test_ms_graph_oauth_seeds_shape():
     assert "Mail.Send" not in drive_spec["scopes"]
     assert preferred_regions_for_slug("outlook-mail") == ["overseas"]
     assert preferred_regions_for_slug("onedrive") == ["overseas"]
+
+
+def test_oauth_seeds_never_bake_client_id():
+    """Confidential-client recipes must not ship a Portunus-owned client_id."""
+    from portunus_gateway.catalog import DEFAULT_APPS, validate_spec
+
+    for raw in DEFAULT_APPS:
+        if raw.get("connection") != "oauth":
+            continue
+        spec = validate_spec("oauth", raw["spec"])
+        assert "client_id" not in spec, f"{raw['slug']} bakes client_id={spec.get('client_id')!r}"
 
 
 def test_egress_preferred_regions_for_catalog_slugs():

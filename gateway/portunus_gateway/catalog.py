@@ -27,9 +27,8 @@ WEBDAV_MCP_PACKAGE = "webdav-mcp-server@1.0.4"
 # via binary_allowlist. Bridges a pasted rclone remote config to webdav-mcp-server.
 RCLONE_SHIM = "/var/lib/portunus/skills/rclone-shim/shim"
 
-# Portunus-owned Entra app (personal MSA only). Client secret stays off-git —
-# operators paste it at Connect (or seal via vault/env on the gateway host).
-MS_GRAPH_CLIENT_ID = "2cfb730c-0b20-4ddd-8e87-a67a77db4546"
+# Microsoft identity (personal MSA / consumers). Operators register their own
+# Entra app and paste Client ID + secret at Connect — never bake a deploy-owned id.
 MS_GRAPH_AUTHORIZE_URL = (
     "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
 )
@@ -702,7 +701,7 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "name": "Outlook Mail",
         "description": (
             "Personal Outlook / Hotmail mail via Microsoft Graph (first-party "
-            "portunus-graph adapter). Authorize with a Microsoft account."
+            "portunus-graph adapter). Paste your Entra Client ID/secret at Connect."
         ),
         "connection": "oauth",
         "egress": "overseas",
@@ -714,7 +713,6 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "url": MS_GRAPH_MAIL_URL,
             "authorize_url": MS_GRAPH_AUTHORIZE_URL,
             "token_url": MS_GRAPH_TOKEN_URL,
-            "client_id": MS_GRAPH_CLIENT_ID,
             "token_endpoint_auth_method": "client_secret_post",
             "scopes": [
                 "openid",
@@ -726,10 +724,11 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             ],
             "setup_hints": [
                 (
-                    "Uses the Portunus Entra app (personal Microsoft accounts). "
-                    "Paste the Entra **client secret** at Connect, then Authorize. "
-                    "Redirect URI must be this gateway's `/api/oauth/callback`. "
-                    "Docs: [Microsoft Graph mail](https://learn.microsoft.com/graph/api/resources/mail-api-overview)."
+                    "Register an Entra app (personal Microsoft accounts / consumers), "
+                    "add delegated Mail.ReadWrite + Mail.Send + User.Read + offline_access, "
+                    "set the redirect URI shown at Connect, then paste **Client ID** and "
+                    "**client secret**. Docs: "
+                    "[Microsoft Graph mail](https://learn.microsoft.com/graph/api/resources/mail-api-overview)."
                 ),
             ],
         },
@@ -1153,7 +1152,7 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "name": "OneDrive",
         "description": (
             "OneDrive files via Microsoft Graph (first-party portunus-graph adapter). "
-            "Authorize with a Microsoft account; no rclone paste."
+            "Paste your Entra Client ID/secret at Connect; no rclone paste."
         ),
         "connection": "oauth",
         "egress": "overseas",
@@ -1165,7 +1164,6 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "url": MS_GRAPH_ONEDRIVE_URL,
             "authorize_url": MS_GRAPH_AUTHORIZE_URL,
             "token_url": MS_GRAPH_TOKEN_URL,
-            "client_id": MS_GRAPH_CLIENT_ID,
             "token_endpoint_auth_method": "client_secret_post",
             "scopes": [
                 "openid",
@@ -1176,10 +1174,11 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             ],
             "setup_hints": [
                 (
-                    "Uses the Portunus Entra app (personal Microsoft accounts). "
-                    "Paste the Entra **client secret** at Connect, then Authorize. "
-                    "Redirect URI must be this gateway's `/api/oauth/callback`. "
-                    "Docs: [OneDrive Graph](https://learn.microsoft.com/graph/api/resources/onedrive)."
+                    "Register an Entra app (personal Microsoft accounts / consumers), "
+                    "add delegated Files.ReadWrite + User.Read + offline_access, "
+                    "set the redirect URI shown at Connect, then paste **Client ID** and "
+                    "**client secret**. Docs: "
+                    "[OneDrive Graph](https://learn.microsoft.com/graph/api/resources/onedrive)."
                 ),
             ],
         },
@@ -1975,6 +1974,30 @@ class CatalogStore:
                     srv.vault_version = int(srv.vault_version or 0) + 1
                 await s.commit()
                 log.info("onedrive migration: switched catalog row to Graph oauth")
+
+        # Graph oauth recipes must not ship a deploy-owned Entra client_id (OSS
+        # self-host: operators paste their own). Strip leftover baked ids from
+        # catalog rows; leave Server.oauth alone so already-connected grants keep working.
+        async with self._sf() as s:
+            dirty = False
+            for slug in ("outlook-mail", "onedrive"):
+                seed = next((a for a in DEFAULT_APPS if a["slug"] == slug), None)
+                if seed is None or seed.get("connection") != "oauth":
+                    continue
+                row = (
+                    await s.execute(select(CatalogApp).where(CatalogApp.slug == slug))
+                ).scalar_one_or_none()
+                if row is None or not isinstance(row.spec, dict):
+                    continue
+                if "client_id" not in row.spec and row.description == seed["description"]:
+                    continue
+                row.description = seed["description"]
+                row.tags = _normalize_labels(seed.get("tags"), field="tags")
+                row.spec = validate_spec("oauth", seed["spec"])
+                dirty = True
+            if dirty:
+                await s.commit()
+                log.info("ms-graph oauth: cleared baked client_id from catalog recipes")
 
         # vultr: repair known-bad oauth resource and drop issuer.
         # …/mcp as resource makes Vultr authorize return server_error. An explicit

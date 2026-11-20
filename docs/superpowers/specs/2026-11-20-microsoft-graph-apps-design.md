@@ -1,22 +1,20 @@
 # Microsoft Graph apps (Outlook Mail + OneDrive) — design
 
-**Size:** two first-party catalog apps sharing one Entra registration  
-**Status:** Entra done; **no softaria** — Graph via `portunus-graph://` builtin
+**Size:** two first-party catalog apps sharing one Entra registration pattern  
+**Status:** Graph via `portunus-graph://` builtin; operators bring their own Entra app
 
 ## Intent
 
-Operators Connect **Outlook Mail** and **OneDrive** (personal Microsoft accounts). Agents get mail/file tools. One Entra app; two catalog recipes (separate grants / pause). **No third-party MCP packages** (`@softeria/ms-365-mcp-server` rejected).
+Operators Connect **Outlook Mail** and **OneDrive** (personal Microsoft accounts). Agents get mail/file tools. Two catalog recipes (separate grants / pause). **No third-party MCP packages**. **No baked Client ID** — self-hosted OSS; each deploy registers its own Entra app (same pattern as GitHub / Dropbox / Google Drive).
 
-## Entra (done)
+## Operator Entra app
 
-| Field | Value |
+| Field | Guidance |
 |---|---|
-| Display name | Portunus |
-| App (client) ID | `2cfb730c-0b20-4ddd-8e87-a67a77db4546` |
-| Audience | Personal Microsoft accounts only |
-| Redirect | `https://portunus.wuhan.dev/api/oauth/callback` |
-| Permissions | `User.Read`, `Mail.ReadWrite`, `Mail.Send`, `Files.ReadWrite`, `openid`, `profile`, `offline_access` |
-| Client secret | `~/.config/portunus/ms-entra-portunus.json` only (not in git) |
+| Audience | Personal Microsoft accounts (consumers) for v1 |
+| Redirect | This gateway's `/api/oauth/callback` |
+| Permissions | Mail app: `User.Read`, `Mail.ReadWrite`, `Mail.Send`, `openid`, `profile`, `offline_access`. OneDrive: `User.Read`, `Files.ReadWrite`, plus openid/profile/offline_access |
+| Connect | Paste **Client ID** + **client secret**, then Authorize |
 
 ## Approaches
 
@@ -24,24 +22,23 @@ Operators Connect **Outlook Mail** and **OneDrive** (personal Microsoft accounts
 |---|---|---|
 | `@softeria/ms-365-mcp-server` sidecar | Extra npm dependency / ops surface | **Rejected** |
 | Official Work IQ Mail MCP | Copilot / no personal MSA | Rejected |
-| `skill_bridge` + `http_rpc` → Graph | Possible, but Entra browser OAuth is already `connection: oauth` | Secondary |
-| **`portunus-graph://` + catalog oauth** | First-party Graph client; reuses Entra OAuth + vault refresh | **Chosen** |
-| New plugin framework | Catalog already extensible | Rejected |
+| Baked Portunus Entra `client_id` | Not portable for self-host | **Rejected** |
+| **`portunus-graph://` + catalog oauth** | First-party Graph client; operator-pasted Entra credentials | **Chosen** |
 
 ## Goals
 
-- Catalog `outlook-mail` (new) and `onedrive` (replace rclone) as **`connection: oauth`**.
-- Spec URL is `portunus-graph://mail` or `portunus-graph://onedrive`; gateway `RemoteProxy` dispatches to `GraphBuiltinClient` (in-process Graph HTTP).
-- Auth: Portunus-owned Entra OAuth (baked `client_id`; operator pastes client secret at Connect) → vault access/refresh → `Authorization: Bearer` on Graph.
+- Catalog `outlook-mail` and `onedrive` as **`connection: oauth`** with no `spec.client_id`.
+- Spec URL is `portunus-graph://mail` or `portunus-graph://onedrive`; gateway `RemoteProxy` dispatches to `GraphBuiltinClient`.
+- Auth: operator Entra OAuth → vault access/refresh → `Authorization: Bearer` on Graph.
 - `egress: overseas`.
-- `ensure_defaults` migration: rclone OneDrive → oauth Graph when seeds ship.
+- `ensure_defaults` migrates rclone OneDrive → oauth Graph and strips any previously baked client_id from catalog rows.
 
 ## Non-goals
 
 - Third-party MCP runtimes or compose sidecars for Graph.
 - Work/school / Copilot Work IQ (v1).
 - One combined mail+files Connect card.
-- Committing the client secret.
+- Shipping a Portunus-owned client id or secret.
 
 ## Constraints
 
