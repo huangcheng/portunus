@@ -34,10 +34,11 @@ Platform auth (`device_qr` / `oauth_link`) requires `backend: json_cli`.
 - `token_flag` — paste-code flag (default `--token`).
 - `success_code` / `pending_codes` — numeric CLI result codes (Quark uses `0` success, `-114`/`-106` pending).
 - `browser_capture: true` — headless runners: shim `xdg-open`, keep CLI alive, return `job_id`; Connect polls `status` with sticky site routing.
-- `capture_timeout_s` — how long the runner keeps the login process (default 90).
-- `token_paste` — show paste-code fallback in UI (default true).
+- `capture_timeout_s` — how long the runner keeps the login process (default 90; raise for slow browser logins, e.g. Proton 180).
+- `token_paste` — show paste-code fallback in UI (default true). Set **`false`** when the vendor has no paste-code path (browser completes alone — Proton Drive).
+- Wrapper must invoke `BROWSER`/`xdg-open` with the printed URL when the CLI only prints it (does not open a browser itself).
 - **Never** render authorize URLs as QR for operators. Popup/tab + copy only.
-- Example: `manifests/quark.example.yaml`.
+- Examples: `manifests/quark.example.yaml` (paste code), `manifests/proton-drive.example.yaml` (browser-only).
 
 ## bearer_env / header_env
 
@@ -60,6 +61,20 @@ cli:
 - `run_wrapper: raw` — each tool maps to a CLI subcommand via `tools[].cli`.
 - `run_wrapper: run_operation` — tools use `tools[].operation` inside a `run` wrapper.
 - Expand `${SKILL_ROOT}` / `${STATE_DIR}` from child env (`spec.env_defaults`).
+- Platform `skill_exec` always runs `node <relative-entrypoint> <action>`; keep a thin Node wrapper even when the real binary is absolute.
+
+## Provision (`cli.provision`)
+
+Fleet sync (`deploy/discover-vendor-clis.py` → `provision-vendor-clis.sh`) installs binaries into **runner containers**. Required when `command[0]` is absolute, or when a Node wrapper needs a sidecar binary (`provision.dest`).
+
+| `kind` | Fields | Peer |
+|---|---|---|
+| `github_release` | `repo`, `tag`, `asset` (`{arch}`/`{version}`), optional `binary` | Cubox — `command: ["/usr/local/bin/cubox-cli"]` |
+| `http_file` | `url` (https, `{arch}` → x64/arm64), optional `sha512`, **`dest`** absolute | Proton Drive — `command: ["node", "scripts/…"]` + `dest: /usr/local/bin/proton-drive` |
+
+- Ops host downloads; runners never curl vendor CDNs on domestic sites when avoidable.
+- `{arch}` in GitHub assets is `amd64`/`arm64`; Proton-style URLs map amd64→`x64`.
+- After adding provision, Sync fleet (or run `provision-vendor-clis.sh` + `fleet-skills.sh`) before Connect.
 
 ## http_rpc
 

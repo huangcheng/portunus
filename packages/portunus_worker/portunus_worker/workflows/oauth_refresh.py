@@ -2,6 +2,9 @@
 
 Temporal keeps this alive across restarts. Per-server failures stay in activities
 (retries + catch), so one bad provider cannot stall the queue.
+
+Includes paused Apps (``enabled=false``): access tokens keep renewing while the
+App is hidden from agents, so Resume does not require a fresh OAuth dance.
 """
 
 from __future__ import annotations

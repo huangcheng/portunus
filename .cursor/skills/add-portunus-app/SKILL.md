@@ -26,7 +26,7 @@ hosted Streamable HTTP / SSE / OAuth MCP when the vendor offers it; use local
 | `stdio` | Local MCP argv — last resort | `command`, `args`, `env` secret defs |
 | `skill_bridge` | Vendor CLI / HTTP RPC wrapped as MCP | packaged YAML + `spec.manifest` |
 
-**Default for HTTP API gateways:** `skill_bridge` + `http_rpc` (WeRead) when there is no remote MCP. **Default for vendor drive/CLI skills with no remote MCP:** `skill_bridge` + `json_cli` (Quark, 光鸭).
+**Default for HTTP API gateways:** `skill_bridge` + `http_rpc` (WeRead) when there is no remote MCP. **Default for vendor drive/CLI skills with no remote MCP:** `skill_bridge` + `json_cli` (Quark, 光鸭, Proton Drive).
 
 Copy nearest peer:
 
@@ -34,7 +34,9 @@ Copy nearest peer:
 - WebDAV → `nutstore` / `koofr`
 - API key HTTP → `packages/portunus_skill_bridge/manifests/weread.example.yaml`
 - Device QR CLI → `guangyapan.example.yaml`
-- Authorize-link CLI → (removed: Quark rejected non-vendor agent envs; prefer OAuth remotes)
+- Browser-login official CLI (URL in terminal, no paste code) → `proton-drive.example.yaml` (`oauth_link` + `browser_capture` + `token_paste: false`)
+- Authorize-link + paste code CLI → `quark.example.yaml` (`oauth_link` + `browser_capture` + `token_paste: true`)
+- Remote MCP with credential-in-URL → `xunlei` (`connection: http`, `url_is_credential: true`; classic SSE if path is `…/sse` or `…/sse/<token>`)
 
 ## Skill-bridge path (most common)
 
@@ -45,6 +47,8 @@ Copy nearest peer:
    - `SKILL_ROOT=/var/lib/portunus/skills/<dir>`
    - `STATE_DIR=/var/lib/portunus/skill-state/<slug>`
 3. Deploy the tree to **every** runner host (not only the gateway). Probe and Connect exec on the runner.
+4. Register the tree in `deploy/fleet-skills.sh` (`state_slug_for` / `entrypoint_for`) when the dir name ≠ slug or the entrypoint is non-obvious.
+5. Official binary not on GitHub → declare `cli.provision` (`github_release` or `http_file`) so fleet sync docker-cps into runners. Host-installed binaries (e.g. Contabo) do **not** replace provision — runners are containers and do not see `/usr/local/bin` from the host unless copied in.
 
 ### 2. Packaged manifest
 
@@ -56,6 +60,7 @@ Required shape:
 - `auth` — see [references/auth-and-manifest.md](references/auth-and-manifest.md)
 - `cli:` or `http:` matching backend
 - `tools:` — **agent tools only** (never expose login/logout/status as MCP tools)
+- Optional `cli.provision` — see auth-and-manifest (**Provision**)
 
 Validate locally:
 
@@ -78,9 +83,10 @@ and refreshes skill_bridge when tools/auth change.
 Follow `.cursor/rules/app-icons.mdc` and `DESIGN.md` (Iconography).
 
 1. Asset: `dashboard/public/icons/apps/<slug>.{png|svg}` — **official** full-bleed mark only (logo fills the tile). Never invent a placeholder logo.
-2. Wire `AppIconId`, `appIconIdForSlug`, and `OFFICIAL_ICON_FILES` in `dashboard/src/icons/apps.tsx` **only if** that asset exists (`AppBrandMark` derives kind via `appIconIdForSlug`).
-3. Add `.app-brand-image.<slug>` to the **48×48** rule in `dashboard/src/style.css` (default is 30×30 and looks tiny).
-4. No redistributable mark yet → omit from `OFFICIAL_ICON_FILES`; initial-letter fallback is correct.
+2. Prefer the **product** mark (e.g. Drive `apple-touch-icon` from `drive.proton.me`), not a parent-account favicon that looks like another product.
+3. Wire `AppIconId`, `appIconIdForSlug`, and `OFFICIAL_ICON_FILES` in `dashboard/src/icons/apps.tsx` **only if** that asset exists (`AppBrandMark` derives kind via `appIconIdForSlug`).
+4. Add `.app-brand-image.<slug>` to the **48×48** rule in `dashboard/src/style.css` (default is 30×30 and looks tiny).
+5. No redistributable mark yet → omit from `OFFICIAL_ICON_FILES`; initial-letter fallback is correct.
 
 Platform auth UIs (`device_qr` / `oauth_link`) are already generic in `AppsPage.tsx` — no new panel unless you invent a new auth type.
 
@@ -113,8 +119,10 @@ Completion criteria for a skill_bridge app:
 
 - **Agents never own vendor login.** Platform Connect runs `skill_exec` auth; MCP tools are post-auth only.
 - **oauth_link authorize URLs are not QR codes.** Auto-open popup/tab + Open/Copy. Vendor in-app 扫一扫 often treats the URL as a code (`授权码无效`).
+- **Browser-only CLI login** (Proton-style): `token_paste: false`; wrapper must feed the printed https URL into `BROWSER`/`xdg-open` so `browser_capture` can surface it. Prefer file-backed credential stores under `STATE_DIR` (e.g. `PROTON_DRIVE_CREDENTIALS_STORE=unsafe_file`) — libsecret/keyring often fails inside runner containers.
 - **Stale runner `portunus_skill_bridge` fails probe** (manifest rejects new auth fields → `upstream_crash`). Sync the package to gateway **and** every runner after AuthSpec/manifest changes.
 - **Omit CLI identity flags** vendors reject (`cli.identity: {}` when needed). Use `auth.login_env` for headless/agent detection instead.
+- Set catalog `egress` (`overseas` / `domestic` / `any`) so Connect/probe prefers the right fleet region.
 - Do not commit secrets, `.venv`, or `node_modules`.
 
 ## References

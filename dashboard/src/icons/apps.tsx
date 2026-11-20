@@ -37,6 +37,7 @@ export type AppIconId =
   | "qqmusic"
   | "xunlei"
   | "proton-drive"
+  | "agent-mail"
   | "generic";
 
 export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
@@ -76,6 +77,7 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "qqmusic" || slug === "qq-music") return "qqmusic";
   if (slug === "xunlei" || slug === "thunder") return "xunlei";
   if (slug === "proton-drive" || slug === "protondrive" || slug === "proton") return "proton-drive";
+  if (slug === "agent-mail" || slug === "agentmail" || slug === "agently") return "agent-mail";
   return "generic";
 }
 
@@ -115,6 +117,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   qqmusic: "qqmusic.png",
   xunlei: "xunlei.png",
   "proton-drive": "proton-drive.png",
+  "agent-mail": "agent-mail.png",
 };
 
 export function AppBrandMark({

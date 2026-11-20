@@ -527,12 +527,23 @@ def _mapped_loopback(addr: str) -> bool:
 
 
 def _is_classic_sse_url(url: str) -> bool:
-    """True when the path is the legacy MCP SSE listen URL (…/sse)."""
+    """True when the path is the legacy MCP SSE listen URL (…/sse or …/sse/<token>).
+
+    Youdao-style peers end at ``/sse``. Credential-in-path peers (e.g. Xunlei
+    ``…/models/sse/<token>``) keep a segment after ``sse`` — still classic SSE,
+    not Streamable HTTP.
+    """
     try:
         path = httpx.URL(url).path.rstrip("/").lower()
     except (httpx.InvalidURL, ValueError):
         return False
-    return path.endswith("/sse")
+    parts = [p for p in path.split("/") if p]
+    if not parts:
+        return False
+    if parts[-1] == "sse":
+        return True
+    # One credential segment after /sse/ (do not match /sse/a/b/...).
+    return len(parts) >= 2 and parts[-2] == "sse"
 
 
 class _ClassicSseSession:

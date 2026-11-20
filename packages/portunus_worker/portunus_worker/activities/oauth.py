@@ -16,6 +16,10 @@ async def list_oauth_refresh_plan(skew_s: int) -> dict:
     ``due``: servers with ``has_oauth_refresh`` whose access token is missing
     expiry or expires within ``skew_s``. Failures for one id never block others —
     the workflow refreshes each in its own activity.
+
+    Intentionally ignores ``Server.enabled``: paused Apps (dashboard Pause) must
+    still get access tokens renewed so Resume does not start from ``auth_required``.
+    Server-probe skips disabled rows; this plan must not.
     """
     from sqlalchemy import or_, select
 
@@ -26,6 +30,7 @@ async def list_oauth_refresh_plan(skew_s: int) -> dict:
     now = datetime.now(timezone.utc)
     due_before = now + timedelta(seconds=skew)
     async with async_session() as s:
+        # Do not filter Server.enabled — paused Apps stay on the refresh schedule.
         due_rows = (
             await s.execute(
                 select(Server.id).where(

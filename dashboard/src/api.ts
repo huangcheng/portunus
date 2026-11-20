@@ -47,13 +47,15 @@ async function call<T>(
   path: string,
   body?: unknown,
   extraHeaders?: Record<string, string>,
+  opts?: { timeoutMs?: number },
 ): Promise<T> {
+  const timeoutMs = opts?.timeoutMs ?? 60_000;
   let res: Response;
   try {
     res = await fetch(`/api${path}`, {
       method,
       credentials: "same-origin",
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: {
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
         ...(method !== "GET" && method !== "HEAD"
@@ -562,7 +564,20 @@ export const api = {
   createServer: (b: CreateServerBody) => call<Server>("POST", "/servers", b),
   updateServer: (id: string, b: UpdateServerBody) =>
     call<Server>("PATCH", `/servers/${encodeURIComponent(id)}`, b),
-  probe: (id: string) => call<unknown>("POST", `/servers/${encodeURIComponent(id)}/probe`),
+  // Registry._probe fails over site-by-site (probe_timeout_s + 5s slack each), so a
+  // multi-site probe can exceed a single 65s budget. Client must outlive that or the
+  // UI aborts mid-probe and the card stays "Probing" until a hard refresh.
+  // Response is {server_id, added, changed, missing, tools} — not a Server view.
+  probe: (id: string) =>
+    call<{
+      server_id: string;
+      added: number;
+      changed: string[];
+      missing: string[];
+      tools: Tool[];
+    }>("POST", `/servers/${encodeURIComponent(id)}/probe`, undefined, undefined, {
+      timeoutMs: 300_000,
+    }),
   skillAuth: (id: string, action: string, opts?: { token?: string; job_id?: string }) =>
     call<SkillAuthResult>("POST", `/servers/${encodeURIComponent(id)}/skill-auth`, {
       action,

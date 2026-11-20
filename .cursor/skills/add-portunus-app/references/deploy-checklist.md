@@ -38,7 +38,9 @@ done
 
 json_cli skill trees → every runner host at `/var/lib/portunus/skills/<dir>` (and empty state dir under `/var/lib/portunus/skill-state/<slug>`).
 
-Or kick **Sync fleet** (Workflows page / `POST /api/fleet/providers-update` → always-on `fleet-providers-update`): rclone → skill trees → vendor CLIs discovered from `cli.provision` in skill-bridge manifests → `portunus_skill_bridge` into each runner. Absolute-path CLIs (e.g. Cubox) must declare `cli.provision` so sync installs them automatically — do not rely on runtime `npx`.
+Or kick **Sync fleet** (Workflows page / `POST /api/fleet/providers-update` → always-on `fleet-providers-update`): rclone → skill trees → vendor CLIs discovered from `cli.provision` in skill-bridge manifests → `portunus_skill_bridge` into each runner.
+
+Absolute-path CLIs **and** Node wrappers with a sidecar binary must declare `cli.provision` (`github_release` or `http_file`) so sync installs into runner containers — do not rely on runtime `npx` or a binary that exists only on the host (Contabo `/usr/local/bin` is invisible inside Docker until provision/`docker cp`).
 
 Dashboard: `cd dashboard && npm run build`, then rsync `dist/` (and `public/icons/apps/` if icons are not already in the build output).
 
@@ -74,9 +76,12 @@ Confirm the slug row exists and `spec.manifest.auth` matches the packaged YAML.
 | Probe `upstream_crash` / Manifest validation error on runner | Stale `portunus_skill_bridge` on that runner |
 | Auth works, tools = 0 | Probe never succeeded or server left disabled |
 | oauth_link `授权码无效` | Operator scanned authorize URL with vendor 扫一扫 — use Open/Copy browser flow |
-| Login URL missing / job not sticky | `browser_capture` off, or status polls not hitting the same runner site |
+| Login URL missing / job not sticky | `browser_capture` off, wrapper never opens `BROWSER` with the printed URL, or status polls not hitting the same runner site |
+| Auth OK on host CLI, fails in Connect | Missing `cli.provision` / binary not inside runner container; or keyring-only session (use file store under `STATE_DIR`) |
 | Tiny icon | Slug missing from 48×48 `.app-brand-image` CSS list |
+| Wrong brand mark | Used parent-account favicon instead of product apple-touch / logo |
 | Catalog missing new oauth/http app on live DB | `ensure_defaults` only auto-adds **skill_bridge** after first seed — create via API |
+| Still 1 old tool after expanding manifest | `ensure_defaults` refresh + **Probe** again on the connected server |
 
 ## Local package check on a runner
 

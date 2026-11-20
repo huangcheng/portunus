@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode, type Ref } from "react";
 import { paginate } from "./paginate";
-import { api, type OAuthBody, type Server, type Tool } from "./api";
+import { ApiError, api, type OAuthBody, type Server, type Tool } from "./api";
 import { CatalogConfigPage } from "./CatalogConfigPage";
 import { EnvFields } from "./EnvFields";
 import { parseEnvRows } from "./envRows";
@@ -54,6 +54,15 @@ function openAuthorizeWindow(url: string) {
   if (!popup) {
     window.open(url, "_blank", "noopener,noreferrer");
   }
+}
+
+/** Gateway RegistryError(409, "probe_in_progress", ...) — code lives on ApiError.code. */
+function isProbeInProgress(err: unknown): boolean {
+  return (
+    err instanceof ApiError &&
+    err.status === 409 &&
+    err.code === "probe_in_progress"
+  );
 }
 
 function appUrl(app: CatalogApp): string | null {
@@ -1350,6 +1359,65 @@ function SkillBridgeManagePanel({
     setCurrent(refreshed);
   }
 
+  /** After Connect, discover tools so the card leaves never-observed "Probing". */
+  async function readServer(id: string): Promise<Server | null> {
+    const list = await api.servers();
+    return list.find((s) => s.id === id) ?? null;
+  }
+
+  async function waitForProbeSettle(id: string): Promise<Server | null> {
+    for (let i = 0; i < 45; i++) {
+      const s = await readServer(id);
+      if (s && s.status !== "probing") return s;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    return readServer(id);
+  }
+
+  async function probeAfterLogin(id: string) {
+    // skill_auth already schedules clear_error_and_reprobe — an immediate probe
+    // often races with 409 probe_in_progress. Treat that as soft success and wait.
+    try {
+      const prior = await readServer(id);
+      // Previously probed + disabled was paused on purpose — do not silently un-pause.
+      const resumePaused =
+        !!prior && !prior.enabled && !!(prior.last_probe_at || prior.last_ok_at);
+      let raced = false;
+      try {
+        await api.probe(id);
+      } catch (err) {
+        if (!isProbeInProgress(err)) throw err;
+        raced = true;
+      }
+      let next = raced ? await waitForProbeSettle(id) : await readServer(id);
+      if (next && !next.enabled && !resumePaused) {
+        next = await api.setServerEnabled(id, true);
+      }
+      if (next) setCurrent(next);
+      await onChanged();
+      setNotice(
+        next?.enabled
+          ? "Logged in · catalog refreshed · live for agents."
+          : "Logged in · catalog refreshed.",
+      );
+    } catch (err) {
+      // Login already succeeded; leave a soft hint and refresh whatever the gateway wrote.
+      let after: Server | null = null;
+      try {
+        await refreshServer(id);
+        after = await readServer(id);
+      } catch {
+        /* ignore */
+      }
+      setNotice(
+        after?.enabled
+          ? "Logged in · catalog refreshed · live for agents."
+          : "Logged in. Probe tools to go live for agents.",
+      );
+      setError((err as Error).message);
+    }
+  }
+
   async function startDeviceQrLogin() {
     setError("");
     setNotice("");
@@ -1368,9 +1436,8 @@ function SkillBridgeManagePanel({
           : "Scan the QR code to authorize Portunus.",
       );
       if (res.logged_in) {
-        setNotice("Logged in. Probe tools to go live for agents.");
         setQrPng(null);
-        await refreshServer(srv.id);
+        await probeAfterLogin(srv.id);
         return;
       }
       setNotice("Waiting for scan…");
@@ -1379,10 +1446,9 @@ function SkillBridgeManagePanel({
         const st = await api.skillAuth(srv.id, "login-status");
         if (st.qr_png_base64) setQrPng(st.qr_png_base64);
         if (st.logged_in) {
-          setNotice("Logged in. Probe tools to go live for agents.");
           setQrPng(null);
           setLoginMessage("");
-          await refreshServer(srv.id);
+          await probeAfterLogin(srv.id);
           return;
         }
         const code =
@@ -1411,9 +1477,8 @@ function SkillBridgeManagePanel({
       const srv = await ensureServer();
       const res = await api.skillAuth(srv.id, "login");
       if (res.logged_in) {
-        setNotice("Already authorized. Probe tools to go live for agents.");
         setAuthUrl(null);
-        await refreshServer(srv.id);
+        await probeAfterLogin(srv.id);
         return;
       }
       const url = res.auth_url || null;
@@ -1446,8 +1511,7 @@ function SkillBridgeManagePanel({
         if (st.logged_in) {
           setAuthUrl(null);
           setLoginMessage("");
-          setNotice("Logged in. Probe tools to go live for agents.");
-          await refreshServer(srv.id);
+          await probeAfterLogin(srv.id);
           return;
         }
         if (st.pending === false && !st.logged_in) {
@@ -1488,8 +1552,7 @@ function SkillBridgeManagePanel({
       setAuthUrl(null);
       setAuthCode("");
       setLoginMessage("");
-      setNotice("Logged in. Probe tools to go live for agents.");
-      await refreshServer(current.id);
+      await probeAfterLogin(current.id);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -2892,19 +2955,48 @@ function ServerLifecycle({
     setNotice("");
     setBusy(true);
     try {
-      await api.probe(current!.id);
+      let raced = false;
+      try {
+        await api.probe(current!.id);
+      } catch (err) {
+        // Same 409 race as post-login; wait for the in-flight probe to settle.
+        if (!isProbeInProgress(err)) throw err;
+        raced = true;
+      }
+      // Probe returns a tool-diff payload, not a Server — re-read the view.
+      let next: Server | null = null;
+      if (raced) {
+        for (let i = 0; i < 45; i++) {
+          next =
+            (await api.servers()).find((s) => s.id === current!.id) ?? null;
+          if (next && next.status !== "probing") break;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      } else {
+        next = (await api.servers()).find((s) => s.id === current!.id) ?? null;
+      }
       // Successful probe is the readiness check: enable so agents can see the server.
       // Without this, a probed+granted but still-disabled server looks identical to
       // "not granted" on the agent path (review #2).
-      let enabled = current!.enabled;
-      if (!enabled) {
-        const updated = await api.setServerEnabled(current!.id, true);
-        setCurrent(updated);
-        enabled = updated.enabled;
+      let enabled = next?.enabled ?? false;
+      if (next && !enabled) {
+        next = await api.setServerEnabled(current!.id, true);
+        enabled = next.enabled;
       }
-      setNotice(enabled ? "Catalog refreshed · live for agents." : "Catalog refreshed.");
+      if (next) setCurrent(next);
       await onChanged();
+      setNotice(enabled ? "Catalog refreshed · live for agents." : "Catalog refreshed.");
     } catch (err) {
+      // Timeout/network: gateway may still finish the probe — refresh so the card
+      // does not stay stuck on "Probing" until a hard reload.
+      try {
+        await onChanged();
+        const list = await api.servers();
+        const next = list.find((s) => s.id === current!.id) ?? null;
+        if (next) setCurrent(next);
+      } catch {
+        /* keep the original error */
+      }
       setError((err as Error).message);
     } finally {
       setBusy(false);
