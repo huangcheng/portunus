@@ -142,11 +142,19 @@ function serverConnected(server: Server, catalog: CatalogApp[]): boolean {
     const { active, configured } = appStatus(app, server);
     return active || configured || server.enabled;
   }
+  // Delisted recipe (catalog card gone) — do not keep a ghost Connected row.
+  if (server.recipe_slug && !catalog.some((a) => a.slug === server.recipe_slug)) {
+    return false;
+  }
   return true;
 }
 
 function isCatalogLinked(server: Server, catalog: CatalogApp[]): boolean {
-  return !!server.recipe_slug || !!catalogAppForServer(server, catalog);
+  if (server.recipe_slug) {
+    // Orphan recipe after delist is not a live catalog connection.
+    return catalog.some((a) => a.slug === server.recipe_slug);
+  }
+  return !!catalogAppForServer(server, catalog);
 }
 
 function serverMatchesQuery(server: Server, query: string): boolean {
@@ -387,7 +395,10 @@ export function AppsPage() {
   // Operator-added MCPs (no recipe and no catalog slug/url match).
   const customServers = useMemo(() => {
     return servers.filter(
-      (s) => !isCatalogLinked(s, catalog) && serverMatchesQuery(s, query),
+      (s) =>
+        !s.recipe_slug &&
+        !catalogAppForServer(s, catalog) &&
+        serverMatchesQuery(s, query),
     );
   }, [servers, catalog, query]);
 

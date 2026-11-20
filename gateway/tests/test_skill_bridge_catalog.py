@@ -889,10 +889,9 @@ async def test_qqmail_ensure_defaults_delists_catalog():
         assert (
             await s.execute(select(CatalogApp).where(CatalogApp.slug == "qqmail"))
         ).scalar_one_or_none() is None
-        srv = (
+        assert (
             await s.execute(select(Server).where(Server.slug == "qqmail"))
-        ).scalar_one()
-        assert srv.enabled is False
+        ).scalar_one_or_none() is None
     await engine.dispose()
 
 

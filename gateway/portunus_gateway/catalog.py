@@ -2193,6 +2193,7 @@ class CatalogStore:
 
         # qqmail (official api.mail.qq.com MCP): delisted — Workbuddy-oriented OAuth/DCR
         # paste is too brittle for Portunus. Prefer qqmail-imap (Himalaya).
+        # Delete recipe-bound servers too — a paused row still shows as "QQ Mail" in Connected.
         async with self._sf() as s:
             dirty = False
             row = (
@@ -2210,12 +2211,15 @@ class CatalogStore:
                 )
             ).scalars().all()
             for srv in linked:
-                if srv.enabled:
-                    srv.enabled = False
-                    dirty = True
+                await s.execute(delete(Tool).where(Tool.server_id == srv.id))
+                await s.execute(
+                    delete(VaultEntry).where(VaultEntry.server_id == srv.id)
+                )
+                await s.delete(srv)
+                dirty = True
             if dirty:
                 await s.commit()
-                log.info("qqmail delist: removed catalog app; paused recipe servers")
+                log.info("qqmail delist: removed catalog app and recipe servers")
 
         # yandex / yandex-mail: drop mistaken comma scope_delimiter (Yandex wants spaces).
         # Re-runs every boot — Connect used to re-paste a stale server delimiter.
