@@ -31,10 +31,29 @@ function statusLabel(status: string | null | undefined): string {
 function workflowLabel(id: string | null | undefined): string {
   if (!id) return "—";
   if (id === "fleet-providers-update") return "fleet sync";
-  if (id === "server-probe") return "server probe";
+  // Credential health lives here (no separate Temporal loop): probes mark
+  // revoked tokens / bad passwords as Needs auth. Id stays server-probe.
+  if (id === "server-probe") return "key / token probe";
   if (id === "oauth-refresh") return "oauth refresh";
   if (id.startsWith("fleet-skills-sync:")) return "fleet skills (one-shot)";
   return id;
+}
+
+/** One-line role for always-on workflows (shown under the label). */
+function workflowBlurb(id: string | null | undefined): string | null {
+  if (id === "server-probe") {
+    return "Probes enabled apps; invalid keys/tokens → Needs auth";
+  }
+  if (id === "oauth-refresh") {
+    return "Renews OAuth access tokens before expiry";
+  }
+  if (id === "fleet-providers-update") {
+    return "Installs rclone / skills / vendor CLIs / himalaya on runners";
+  }
+  if (id?.startsWith("fleet-skills-sync:")) {
+    return "One-shot skill-tree rsync";
+  }
+  return null;
 }
 
 function taskStatusKind(status: string | null | undefined): "ok" | "warn" | "bad" | "" {
@@ -343,6 +362,12 @@ export function TemporalPage() {
               <div>
                 <p className="section-kicker">Workflows</p>
                 <h2>Durable control-plane runs</h2>
+                <p className="desc muted">
+                  Key / token health is the always-on <span className="mono">server-probe</span>{" "}
+                  run (shown as “key / token probe”). OAuth renewal is{" "}
+                  <span className="mono">oauth-refresh</span> — there is no third credential
+                  workflow.
+                </p>
               </div>
             </div>
             <div className="card-body">
@@ -368,6 +393,7 @@ export function TemporalPage() {
                     ) : (
                       items.map((row) => {
                         const label = workflowLabel(row.workflow_id);
+                        const blurb = workflowBlurb(row.workflow_id);
                         return (
                           <tr key={`${row.workflow_id}:${row.run_id}`}>
                             <td data-label="Workflow">
@@ -375,6 +401,9 @@ export function TemporalPage() {
                                 <strong className="mono" title={row.workflow_id ?? undefined}>
                                   {label}
                                 </strong>
+                                {blurb ? (
+                                  <div className="muted temporal-workflow-blurb">{blurb}</div>
+                                ) : null}
                                 {row.workflow_id && label !== row.workflow_id ? (
                                   <div className="muted mono temporal-workflow-id">
                                     {row.workflow_id}
@@ -424,7 +453,11 @@ export function TemporalPage() {
         </>
       )}
 
-      {(detailBusy || selected) && (
+      {(detailBusy || selected) && (() => {
+        const detailId = selected?.workflow.workflow_id;
+        const detailLabel = workflowLabel(detailId);
+        const detailBlurb = workflowBlurb(detailId);
+        return (
         <div
           className="apps-drawer-backdrop"
           role="presentation"
@@ -442,10 +475,16 @@ export function TemporalPage() {
               <div className="apps-drawer-heading">
                 <p className="drawer-kicker">Workflow</p>
                 <div className="apps-drawer-title-row">
-                  <h2 className="mono" title={selected?.workflow.workflow_id ?? undefined}>
-                    {detailBusy ? "Loading…" : selected?.workflow.workflow_id}
+                  <h2 className="mono" title={detailId ?? undefined}>
+                    {detailBusy ? "Loading…" : detailLabel}
                   </h2>
                 </div>
+                {!detailBusy && detailId && detailLabel !== detailId ? (
+                  <p className="desc mono">{detailId}</p>
+                ) : null}
+                {!detailBusy && detailBlurb ? (
+                  <p className="desc muted">{detailBlurb}</p>
+                ) : null}
                 {!detailBusy && selected?.workflow.workflow_type ? (
                   <p className="desc mono">{selected.workflow.workflow_type}</p>
                 ) : null}
@@ -590,7 +629,8 @@ export function TemporalPage() {
             </div>
           </aside>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

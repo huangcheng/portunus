@@ -94,6 +94,17 @@ _FORBIDDEN_ENV_PREFIXES = ("PORTUNUS_", "LD_", "DYLD_")  # runner rejects these 
 _FORBIDDEN_HEADERS = frozenset(
     {"host", "content-length", "transfer-encoding", "connection", "upgrade", "te", "trailer"}
 )
+
+
+def _json_omit_none(value: Any) -> Any:
+    """Recursively drop ``None`` from dict/list trees before JSON-encoding manifests."""
+    if isinstance(value, dict):
+        return {k: _json_omit_none(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_json_omit_none(v) for v in value if v is not None]
+    return value
+
+
 _RUNNER_STATUS = {
     "runner_unavailable": 503,
     "upstream_timeout": 504,
@@ -1544,8 +1555,12 @@ class Registry:
                 out[k] = value
         manifest = (row.spec or {}).get("manifest")
         if isinstance(manifest, dict):
+            # Drop JSON nulls so older runner skill_bridge builds (extra=forbid)
+            # do not reject newer optional provision keys the catalog still stores.
             out[SKILL_BRIDGE_MANIFEST_ENV] = json.dumps(
-                manifest, ensure_ascii=False, separators=(",", ":")
+                _json_omit_none(manifest),
+                ensure_ascii=False,
+                separators=(",", ":"),
             )
         return out
 

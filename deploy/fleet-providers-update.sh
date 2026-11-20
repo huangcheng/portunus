@@ -167,7 +167,32 @@ if [[ "$want_himalaya" -eq 1 ]]; then
       mkdir -p "$PORTUNUS_HIMALAYA_CACHE"
     fi
   fi
-  run_component himalaya st_himalaya bash "$HERE/provision-himalaya-shim.sh" "${HOSTS[@]}"
+  # Local vultr runner is updated separately on-host (worker has no docker.sock /
+  # self-SSH). Opt in only when this script runs on the host:
+  #   PORTUNUS_LOCAL_RUNNER=1 deploy/fleet-providers-update.sh …
+  if [[ -z "${PORTUNUS_APPS_DIR:-}" ]]; then
+    for cand in "$ROOT/catalog/apps" /opt/stacks/portunus/catalog/apps; do
+      if [[ -d "$cand" ]]; then
+        export PORTUNUS_APPS_DIR="$cand"
+        break
+      fi
+    done
+  fi
+  himalaya_hosts=("${HOSTS[@]}")
+  include_local="${PORTUNUS_LOCAL_RUNNER:-}"
+  case "${include_local,,}" in
+    1|true|yes|on) include_local=1 ;;
+    ""|0|false|no|off) include_local="" ;;
+    *)
+      echo "ignoring unrecognized PORTUNUS_LOCAL_RUNNER=$include_local" >&2
+      include_local=""
+      ;;
+  esac
+  if [[ "$include_local" == "1" ]] && \
+     [[ " ${HOSTS[*]} " != *" local "* && " ${HOSTS[*]} " != *" localhost "* && " ${HOSTS[*]} " != *" 127.0.0.1 "* ]]; then
+    himalaya_hosts+=(local)
+  fi
+  run_component himalaya st_himalaya bash "$HERE/provision-himalaya-shim.sh" "${himalaya_hosts[@]}"
 fi
 
 resolve_skill_bridge_src() {

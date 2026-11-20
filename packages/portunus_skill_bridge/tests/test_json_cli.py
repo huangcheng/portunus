@@ -89,6 +89,48 @@ async def test_json_cli_sets_home_from_state_dir(monkeypatch, tmp_path):
     assert os.environ["HOME"] == str(tmp_path / "wrong-home")
 
 
+def test_absolute_state_home_creates_under_skill_state(tmp_path, monkeypatch):
+    """First himalaya tool call must mkdir catalog STATE_DIR leaves."""
+    from portunus_skill_bridge.backends import json_cli as jc
+
+    root = tmp_path / "skill-state"
+    root.mkdir()
+    monkeypatch.setattr(jc, "_SKILL_STATE_PREFIX", str(root) + "/")
+    leaf = root / "vivaldi-mail"
+    assert not leaf.exists()
+    got = jc._absolute_state_home(str(leaf), label="STATE_DIR")
+    assert got == str(leaf)
+    assert leaf.is_dir()
+
+
+def test_absolute_state_home_refuses_outside_prefix(tmp_path):
+    from portunus_skill_bridge.backends import json_cli as jc
+
+    outside = tmp_path / "other"
+    try:
+        jc._absolute_state_home(str(outside), label="STATE_DIR")
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "absolute existing directory" in str(e)
+    assert not outside.exists()
+
+
+def test_absolute_state_home_refuses_traversal_escape(tmp_path, monkeypatch):
+    from portunus_skill_bridge.backends import json_cli as jc
+
+    root = tmp_path / "skill-state"
+    root.mkdir()
+    monkeypatch.setattr(jc, "_SKILL_STATE_PREFIX", str(root) + "/")
+    # Un-normalized string starts with the prefix but resolves outside it.
+    escape = str(root / ".." / "outside-leaf")
+    try:
+        jc._absolute_state_home(escape, label="STATE_DIR")
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "absolute existing directory" in str(e)
+    assert not (tmp_path / "outside-leaf").exists()
+
+
 @pytest.mark.anyio
 async def test_json_cli_pins_home_when_unset(monkeypatch, tmp_path):
     """Cubox-style: scrubbed MCP env has no HOME/STATE_DIR — still pin a home."""

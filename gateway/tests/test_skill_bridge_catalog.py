@@ -367,7 +367,10 @@ def test_aliyun_oauth_core_streamable_http():
     assert raw["label"] == "阿里云"
     spec = validate_spec("oauth", raw["spec"])
     assert spec.get("url_from_operator") is True
-    assert spec["authorize_url"] == "https://signin.aliyun.com/oauth2/v1/auth"
+    assert spec["authorize_url"] == (
+        "https://signin.aliyun.com/oauth2/v1/auth?access_type=offline"
+    )
+    assert "access_type=offline" in spec["authorize_url"]
     assert spec["token_url"] == "https://oauth.aliyun.com/v1/token"
     # Fake DCR must not be advertised — Aliyun ignores custom redirect_uris.
     assert "registration_endpoint" not in spec
@@ -439,7 +442,8 @@ async def test_aliyun_ensure_defaults_clears_fake_dcr_client():
                 kind="remote",
                 url="https://openapi-mcp.cn-hangzhou.aliyuncs.com/accounts/x/id/y/mcp",
                 oauth={
-                    "authorize_url": want_spec["authorize_url"],
+                    # Stale: missing access_type=offline (no refresh_token).
+                    "authorize_url": "https://signin.aliyun.com/oauth2/v1/auth",
                     "token_url": want_spec["token_url"],
                     "client_id": "4071151845732613353",
                     "issuer": "https://openapi-mcp.cn-hangzhou.aliyuncs.com",
@@ -475,6 +479,8 @@ async def test_aliyun_ensure_defaults_clears_fake_dcr_client():
         assert "issuer" not in srv.oauth
         assert srv.oauth.get("token_endpoint_auth_method") == "none"
         assert srv.oauth.get("scopes") == ["openid", "/acs/mcp-server"]
+        assert srv.oauth.get("authorize_url") == want_spec["authorize_url"]
+        assert "access_type=offline" in str(srv.oauth.get("authorize_url") or "")
 
     await engine.dispose()
 

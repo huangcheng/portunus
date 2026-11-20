@@ -690,3 +690,31 @@ async def test_disabling_server_stops_its_children(scripted):
     assert Slots.disabled == []  # enabling does not touch children
     await client.post(f"/api/servers/{sid}/enable", json={"enabled": False})
     assert [str(s) for s in Slots.disabled] == [sid]
+
+
+def test_json_omit_none_strips_nulls_for_legacy_runners():
+    """Older skill_bridge builds use extra=forbid — null provision keys must not ship."""
+    from portunus_gateway.registry import _json_omit_none
+
+    raw = {
+        "name": "demo",
+        "cli": {
+            "provision": {
+                "kind": "http_file",
+                "url": "https://example.invalid/bin",
+                "sha512": None,
+                "dest": None,
+            }
+        },
+        "unused": None,
+        "tools": [{"name": "t", "extra": None}],
+    }
+    cleaned = _json_omit_none(raw)
+    assert cleaned == {
+        "name": "demo",
+        "cli": {"provision": {"kind": "http_file", "url": "https://example.invalid/bin"}},
+        "tools": [{"name": "t"}],
+    }
+    import json
+
+    assert "null" not in json.dumps(cleaned)

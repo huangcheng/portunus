@@ -103,6 +103,16 @@ DOMESTIC_EGRESS_SLUGS = frozenset(
     }
 )
 
+# Recipes removed from the product catalog. ``ensure_defaults`` deletes DB rows;
+# ``list_apps`` also hides these so a stale ``catalog/apps/<slug>.toml`` cannot
+# resurrect a card (mode A merges enabled TOML even when the DB row is gone).
+DELISTED_CATALOG_SLUGS = frozenset(
+    {
+        "qqmail",  # official api.mail.qq.com MCP — Workbuddy OAuth; use qqmail-imap
+        "tencentcloud",  # MCP 广场 Hosted SSE UX
+    }
+)
+
 
 def preferred_regions_for_egress(egress: str | None) -> list[str]:
     """Map catalog ``egress`` to server preferred_regions (soft affinity tags)."""
@@ -350,7 +360,10 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "sort_order": 17,
         "spec": {
             "url_from_operator": True,
-            "authorize_url": "https://signin.aliyun.com/oauth2/v1/auth",
+            # Aliyun only returns refresh_token when access_type=offline (default online).
+            "authorize_url": (
+                "https://signin.aliyun.com/oauth2/v1/auth?access_type=offline"
+            ),
             "token_url": "https://oauth.aliyun.com/v1/token",
             # Aliyun /register always returns the official client_id and does NOT bind
             # custom redirect_uris → redirect_uri_mismatch for Portunus public callback.
@@ -369,7 +382,8 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "``/acs/mcp-server`` (no secret — PKCE). "
                     "2) [api.aliyun.com/mcp](https://api.aliyun.com/mcp) Core → 自定义 OAuth "
                     "→ that app; copy Streamable HTTP URL. "
-                    "3) Connect: paste URL + Client ID, Authorize."
+                    "3) Connect: paste URL + Client ID, Authorize "
+                    "(offline access so ``oauth-refresh`` can renew the ~1h access token)."
                 ),
             ],
         },
@@ -1809,7 +1823,9 @@ def _validate_skill_bridge_spec(spec: dict[str, Any]) -> dict[str, Any]:
         raise RegistryError(422, "invalid_request", "spec.args must be a string list")
     return _with_setup_hints(
         {
-            "manifest": manifest.model_dump(mode="json"),
+            # exclude_none: older fleet runners reject unknown null keys
+            # (cli.provision.sha512/dest) under pydantic extra=forbid.
+            "manifest": manifest.model_dump(mode="json", exclude_none=True),
             "secrets": secrets_out,
             "env_defaults": env_out,
             "command": str(spec.get("command") or SKILL_BRIDGE_COMMAND),
@@ -2530,12 +2546,23 @@ class CatalogStore:
                     ) != list(want_spec.get("scopes") or []):
                         oauth["scopes"] = list(want_spec["scopes"])
                         changed = True
+                    # Bake access_type=offline so re-Authorize vaults a refresh_token
+                    # (Aliyun default online → ~1h access only → Needs auth).
+                    want_auth = want_spec.get("authorize_url")
+                    if (
+                        isinstance(want_auth, str)
+                        and want_auth
+                        and oauth.get("authorize_url") != want_auth
+                    ):
+                        oauth["authorize_url"] = want_auth
+                        changed = True
                     if changed:
                         srv.oauth = oauth
                         # Keep client_id / url so re-Authorize works without re-paste.
                         dirty = True
                         log.info(
-                            "aliyun oauth: cleared official DCR client / issuer / registration"
+                            "aliyun oauth: aligned authorize_url / scopes / "
+                            "DCR client / issuer / registration"
                         )
             if dirty:
                 await s.commit()
@@ -2842,6 +2869,9 @@ class CatalogStore:
                 (r for r in loaded.recipes if r.enabled),
                 key=lambda r: (r.sort_order, r.slug),
             ):
+                if recipe.slug.casefold() in DELISTED_CATALOG_SLUGS:
+                    seen.add(recipe.slug.casefold())
+                    continue
                 db = by_slug.get(recipe.slug)
                 app_id: str | None
                 if mode == "B":
@@ -2861,6 +2891,8 @@ class CatalogStore:
             for recipe in loaded.recipes:
                 if not recipe.enabled:
                     seen.add(recipe.slug)
+            # Hard-delisted slugs stay hidden even if a stale DB row remains.
+            seen.update(DELISTED_CATALOG_SLUGS)
             # DB-only apps not yet migrated to TOML remain visible in mode A
             if mode == "A":
                 for r in rows:

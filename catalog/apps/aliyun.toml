@@ -10,7 +10,8 @@ sort_order = 17
 
 [spec]
 url_from_operator = true
-authorize_url = "https://signin.aliyun.com/oauth2/v1/auth"
+# access_type=offline → Aliyun issues refresh_token (default online = access only ~1h).
+authorize_url = "https://signin.aliyun.com/oauth2/v1/auth?access_type=offline"
 token_url = "https://oauth.aliyun.com/v1/token"
 # Aliyun /register always returns the official client_id and does NOT bind custom
 # redirect_uris — Portunus public callback gets redirect_uri_mismatch. Use Custom OAuth.
@@ -20,5 +21,5 @@ resource = "https://openapi-mcp.cn-hangzhou.aliyuncs.com"
 # No issuer: Aliyun omits RFC 9207 iss on the authorize redirect.
 scopes = ["openid", "/acs/mcp-server"]
 setup_hints = [
-  "1) RAM → OAuth 企业应用: OAuth 2.1 Web/Native, callback ``https://portunus.wuhan.dev/api/oauth/callback``, scope ``/acs/mcp-server`` (no secret — PKCE). 2) [api.aliyun.com/mcp](https://api.aliyun.com/mcp) Core → 自定义 OAuth → that app; copy Streamable HTTP URL. 3) Connect: paste URL + Client ID, Authorize.",
+  "1) RAM → OAuth 企业应用: OAuth 2.1 Web/Native, callback ``https://portunus.wuhan.dev/api/oauth/callback``, scope ``/acs/mcp-server`` (no secret — PKCE). 2) [api.aliyun.com/mcp](https://api.aliyun.com/mcp) Core → 自定义 OAuth → that app; copy Streamable HTTP URL. 3) Connect: paste URL + Client ID, Authorize (asks offline access so ``oauth-refresh`` can renew the ~1h access token).",
 ]

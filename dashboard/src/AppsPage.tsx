@@ -1667,7 +1667,10 @@ function SkillBridgeManagePanel({
         setCurrent(updated);
       } else {
         for (const def of secretDefs) {
-          if (def.secret && !env[def.name]) throw new Error(`${def.label} is required`);
+          // Require every Connect field, but count catalog env_defaults as satisfied.
+          if (!env[def.name] && !envDefaults[def.name]) {
+            throw new Error(`${def.label} is required`);
+          }
         }
         const created = await api.createServer({
           name: app.name,

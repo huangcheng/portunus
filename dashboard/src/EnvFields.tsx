@@ -94,7 +94,8 @@ function renderControl(
       type={def.secret ? "password" : "text"}
       value={values[def.name] || ""}
       onChange={(e) => onChange(def.name, e.target.value)}
-      // Non-secret fields may be optional (catalog env_defaults or blank-ok).
+      // Secrets are HTML-required on first Connect. Skill-bridge Connect also
+      // enforces non-secret fields in its submit handler; stdio panels leave them optional.
       required={!active && def.secret}
       autoComplete="off"
       placeholder={

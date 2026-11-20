@@ -28,6 +28,11 @@ def _expand(value: str) -> str:
     return _ENV_REF.sub(repl, expanded)
 
 
+# Catalog env_defaults pin STATE_DIR under this root. New providers (e.g. vivaldi-mail)
+# may connect before fleet sync has mkdir'd the leaf — create only under this prefix.
+_SKILL_STATE_PREFIX = "/var/lib/portunus/skill-state/"
+
+
 def _absolute_existing_dir(raw: str, *, label: str) -> str:
     """Expand ``raw`` and require an absolute directory that already exists."""
     expanded = _expand(raw).strip()
@@ -35,6 +40,39 @@ def _absolute_existing_dir(raw: str, *, label: str) -> str:
     if not expanded or _ENV_REF.search(expanded) or not path.is_absolute() or not path.is_dir():
         raise RuntimeError(f"{label} must be an absolute existing directory")
     return expanded
+
+
+def _absolute_state_home(raw: str, *, label: str) -> str:
+    """Like ``_absolute_existing_dir``, but mkdir under the Portunus skill-state root.
+
+    Himalaya / Cubox / device_qr skills pin ``HOME=STATE_DIR``. Probe can succeed
+    (tools come from the manifest) before any fleet host has created the leaf, so
+    the first tool call would otherwise fail with ``STATE_DIR must be … existing``.
+    """
+    expanded = _expand(raw).strip()
+    path = Path(expanded)
+    if not expanded or _ENV_REF.search(expanded) or not path.is_absolute():
+        raise RuntimeError(f"{label} must be an absolute existing directory")
+    # Existing dirs (tests, operator custom paths) are fine anywhere absolute.
+    if path.is_dir():
+        return expanded
+    # Resolve before the prefix check so ``../`` / symlink escapes cannot mkdir
+    # outside the skill-state root.
+    try:
+        prefix = Path(_SKILL_STATE_PREFIX).resolve()
+        # resolve(strict=False) walks existing parents; missing leaf stays appended.
+        target = path.resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        raise RuntimeError(f"{label} must be an absolute existing directory") from e
+    if target != prefix and prefix not in target.parents:
+        raise RuntimeError(f"{label} must be an absolute existing directory")
+    try:
+        target.mkdir(parents=True, mode=0o700, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(f"{label} could not be created: {e}") from e
+    if not target.is_dir():
+        raise RuntimeError(f"{label} must be an absolute existing directory")
+    return str(target)
 
 
 # Vendor CLIs have no manifest timeout of their own. Bound the wait so a stalled
@@ -63,9 +101,11 @@ class JsonCliBackend:
         if ident.agent_name:
             args += ["--agent-name", ident.agent_name]
         if ident.agent_profile_dir:
+            # Same auto-mkdir as STATE_DIR — device_qr pins agent_profile_dir to
+            # the skill-state leaf and builds argv before _child_env runs.
             args += [
                 "--agent-profile-dir",
-                _absolute_existing_dir(ident.agent_profile_dir, label="agent_profile_dir"),
+                _absolute_state_home(ident.agent_profile_dir, label="agent_profile_dir"),
             ]
         elif ident.agent_instance_id:
             args += ["--agent-instance-id", ident.agent_instance_id]
@@ -150,11 +190,12 @@ class JsonCliBackend:
         env = scrubbed_child_env()
         state = env.get("STATE_DIR", "").strip()
         if state:
-            env["HOME"] = _absolute_existing_dir(state, label="STATE_DIR")
+            env["HOME"] = _absolute_state_home(state, label="STATE_DIR")
             return env
         ident = self.cli.identity
         if ident.agent_profile_dir:
-            env["HOME"] = _absolute_existing_dir(ident.agent_profile_dir, label="agent_profile_dir")
+            # Profile dirs are usually ${STATE_DIR}; allow the same auto-create.
+            env["HOME"] = _absolute_state_home(ident.agent_profile_dir, label="agent_profile_dir")
             return env
         if not env.get("HOME", "").strip():
             for key in ("TMPDIR", "TMP", "TEMP"):
