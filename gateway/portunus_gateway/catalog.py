@@ -35,6 +35,7 @@ MS_GRAPH_AUTHORIZE_URL = (
 MS_GRAPH_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
 MS_GRAPH_MAIL_URL = "portunus-graph://mail"
 MS_GRAPH_ONEDRIVE_URL = "portunus-graph://onedrive"
+THUNDERMAIL_JMAP_URL = "portunus-jmap://thundermail"
 WEBDAV_MCP_ARGS = ["-y", "--ignore-scripts", WEBDAV_MCP_PACKAGE]
 # Soft affinity for catalog Connect when the operator leaves preferred_regions empty.
 # Portable tags only — each deploy labels runners via PORTUNUS_REGIONS
@@ -67,6 +68,7 @@ OVERSEAS_EGRESS_SLUGS = frozenset(
         "linear",
         "proton-drive",
         "outlook-mail",
+        "thundermail",
     }
 )
 DOMESTIC_EGRESS_SLUGS = frozenset(
@@ -729,6 +731,34 @@ DEFAULT_APPS: list[dict[str, Any]] = [
                     "set the redirect URI shown at Connect, then paste **Client ID** and "
                     "**client secret**. Docs: "
                     "[Microsoft Graph mail](https://learn.microsoft.com/graph/api/resources/mail-api-overview)."
+                ),
+            ],
+        },
+    },
+    {
+        "slug": "thundermail",
+        "label": "Thundermail",
+        "name": "Thundermail",
+        "description": (
+            "Thundermail (Thunderbird Pro) via first-party JMAP. "
+            "Paste your Thundermail address and app password at Connect."
+        ),
+        "connection": "http",
+        "egress": "overseas",
+        "popular": True,
+        "categories": ["Productivity"],
+        "tags": ["thundermail", "mail", "jmap", "thunderbird"],
+        "sort_order": 26,
+        "spec": {
+            "url": THUNDERMAIL_JMAP_URL,
+            "auth_scheme": "basic",
+            "setup_hints": [
+                (
+                    "In the Thundermail dashboard create an **app password**, then paste "
+                    "your address and that password here (not your account login). "
+                    "JMAP at mail.thundermail.com:443. Docs: "
+                    "[third-party clients](https://support.tb.pro/hc/en-us/articles/"
+                    "45584951087635-Can-I-use-Thundermail-with-third-party-clients)."
                 ),
             ],
         },
@@ -1522,6 +1552,19 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
                     "spec.url_is_credential requires url_from_operator",
                 )
             out["url_is_credential"] = True
+        auth_scheme = spec.get("auth_scheme")
+        if auth_scheme is not None and auth_scheme != "":
+            if not isinstance(auth_scheme, str) or auth_scheme.strip().casefold() != "basic":
+                raise RegistryError(
+                    422, "invalid_request", "spec.auth_scheme must be 'basic' when set"
+                )
+            if url_is_credential:
+                raise RegistryError(
+                    422,
+                    "invalid_request",
+                    "spec.auth_scheme conflicts with url_is_credential",
+                )
+            out["auth_scheme"] = "basic"
         # Optional custom request header for Connect (e.g. Weiyun WyHeader).
         auth_header = spec.get("auth_header")
         if auth_header is not None and auth_header != "":
@@ -1530,6 +1573,12 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
                     422,
                     "invalid_request",
                     "spec.auth_header conflicts with url_is_credential",
+                )
+            if out.get("auth_scheme") == "basic":
+                raise RegistryError(
+                    422,
+                    "invalid_request",
+                    "spec.auth_header conflicts with auth_scheme basic",
                 )
             if not isinstance(auth_header, str) or not auth_header.strip():
                 raise RegistryError(422, "invalid_request", "spec.auth_header must be a non-empty string")

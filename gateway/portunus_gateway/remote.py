@@ -1215,9 +1215,16 @@ class RemoteProxy:
             except (VaultError, UnicodeDecodeError):
                 raise RegistryError(500, "vault_error", "cannot decrypt server headers") from None
         from .graph_builtin import GraphBuiltinClient, is_graph_builtin_url
+        from .jmap_builtin import JmapBuiltinClient, is_jmap_builtin_url
 
         if is_graph_builtin_url(url):
             return GraphBuiltinClient(
+                url,
+                headers=headers,
+                timeout_s=float(self.policy.timeout_s),
+            )
+        if is_jmap_builtin_url(url):
+            return JmapBuiltinClient(
                 url,
                 headers=headers,
                 timeout_s=float(self.policy.timeout_s),

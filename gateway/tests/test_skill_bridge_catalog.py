@@ -283,6 +283,7 @@ def test_egress_preferred_regions_for_catalog_slugs():
         "box",
         "onedrive",
         "outlook-mail",
+        "thundermail",
         "gdrive",
         "mega",
         "raindrop",
@@ -879,3 +880,15 @@ def test_merge_skill_bridge_seed_keeps_operator_fields():
     assert merged["env_defaults"]["NEW_SEED"] == "yes"
     assert merged["command"] == "/usr/bin/python3"
     assert merged["args"] == live["args"]
+
+
+def test_thundermail_jmap_seed_shape():
+    from portunus_gateway.catalog import DEFAULT_APPS, preferred_regions_for_slug, validate_spec
+
+    raw = next(a for a in DEFAULT_APPS if a["slug"] == "thundermail")
+    assert raw["connection"] == "http"
+    spec = validate_spec("http", raw["spec"])
+    assert spec["url"] == "portunus-jmap://thundermail"
+    assert spec["auth_scheme"] == "basic"
+    assert "client_id" not in spec
+    assert preferred_regions_for_slug("thundermail") == ["overseas"]

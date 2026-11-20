@@ -1,0 +1,16 @@
+slug = "thundermail"
+label = "Thundermail"
+description = "Thundermail (Thunderbird Pro) via first-party JMAP. Paste your Thundermail address and app password at Connect."
+connection = "http"
+egress = "overseas"
+popular = true
+categories = ["Productivity"]
+tags = ["thundermail", "mail", "jmap", "thunderbird"]
+sort_order = 26
+
+[spec]
+url = "portunus-jmap://thundermail"
+auth_scheme = "basic"
+setup_hints = [
+  "In the Thundermail dashboard create an **app password**, then paste your address and that password here (not your account login). JMAP at mail.thundermail.com:443. Docs: [third-party clients](https://support.tb.pro/hc/en-us/articles/45584951087635-Can-I-use-Thundermail-with-third-party-clients).",
+]

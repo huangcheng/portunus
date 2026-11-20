@@ -2133,6 +2133,14 @@ function StdioManagePanel({
   );
 }
 
+function encodeBasicAuth(user: string, password: string): string {
+  const raw = `${user}:${password}`;
+  const bytes = new TextEncoder().encode(raw);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return `Basic ${btoa(bin)}`;
+}
+
 function HttpManagePanel({
   app,
   server,
@@ -2149,13 +2157,18 @@ function HttpManagePanel({
   const [notice, setNotice] = useState("");
   const [current, setCurrent] = useState<Server | null>(server);
   const [token, setToken] = useState("");
+  const [basicUser, setBasicUser] = useState("");
+  const [basicPass, setBasicPass] = useState("");
   const urlFromOperator = specBool(app.spec, "url_from_operator");
   const urlIsCredential = specBool(app.spec, "url_is_credential");
+  const basicAuth = specString(app.spec, "auth_scheme").toLowerCase() === "basic";
   const [mcpUrl, setMcpUrl] = useState(server?.url || "");
 
   useEffect(() => {
     setCurrent(server);
     setToken("");
+    setBasicUser("");
+    setBasicPass("");
     setMcpUrl(server?.url || "");
     setError("");
     setNotice("");
@@ -2166,9 +2179,12 @@ function HttpManagePanel({
   const customHeader = !!authHeader;
   const active = urlIsCredential
     ? !!current?.url
-    : customHeader
-      ? !!current?.env_names.some((n) => n.toLowerCase() === authHeader.toLowerCase()) ||
-        !!current?.has_auth
+    : customHeader || basicAuth
+      ? !!current?.env_names.some(
+          (n) =>
+            n.toLowerCase() ===
+            (customHeader ? authHeader.toLowerCase() : "authorization"),
+        ) || !!current?.has_auth
       : !!current?.has_auth;
   const configured = urlFromOperator ? !!(current?.url && active) : active;
 
@@ -2206,6 +2222,34 @@ function HttpManagePanel({
       try {
         const updated = await ensureServer(url);
         setCurrent(updated);
+        setNotice("Saved. Probe tools to go live for agents.");
+        await onChanged();
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    if (basicAuth) {
+      if ((!basicUser.trim() || !basicPass.trim()) && !active) {
+        setError("Email and app password are required.");
+        return;
+      }
+      if ((!basicUser.trim() || !basicPass.trim()) && active) {
+        setNotice("Already connected. Enter email and app password only when rotating.");
+        return;
+      }
+      setBusy(true);
+      setError("");
+      try {
+        const target = await ensureServer(url);
+        const updated = await api.updateServer(target.id, {
+          env: { Authorization: encodeBasicAuth(basicUser.trim(), basicPass) },
+        });
+        setCurrent(updated);
+        setBasicUser("");
+        setBasicPass("");
         setNotice("Saved. Probe tools to go live for agents.");
         await onChanged();
       } catch (err) {
@@ -2253,9 +2297,11 @@ function HttpManagePanel({
     : `Bearer token${active ? " (replace)" : ""}`;
   const canSubmit = urlIsCredential
     ? !!mcpUrl.trim()
-    : urlFromOperator
-      ? !!mcpUrl.trim() && (!!token.trim() || active)
-      : !!token.trim();
+    : basicAuth
+      ? (!!basicUser.trim() && !!basicPass.trim()) || active
+      : urlFromOperator
+        ? !!mcpUrl.trim() && (!!token.trim() || active)
+        : !!token.trim();
 
   return (
     <DrawerShell
@@ -2313,7 +2359,32 @@ function HttpManagePanel({
             />
           </label>
         ) : null}
-        {urlIsCredential ? null : (
+        {urlIsCredential ? null : basicAuth ? (
+          <>
+            <label className="field">
+              Email
+              <input
+                type="email"
+                value={basicUser}
+                onChange={(e) => setBasicUser(e.target.value)}
+                autoComplete="username"
+                placeholder="you@thundermail.com"
+                required={!active}
+              />
+            </label>
+            <label className="field">
+              App password {active ? "(leave blank to keep)" : ""}
+              <input
+                type="password"
+                value={basicPass}
+                onChange={(e) => setBasicPass(e.target.value)}
+                autoComplete="current-password"
+                placeholder={active ? "••••••••" : undefined}
+                required={!active}
+              />
+            </label>
+          </>
+        ) : (
           <label className="field">
             {tokenLabel}
             <input
