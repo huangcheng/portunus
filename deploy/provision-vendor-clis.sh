@@ -106,47 +106,113 @@ fetch_github_release() {
   install -m 755 "$found" "$out"
 }
 
-# Direct HTTPS binary (e.g. Proton Drive CLI). ``{arch}`` → x64|arm64 (Proton) or amd64|arm64.
+# Direct HTTPS file (Proton binary, or a .tar.gz/.zip whose member is ``binary``).
+# ``{arch}`` → x64|arm64 (Proton). ``{linux_arch}`` → amd64|arm64.
+# ``{linux_family}`` → amd|arm (Baidu CDN directory names).
 fetch_http_file() {
-  local url_tmpl="$1" arch="$2" out="$3" expect_sha="$4"
-  local parch="$arch"
+  local url_tmpl="$1" arch="$2" out="$3" expect_sha="$4" member="$5"
+  local parch="$arch" linux_arch="$arch" linux_family="$arch"
   case "$arch" in
-    amd64) parch=x64 ;;
-    arm64) parch=arm64 ;;
+    amd64) parch=x64; linux_arch=amd64; linux_family=amd ;;
+    arm64) parch=arm64; linux_arch=arm64; linux_family=arm ;;
   esac
-  local url="${url_tmpl//\{arch\}/$parch}"
+  local url="${url_tmpl//\{linux_family\}/$linux_family}"
+  url="${url//\{linux_arch\}/$linux_arch}"
+  url="${url//\{arch\}/$parch}"
+  # Archive type is decided on the path only (signed URLs carry ?query tokens).
+  local path_part="${url%%[?#]*}"
+  local archive=""
+  case "$path_part" in
+    *.tar.gz|*.tgz) archive=tar ;;
+    *.zip) archive=zip ;;
+  esac
+  # Archives: the cached member cannot be hashed against the archive digest, so a
+  # stamp file records the verified digest. Raw binaries are re-hashed directly.
+  local stamp="$out.sha512"
   if [[ -x "$out" ]]; then
-    if [[ -n "$expect_sha" ]]; then
+    if [[ -z "$expect_sha" ]]; then
+      echo "refusing to reuse $out without a sha512 pin" >&2
+      return 1
+    fi
+    if [[ -z "$archive" ]]; then
       local got
       got="$(sha512sum "$out" | awk '{print $1}')"
       if [[ "$got" == "$expect_sha" ]]; then
         return 0
       fi
       echo "  cache checksum mismatch — re-fetch $url"
-    else
+    elif [[ -f "$stamp" && "$(tr -d '[:space:]' <"$stamp")" == "$expect_sha" ]]; then
       return 0
+    else
+      echo "  cache stamp missing or mismatched — re-fetch $url"
     fi
   fi
-  local tmp
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/portunus-cli.XXXXXX")"
+  local tmp rc=0
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/portunus-cli.XXXXXX")" || return 1
+  # Clean the temp dir on Ctrl-C / kill too, not only on the normal path.
   # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" RETURN
+  trap "rm -rf '$tmp'" INT TERM
+  _fetch_http_file_install "$url" "$archive" "$tmp" "$out" "$stamp" "$expect_sha" "$member" || rc=$?
+  rm -rf "$tmp"
+  trap - INT TERM
+  return "$rc"
+}
+
+# Download, verify, extract and install one http_file. Callers run this under
+# `if !`, which disables set -e, so every step is checked explicitly.
+_fetch_http_file_install() {
+  local url="$1" archive="$2" tmp="$3" out="$4" stamp="$5" expect_sha="$6" member="$7"
   echo "  fetch $url"
   if ! curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 -o "$tmp/asset" "$url"; then
     echo "download failed: $url" >&2
     return 1
   fi
-  if [[ -n "$expect_sha" ]]; then
-    local got
-    got="$(sha512sum "$tmp/asset" | awk '{print $1}')"
-    if [[ "$got" != "$expect_sha" ]]; then
-      echo "sha512 mismatch for $url" >&2
-      echo "  expected $expect_sha" >&2
-      echo "  got      $got" >&2
-      return 1
-    fi
+  local got_dl
+  got_dl="$(sha512sum "$tmp/asset" | awk '{print $1}')"
+  if [[ "$got_dl" != "$expect_sha" ]]; then
+    echo "sha512 mismatch for $url" >&2
+    echo "  expected $expect_sha" >&2
+    echo "  got      $got_dl" >&2
+    return 1
   fi
-  install -m 755 "$tmp/asset" "$out"
+  case "$archive" in
+    tar)
+      tar -xzf "$tmp/asset" -C "$tmp" || return 1
+      _install_archive_member "$tmp" "$member" "$out" || return 1
+      printf '%s\n' "$expect_sha" >"$stamp" || return 1
+      ;;
+    zip)
+      unzip -q -o "$tmp/asset" -d "$tmp" || return 1
+      _install_archive_member "$tmp" "$member" "$out" || return 1
+      printf '%s\n' "$expect_sha" >"$stamp" || return 1
+      ;;
+    *)
+      install -m 755 "$tmp/asset" "$out" || return 1
+      ;;
+  esac
+  return 0
+}
+
+# Pick exactly one file named $member from an extracted tree. Ambiguous matches
+# (same basename in several places) fail instead of guessing.
+_install_archive_member() {
+  local tmp="$1" member="$2" out="$3"
+  local -a matches=()
+  local f
+  while IFS= read -r f; do
+    matches+=("$f")
+  done < <(find "$tmp" -type f -name "$member" ! -path "$tmp/asset")
+  if [[ ${#matches[@]} -eq 0 ]]; then
+    echo "archive missing $member" >&2
+    return 1
+  fi
+  if [[ ${#matches[@]} -gt 1 ]]; then
+    echo "archive has ${#matches[@]} files named $member; refusing to guess" >&2
+    printf '  %s\n' "${matches[@]}" >&2
+    return 1
+  fi
+  install -m 755 "${matches[0]}" "$out" || return 1
+  return 0
 }
 
 resolve_runner() {
@@ -212,6 +278,7 @@ print(
     "binary="+q("binary"),
     "url="+q("url"),
     "sha512="+q("sha512"),
+    "sha512_arm64="+q("sha512_arm64"),
     sep="; ",
 )' <<<"$line")"
     echo "  $name → $dest ($kind)"
@@ -226,9 +293,10 @@ print(
         fi
         ;;
       http_file)
-        # Proton publishes linux-x64 checksums in the manifest; skip arm64 until dual hashes exist.
-        if [[ "$RARCH" == "arm64" && -n "$sha512" ]]; then
-          echo "FAIL: $name http_file sha512 is pinned to linux-x64; arm64 not configured" >&2
+        sha512_arm64="${sha512_arm64:-}"
+        # sha512 is the amd64/x64 asset. arm64 needs sha512_arm64 when that pin is set.
+        if [[ "$RARCH" == "arm64" && -n "$sha512" && -z "$sha512_arm64" ]]; then
+          echo "FAIL: $name http_file sha512 is pinned to amd64/x64; set sha512_arm64" >&2
           fail=1
           continue
         fi
@@ -237,8 +305,18 @@ print(
           fail=1
           continue
         fi
+        expect_sha="$sha512"
+        if [[ "$RARCH" == "arm64" ]]; then
+          expect_sha="$sha512_arm64"
+        fi
+        # Every http_file install must be pinned: never install unverified bytes.
+        if [[ -z "$expect_sha" ]]; then
+          echo "FAIL: $name http_file has no sha512 pin for $RARCH" >&2
+          fail=1
+          continue
+        fi
         cache_bin="$CACHE_DIR/${name}-http-${RARCH}-${binary}"
-        if ! fetch_http_file "$url" "$RARCH" "$cache_bin" "$sha512"; then
+        if ! fetch_http_file "$url" "$RARCH" "$cache_bin" "$expect_sha" "$binary"; then
           echo "FAIL: download $name" >&2
           fail=1
           continue

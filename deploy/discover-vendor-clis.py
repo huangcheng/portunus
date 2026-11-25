@@ -85,6 +85,7 @@ def main() -> int:
                     "binary": binary,
                     "url": "",
                     "sha512": "",
+                    "sha512_arm64": "",
                 }
             else:
                 rec = {
@@ -97,6 +98,7 @@ def main() -> int:
                     "binary": binary,
                     "url": prov.url or "",
                     "sha512": prov.sha512 or "",
+                     "sha512_arm64": getattr(prov, "sha512_arm64", None) or "",
                 }
         else:
             try:
@@ -147,6 +149,7 @@ def main() -> int:
                     "binary": binary,
                     "url": "",
                     "sha512": "",
+                    "sha512_arm64": "",
                 }
             elif kind == "http_file":
                 url = prov.get("url")
@@ -163,6 +166,7 @@ def main() -> int:
                     "binary": binary,
                     "url": url,
                     "sha512": str(prov.get("sha512") or ""),
+                    "sha512_arm64": str(prov.get("sha512_arm64") or ""),
                 }
             else:
                 print(f"skip {path.name}: unsupported kind {kind}", file=sys.stderr)

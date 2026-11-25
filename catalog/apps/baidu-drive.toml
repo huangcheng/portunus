@@ -1,0 +1,26 @@
+slug = "baidu-drive"
+label = "百度网盘"
+description = "Baidu Netdisk via official bdpan CLI (skill-bridge): paste-code Connect, then list/search/upload/download/share under /apps/bdpan/. No hosted MCP; prefers domestic runners."
+connection = "skill_bridge"
+egress = "domestic"
+popular = true
+categories = ["Storage"]
+tags = ["baidu", "netdisk", "drive", "json_cli", "oauth_link"]
+sort_order = 79
+
+[spec]
+manifest = "baidu-drive.example.yaml"
+secrets = []
+setup_hints = [
+  "Connect opens a Baidu authorize link (about 10 minutes). Paste the 32-character code shown in the browser. Fleet sync installs `/usr/local/bin/bdpan` (CLI 3.8.9) into runners. File tools only touch `/apps/bdpan/` (我的应用数据/bdpan). Docs: [github.com/baidu-netdisk/bdpan-storage](https://github.com/baidu-netdisk/bdpan-storage).",
+]
+[spec.env_defaults]
+SKILL_ROOT = "/var/lib/portunus/skills/baidu-drive"
+STATE_DIR = "/var/lib/portunus/skill-state/baidu-drive"
+BDPAN_BIN = "/usr/local/bin/bdpan"
+
+[[artifacts]]
+id = "baidu-drive"
+kind = "tree"
+install_as = "/var/lib/portunus/skills/baidu-drive"
+path = "third_party/baidu-drive"

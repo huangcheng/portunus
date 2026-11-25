@@ -40,6 +40,7 @@ export type AppIconId =
   | "qqmusic"
   | "xunlei"
   | "proton-drive"
+  | "baidu-drive"
   | "agent-mail"
   | "qqmail"
   | "vivaldi-mail"
@@ -85,6 +86,9 @@ export function appIconIdForSlug(slug: string | undefined | null): AppIconId {
   if (slug === "qqmusic" || slug === "qq-music") return "qqmusic";
   if (slug === "xunlei" || slug === "thunder") return "xunlei";
   if (slug === "proton-drive" || slug === "protondrive" || slug === "proton") return "proton-drive";
+  if (slug === "baidu-drive" || slug === "baidudrive" || slug === "bdpan" || slug === "baidu-netdisk") {
+    return "baidu-drive";
+  }
   if (slug === "agent-mail" || slug === "agentmail" || slug === "agently") return "agent-mail";
   if (
     slug === "qqmail" ||
@@ -137,6 +141,7 @@ const OFFICIAL_ICON_FILES: Partial<Record<AppIconId, string>> = {
   qqmusic: "qqmusic.png",
   xunlei: "xunlei.png",
   "proton-drive": "proton-drive.png",
+  "baidu-drive": "baidu-drive.png",
   "agent-mail": "agent-mail.png",
   qqmail: "qqmail.png",
   "vivaldi-mail": "vivaldi-mail.png",

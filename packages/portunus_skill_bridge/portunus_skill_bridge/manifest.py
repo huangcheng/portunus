@@ -10,7 +10,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 
 def validate_input_field_name(name: str) -> None:
@@ -279,8 +279,9 @@ class CliProvision(BaseModel):
 
     Ops host downloads; runners never curl vendor CDNs themselves when possible.
     ``asset`` / ``url`` may contain ``{arch}`` (amd64|arm64 → github; x64|arm64 for
-    Proton-style URLs via ``{arch}`` substitution in provision-vendor-clis) and
-    ``{version}`` / ``{tag}``.
+    Proton-style URLs via ``{arch}`` substitution in provision-vendor-clis),
+    ``{linux_arch}`` (amd64|arm64) and ``{linux_family}`` (amd|arm) on http_file
+    URLs, and ``{version}`` / ``{tag}``.
     """
 
     model_config = {"extra": "forbid"}
@@ -293,6 +294,8 @@ class CliProvision(BaseModel):
     # http_file — direct URL (e.g. Proton Drive CLI index).
     url: str | None = Field(default=None, max_length=500)
     sha512: str | None = Field(default=None, max_length=128)
+    # arm64 asset digest when ``sha512`` is the amd64/x64 asset (tarball or binary).
+    sha512_arm64: str | None = Field(default=None, max_length=128)
     # Absolute install path when ``cli.command[0]`` is a relative node wrapper.
     dest: str | None = Field(default=None, max_length=200)
     # File basename inside a .tar.gz / .zip; default = basename of dest/command[0].
@@ -333,14 +336,14 @@ class CliProvision(BaseModel):
             raise ValueError("provision.url must be https://")
         return v
 
-    @field_validator("sha512")
+    @field_validator("sha512", "sha512_arm64")
     @classmethod
-    def _sha512_hex(cls, v: str | None) -> str | None:
+    def _sha512_hex(cls, v: str | None, info: ValidationInfo) -> str | None:
         if v is None or not v.strip():
             return None
         h = v.strip().lower()
         if len(h) != 128 or any(c not in "0123456789abcdef" for c in h):
-            raise ValueError("provision.sha512 must be 128 lowercase hex chars")
+            raise ValueError(f"provision.{info.field_name} must be 128 lowercase hex chars")
         return h
 
     @model_validator(mode="after")

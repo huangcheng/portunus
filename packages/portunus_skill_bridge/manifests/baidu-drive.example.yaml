@@ -1,0 +1,269 @@
+# 百度网盘 — official bdpan CLI via skill-bridge (no hosted MCP).
+# Auth: oauth_link. Connect prints an authorize URL; the operator pastes the
+# 32-hex code. The wrapper feeds it to `bdpan login --set-code-stdin`.
+# Do not expose login/logout as MCP tools.
+
+name: baidu-drive
+version: "3.8.9"
+backend: json_cli
+
+auth:
+  type: oauth_link
+  login_env: {}
+  actions:
+    login: login
+    status: login-status
+    logout: logout
+  token_flag: "--code"
+  success_code: 0
+  # Wrapper returns -114 with the https authorize URL until a code is pasted.
+  pending_codes: [-114]
+  browser_capture: false
+  token_paste: true
+  poll_interval_s: 2
+  connect_hint: "打开授权页，在浏览器完成百度账号登录后，粘贴页面上的 32 位授权码。链接约 10 分钟有效。文件工具只操作 /apps/bdpan/（我的应用数据/bdpan）。"
+
+cli:
+  command: ["node", "scripts/baidu-drive.cjs"]
+  cwd: ${SKILL_ROOT}
+  identity: {}
+  run_wrapper: raw
+  provision:
+    kind: http_file
+    # {linux_family}=amd|arm, {linux_arch}=amd64|arm64. sha512 is the amd64
+    # tarball; sha512_arm64 is the arm64 tarball. Member inside the archive is `bdpan`.
+    url: "https://issuecdn.baidupcs.com/issue/netdisk/ai-bdpan/linux-{linux_family}/3.8.9/bdpan-3.8.9-linux-{linux_arch}.tar.gz"
+    sha512: "19043a72956fbbfa97e30529c477e971f4b5d243179220327c8fadad9fb2cd8381d039d2fbdfa4ab1c65d8442f9cc97b8fa57b76cee3653fe05f42ab00f0596a"
+    sha512_arm64: "2445c7deb5eb24e29f7e64d02ac443a433e12c3efd9d47f3fd1ba58a9d3b254b793f5ecabf117f13d71a852813de73085986dc5baf2c8851d7b6bb31039fe701"
+    dest: /usr/local/bin/bdpan
+    binary: bdpan
+
+tools:
+  - name: quota
+    description: "Account-wide Baidu Netdisk capacity (not the /apps/bdpan usage). Read-only."
+    cli: quota
+    input: {}
+
+  - name: ls
+    description: "List files under /apps/bdpan/ (我的应用数据/bdpan). Empty path is the app root. Keep each item's return_markdown."
+    cli: ls
+    input:
+      path:
+        type: string
+        description: Directory relative to /apps/bdpan/, or an absolute path inside it
+      folder:
+        type: boolean
+        description: When true, list folders only
+
+  - name: search
+    description: "Search file names under the account scope the CLI allows. Keep each item's return_markdown."
+    cli: search
+    input:
+      keyword:
+        type: string
+        required: true
+      category:
+        type: integer
+        description: "1 video, 2 audio, 3 image, 4 doc, 5 app, 6 other, 7 torrent"
+      page:
+        type: integer
+      page_size:
+        type: integer
+        description: Page size, max 50
+      no_dir:
+        type: boolean
+        description: Files only
+      dir_only:
+        type: boolean
+        description: Folders only
+
+  - name: search_content
+    description: "Search document text. Hits use file_url (not return_markdown). Membership is enforced by Baidu."
+    cli: search-content
+    input:
+      query:
+        type: string
+        required: true
+      dir:
+        type: string
+        description: Directory relative to /apps/bdpan/
+      dir_fsid:
+        type: string
+        description: Directory id string. Mutually exclusive with dir
+      file_types:
+        type: string
+        description: Comma list limited to pdf,docx,txt,md,pptx,xlsx
+      page_size:
+        type: integer
+
+  - name: upload
+    description: "Upload a runner-local file or folder into /apps/bdpan/. overwrite is single-file only and only after the user confirmed that exact target."
+    cli: upload
+    input:
+      local:
+        type: string
+        required: true
+        description: Absolute path on the runner
+      remote:
+        type: string
+        required: true
+        description: Destination relative to /apps/bdpan/
+      overwrite:
+        type: boolean
+
+  - name: download
+    description: "Download a path under /apps/bdpan/, or a Baidu share URL (saved into the app folder first). status=submitted means the task is queued, not finished."
+    cli: download
+    input:
+      remote:
+        type: string
+        required: true
+        description: App-folder path or https://pan.baidu.com/s/… share URL
+      local:
+        type: string
+        required: true
+        description: Absolute destination path on the runner
+      pwd:
+        type: string
+        description: Share extraction code when the URL has no pwd
+      transfer_dir:
+        type: string
+        description: Share save directory relative to /apps/bdpan/
+
+  - name: transfer
+    description: "Save a Baidu share into /apps/bdpan/ without a local download. status=submitted means queued, not finished. Report saved_path."
+    cli: transfer
+    input:
+      url:
+        type: string
+        required: true
+      pwd:
+        type: string
+      dest:
+        type: string
+        description: Destination directory relative to /apps/bdpan/
+
+  - name: transfer_list
+    description: "List a share (read-only). Keep fs_id as a string. source_dir empty lists the share root."
+    cli: transfer-list
+    input:
+      url:
+        type: string
+        required: true
+      pwd:
+        type: string
+      source_dir:
+        type: string
+      page:
+        type: integer
+      page_size:
+        type: integer
+
+  - name: transfer_select
+    description: "Save selected share fs_ids into /apps/bdpan/. Only after the user confirmed the selection and destination. status=submitted is not completion."
+    cli: transfer-select
+    input:
+      url:
+        type: string
+        required: true
+      fsid:
+        type: string
+        required: true
+        description: Comma-separated decimal file ids from transfer_list
+      pwd:
+        type: string
+      dest:
+        type: string
+
+  - name: share
+    description: "Create a share link for a path under /apps/bdpan/. period is days: 0 permanent, or 1, 7, 30. Default 7."
+    cli: share
+    input:
+      path:
+        type: string
+        required: true
+      period:
+        type: integer
+
+  - name: mkdir
+    description: Create a folder under /apps/bdpan/. Parents are created.
+    cli: mkdir
+    input:
+      path:
+        type: string
+        required: true
+
+  - name: mv
+    description: Move a file or folder under /apps/bdpan/ into a destination directory.
+    cli: mv
+    input:
+      source:
+        type: string
+        required: true
+      dest:
+        type: string
+        required: true
+
+  - name: cp
+    description: Copy a file or folder under /apps/bdpan/ into a destination directory.
+    cli: cp
+    input:
+      source:
+        type: string
+        required: true
+      dest:
+        type: string
+        required: true
+
+  - name: rename
+    description: Rename a file or folder under /apps/bdpan/. name is a single file name, not a path.
+    cli: rename
+    input:
+      path:
+        type: string
+        required: true
+      name:
+        type: string
+        required: true
+
+  - name: rm
+    description: "Delete one path under /apps/bdpan/. Irreversible; a directory delete removes its contents. Call only after the user confirmed that exact path, and pass confirm=yes. confirm=yes only skips the CLI prompt."
+    cli: rm
+    input:
+      path:
+        type: string
+        required: true
+      confirm:
+        type: string
+        required: true
+        description: Must be the exact string yes
+
+  - name: get_content
+    description: "Read file text by fsid (1–5, comma-separated). txt/md return content; Office/PDF return task_id for get_content_result. Keep return_markdown."
+    cli: get-content
+    input:
+      fsid:
+        type: string
+        required: true
+      page_start:
+        type: integer
+      page_end:
+        type: integer
+
+  - name: get_content_result
+    description: "Poll a get_content task. running is not failure. Keep each file's return_markdown."
+    cli: get-content-result
+    input:
+      task_id:
+        type: string
+        required: true
+
+  - name: whoami
+    description: Current Baidu Netdisk login and membership fields from bdpan whoami.
+    cli: whoami
+    input: {}
+
+  - name: vip
+    description: "Official membership checkout URLs only: mobile_url and desktop_url from the CLI. Do not invent or replace payment links."
+    cli: vip
+    input: {}

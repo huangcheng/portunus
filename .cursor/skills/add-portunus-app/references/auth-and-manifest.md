@@ -70,10 +70,10 @@ Fleet sync (`deploy/discover-vendor-clis.py` → `provision-vendor-clis.sh`) ins
 | `kind` | Fields | Peer |
 |---|---|---|
 | `github_release` | `repo`, `tag`, `asset` (`{arch}`/`{version}`), optional `binary` | Cubox — `command: ["/usr/local/bin/cubox-cli"]` |
-| `http_file` | `url` (https, `{arch}` → x64/arm64), optional `sha512`, **`dest`** absolute | Proton Drive — `command: ["node", "scripts/…"]` + `dest: /usr/local/bin/proton-drive` |
+| `http_file` | `url` (https; `{arch}` → x64/arm64, `{linux_arch}` → amd64/arm64, `{linux_family}` → amd/arm), optional `sha512` (amd64/x64 asset) and `sha512_arm64`, **`dest`** absolute. `.tar.gz` / `.zip` URLs install `binary` from the archive | Proton Drive — raw binary; 百度网盘 — tarball member `bdpan` |
 
 - Ops host downloads; runners never curl vendor CDNs on domestic sites when avoidable.
-- `{arch}` in GitHub assets is `amd64`/`arm64`; Proton-style URLs map amd64→`x64`.
+- `{arch}` in GitHub assets is `amd64`/`arm64`; Proton-style http URLs map amd64→`x64`. http_file `{linux_arch}` stays `amd64`/`arm64`.
 - After adding provision, Sync fleet (or run `provision-vendor-clis.sh` + `fleet-skills.sh`) before Connect.
 
 ## http_rpc

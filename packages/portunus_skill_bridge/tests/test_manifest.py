@@ -14,6 +14,7 @@ IMA = ROOT / "manifests" / "ima.example.yaml"
 QQMUSIC = ROOT / "manifests" / "qqmusic.example.yaml"
 PROTON = ROOT / "manifests" / "proton-drive.example.yaml"
 AGENT_MAIL = ROOT / "manifests" / "agent-mail.example.yaml"
+BAIDU = ROOT / "manifests" / "baidu-drive.example.yaml"
 
 
 def test_load_weread_example():
@@ -109,6 +110,41 @@ def test_load_himalaya_example():
         "message_read",
         "message_send",
     } <= {t.name for t in m.tools}
+
+
+def test_load_baidu_drive_example():
+    m = load_manifest(BAIDU)
+    assert m.backend == "json_cli"
+    assert m.auth.type == "oauth_link"
+    assert m.auth.wants_browser_capture() is False
+    assert m.auth.token_paste is True
+    assert m.auth.token_flag == "--code"
+    assert m.auth.pending_codes == [-114]
+    assert m.cli is not None
+    assert m.cli.command == ["node", "scripts/baidu-drive.cjs"]
+    assert m.cli.identity.agent_name is None
+    assert m.cli.provision is not None
+    assert m.cli.provision.kind == "http_file"
+    assert m.cli.provision.dest == "/usr/local/bin/bdpan"
+    assert m.cli.provision.binary == "bdpan"
+    assert "{linux_family}" in (m.cli.provision.url or "")
+    assert m.cli.provision.sha512_arm64
+    names = {t.name for t in m.tools}
+    assert {
+        "quota",
+        "ls",
+        "search",
+        "upload",
+        "download",
+        "transfer",
+        "share",
+        "rm",
+        "vip",
+    } <= names
+    assert "login" not in names
+    assert "logout" not in names
+    rm = next(t for t in m.tools if t.name == "rm")
+    assert rm.input["confirm"].required is True
 
 
 def test_load_agent_mail_example():
