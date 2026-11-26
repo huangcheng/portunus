@@ -12,6 +12,7 @@ sort_order = 79
 url = "https://mcp-pan.baidu.com/sse"
 auth_header = "Authorization"
 token_prefix = "Bearer "
+get_token_url = "https://openapi.baidu.com/oauth/2.0/authorize?response_type=token&client_id=QHOuRXiepJBMjtk0esLhrPoNlQyYd0mF&redirect_uri=oob&scope=basic,netdisk&qrcode=1"
 setup_hints = [
-  "Log in and authorize via Baidu's [MCP guide](https://pan.baidu.com/union/doc/mcp-server). Copy only the value after `access_token=` from the redirected address. Tokens last 30 days; re-paste when Baidu returns auth errors.",
+  "Tokens last 30 days and cannot be refreshed; re-authorize when Baidu returns auth errors. [MCP guide](https://pan.baidu.com/union/doc/mcp-server)",
 ]

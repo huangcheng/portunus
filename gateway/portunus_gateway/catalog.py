@@ -1121,12 +1121,15 @@ DEFAULT_APPS: list[dict[str, Any]] = [
             "url": "https://mcp-pan.baidu.com/sse",
             "auth_header": "Authorization",
             "token_prefix": "Bearer ",
+            "get_token_url": (
+                "https://openapi.baidu.com/oauth/2.0/authorize?response_type=token"
+                "&client_id=QHOuRXiepJBMjtk0esLhrPoNlQyYd0mF&redirect_uri=oob"
+                "&scope=basic,netdisk&qrcode=1"
+            ),
             "setup_hints": [
                 (
-                    "Log in and authorize via Baidu's [MCP guide]"
-                    "(https://pan.baidu.com/union/doc/mcp-server). "
-                    "Copy only the value after `access_token=` from the redirected address. "
-                    "Tokens last 30 days; re-paste when Baidu returns auth errors."
+                    "Tokens last 30 days and cannot be refreshed; re-authorize when Baidu "
+                    "returns auth errors. [MCP guide](https://pan.baidu.com/union/doc/mcp-server)"
                 ),
             ],
         },
@@ -1740,6 +1743,17 @@ def validate_spec(connection: str, spec: Any) -> dict[str, Any]:
                 raise RegistryError(422, "invalid_request", "spec.token_prefix must be a string")
             else:
                 out["token_prefix"] = prefix
+        # Optional vendor page where the operator obtains the token; Connect shows an
+        # "Open authorization page" step before the token field (e.g. 百度网盘).
+        get_token_url = spec.get("get_token_url")
+        if get_token_url is not None and get_token_url != "":
+            if url_is_credential or out.get("auth_scheme") == "basic":
+                raise RegistryError(
+                    422,
+                    "invalid_request",
+                    "spec.get_token_url conflicts with url_is_credential/auth_scheme basic",
+                )
+            out["get_token_url"] = _require_https(spec, "get_token_url")
         return _with_setup_hints(out, spec)
     if connection == "webdav":
         raw_args = spec.get("args") or WEBDAV_MCP_ARGS

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { api } from "./api";
 import { parseEnvRows, type EnvRow } from "./envRows";
 import { JsonObjectEditor } from "./JsonObjectEditor";
+import { httpUsesTokenFlow } from "./tokenPaste";
 import {
   WEBDAV_MCP_ARGS,
   WEBDAV_MCP_PACKAGE,
@@ -223,6 +224,12 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
         out.auth_header = authHeader;
         out.token_prefix = String(spec.token_prefix ?? "");
       }
+      // Keep Basic auth across edits (the form has no field for it; dropping it would
+      // silently degrade the recipe to Bearer).
+      if (String(spec.auth_scheme ?? "").trim().toLowerCase() === "basic") out.auth_scheme = "basic";
+      // Connect ignores get_token_url for credential-URL / basic-auth recipes.
+      const getTokenUrl = String(spec.get_token_url ?? "").trim();
+      if (getTokenUrl && httpUsesTokenFlow(spec)) out.get_token_url = getTokenUrl;
       return withSetupHints(out);
     }
     if (connection === "webdav") {
@@ -563,6 +570,22 @@ export function CatalogConfigForm({ initial, onSaved, onCancel }: Props) {
                 />
               </label>
             </div>
+            {httpUsesTokenFlow(spec) && (
+              <label className="field">
+                Get-token URL (optional, https)
+                <input
+                  type="url"
+                  pattern="https://.*"
+                  value={String(spec.get_token_url ?? "")}
+                  onChange={(e) => patchSpec({ get_token_url: e.target.value })}
+                  placeholder="https://vendor.example/oauth/authorize?response_type=token…"
+                />
+                <span className="muted">
+                  Connect shows an Open step. The vendor must land on an address containing{" "}
+                  <code>access_token=</code> (implicit grant); the operator pastes that address.
+                </span>
+              </label>
+            )}
           </div>
         )}
 

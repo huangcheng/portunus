@@ -979,6 +979,34 @@ def test_validate_baidu_drive_mcp_seed():
     assert out["url"] == "https://mcp-pan.baidu.com/sse"
     assert out["auth_header"] == "Authorization"
     assert out["token_prefix"] == "Bearer "
+    # Connect shows an "Open authorization page" step before the token field.
+    assert out["get_token_url"].startswith("https://openapi.baidu.com/oauth/2.0/authorize?")
+    assert "response_type=token" in out["get_token_url"]
+
+
+def test_http_get_token_url_must_be_https():
+    import pytest
+
+    from portunus_gateway.catalog import validate_spec
+    from portunus_gateway.registry import RegistryError
+
+    base = {"url": "https://mcp.example.com/sse", "auth_header": "Authorization"}
+    ok = validate_spec("http", {**base, "get_token_url": "https://example.com/authorize?x=1"})
+    assert ok["get_token_url"] == "https://example.com/authorize?x=1"
+    # Optional: absent / empty is omitted from the validated spec.
+    assert "get_token_url" not in validate_spec("http", base)
+    assert "get_token_url" not in validate_spec("http", {**base, "get_token_url": ""})
+    for bad in ("http://example.com/a", "javascript:alert(1)", 5, "   "):
+        with pytest.raises(RegistryError):
+            validate_spec("http", {**base, "get_token_url": bad})
+    # Connect never renders the step for these auth shapes — reject the dead key.
+    good = "https://example.com/authorize"
+    with pytest.raises(RegistryError):
+        validate_spec("http", {"url": "https://x.example/sse", "url_from_operator": True,
+                               "url_is_credential": True, "get_token_url": good})
+    with pytest.raises(RegistryError):
+        validate_spec("http", {"url": "https://x.example/mcp", "auth_scheme": "basic",
+                               "get_token_url": good})
 
 
 def test_validate_agent_mail_auth_seed():

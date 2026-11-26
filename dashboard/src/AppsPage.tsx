@@ -33,6 +33,8 @@ import {
   type WebDavApp,
 } from "./providers";
 import { SetupHints } from "./SetupHints";
+import { isSafeHintHref } from "./hintTokens";
+import { extractAccessToken, httpUsesTokenFlow, looksLikeAddress } from "./tokenPaste";
 import {
   ROUTING_CHOICES,
   choiceToRegions,
@@ -49,8 +51,14 @@ import {
 type Tab = "all" | "connected" | "custom";
 
 /** Popup for oauth_link authorize URLs (no QR — vendor扫一扫 misreads the URL as a code). */
-function openAuthorizeWindow(url: string) {
-  const popup = window.open(url, "portunus-oauth", "popup=yes,width=560,height=720");
+function openAuthorizeWindow(url: string, opts: { isolate?: boolean } = {}) {
+  // Isolated vendor links get their own window name so they never reuse (and sever the
+  // opener of) an in-flight OAuth popup, whose callback relies on opener.postMessage.
+  const name = opts.isolate ? "portunus-get-token" : "portunus-oauth";
+  const popup = window.open(url, name, "popup=yes,width=560,height=720");
+  // Vendor pages must not reach back into the dashboard via window.opener (reverse
+  // tabnabbing).
+  if (popup && opts.isolate) popup.opener = null;
   if (!popup) {
     window.open(url, "_blank", "noopener,noreferrer");
   }
@@ -1756,7 +1764,7 @@ function SkillBridgeManagePanel({
         {authUrl && (
           <div className="skill-auth-link">
             {loginMessage && <p className="muted">{loginMessage}</p>}
-            <div className="apps-actions" style={{ justifyContent: "flex-start" }}>
+            <div className="apps-actions start">
               <button
                 className="primary sm"
                 type="button"
@@ -2255,6 +2263,12 @@ function HttpManagePanel({
   const authHeader = specString(app.spec, "auth_header");
   const tokenPrefix = specString(app.spec, "token_prefix");
   const customHeader = !!authHeader;
+  // Vendor page that issues the token (e.g. 百度网盘); not offered for URL-credential / basic auth.
+  const rawGetTokenUrl = httpUsesTokenFlow(app.spec) ? specString(app.spec, "get_token_url") : "";
+  // Paste handling follows the recipe; only the Open/Copy link itself is gated on https
+  // (defense in depth — the gateway enforces https, but never window.open anything else).
+  const tokenFromAddress = !!rawGetTokenUrl;
+  const getTokenUrl = isSafeHintHref(rawGetTokenUrl) ? rawGetTokenUrl : "";
   const active = urlIsCredential
     ? !!current?.url
     : customHeader || basicAuth
@@ -2342,13 +2356,24 @@ function HttpManagePanel({
       setNotice("Already connected. Enter a new token only when rotating.");
       return;
     }
+    // Redirect-style vendors: accept the whole landing address and take access_token.
+    const pasted = token.trim();
+    const raw = tokenFromAddress ? extractAccessToken(pasted) : pasted;
+    if (tokenFromAddress && raw === pasted && looksLikeAddress(pasted)) {
+      // Address-like paste that yielded no access_token (authorize link, error page,
+      // protocol-relative/data URL) is not a credential. Reject before ensureServer so a
+      // bad paste never creates a server or persists a bogus token.
+      setError(
+        "That address has no access_token — approve access, then paste the address you land on.",
+      );
+      return;
+    }
     setBusy(true);
     setError("");
     try {
       const target = await ensureServer(url);
       let updated: Server = target;
-      if (token.trim()) {
-        const raw = token.trim();
+      if (raw) {
         if (customHeader) {
           const value =
             tokenPrefix && !raw.toLowerCase().startsWith(tokenPrefix.toLowerCase())
@@ -2373,6 +2398,9 @@ function HttpManagePanel({
   const tokenLabel = customHeader
     ? `${authHeader} token${active ? " (replace)" : ""}`
     : `Bearer token${active ? " (replace)" : ""}`;
+  let tokenPlaceholder = "Paste token";
+  if (active) tokenPlaceholder = "••••••••";
+  else if (tokenFromAddress) tokenPlaceholder = "Paste the address you land on, or the token";
   const canSubmit = urlIsCredential
     ? !!mcpUrl.trim()
     : basicAuth
@@ -2420,6 +2448,40 @@ function HttpManagePanel({
           </p>
         )}
         <SetupHints hints={specStringList(app.spec, "setup_hints")} />
+        {getTokenUrl ? (
+          <div className="skill-auth-link">
+            <p className="muted">Step 1 — authorize in your browser:</p>
+            <div className="apps-actions start">
+              <button
+                className="primary sm"
+                type="button"
+                onClick={() => openAuthorizeWindow(getTokenUrl, { isolate: true })}
+              >
+                {active ? "Re-authorize" : "Open authorization page"}
+              </button>
+              <button
+                className="ghost sm"
+                type="button"
+                onClick={() => {
+                  if (!navigator.clipboard) {
+                    setError("Clipboard unavailable — use Open authorization page instead.");
+                    return;
+                  }
+                  void navigator.clipboard.writeText(getTokenUrl).then(
+                    () => setNotice("Authorization link copied."),
+                    () => setError("Could not copy link"),
+                  );
+                }}
+              >
+                Copy link
+              </button>
+            </div>
+            <p className="muted">
+              Step 2 — approve, then paste the address you land on (or just the{" "}
+              <code>access_token</code> value) below.
+            </p>
+          </div>
+        ) : null}
         {urlFromOperator ? (
           <label className="field">
             MCP endpoint URL
@@ -2470,7 +2532,7 @@ function HttpManagePanel({
               value={token}
               onChange={(e) => setToken(e.target.value)}
               autoComplete="off"
-              placeholder={active ? "••••••••" : "Paste token"}
+              placeholder={tokenPlaceholder}
               required={!active}
             />
           </label>
