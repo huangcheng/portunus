@@ -51,14 +51,8 @@ import {
 type Tab = "all" | "connected" | "custom";
 
 /** Popup for oauth_link authorize URLs (no QR — vendor扫一扫 misreads the URL as a code). */
-function openAuthorizeWindow(url: string, opts: { isolate?: boolean } = {}) {
-  // Isolated vendor links get their own window name so they never reuse (and sever the
-  // opener of) an in-flight OAuth popup, whose callback relies on opener.postMessage.
-  const name = opts.isolate ? "portunus-get-token" : "portunus-oauth";
-  const popup = window.open(url, name, "popup=yes,width=560,height=720");
-  // Vendor pages must not reach back into the dashboard via window.opener (reverse
-  // tabnabbing).
-  if (popup && opts.isolate) popup.opener = null;
+function openAuthorizeWindow(url: string) {
+  const popup = window.open(url, "portunus-oauth", "popup=yes,width=560,height=720");
   if (!popup) {
     window.open(url, "_blank", "noopener,noreferrer");
   }
@@ -2460,13 +2454,18 @@ function HttpManagePanel({
           <div className="skill-auth-link">
             <p className="muted">Step 1 — authorize in your browser:</p>
             <div className="apps-actions start">
-              <button
+              {/* A real link, not window.open: Baidu's implicit grant rejects any request whose
+                  Referer is this dashboard (referer_mismatch), and only a no-referrer navigation
+                  is accepted. */}
+              <a
                 className="primary sm"
-                type="button"
-                onClick={() => openAuthorizeWindow(getTokenUrl, { isolate: true })}
+                href={getTokenUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                referrerPolicy="no-referrer"
               >
                 {active ? "Re-authorize" : "Open authorization page"}
-              </button>
+              </a>
               <button
                 className="ghost sm"
                 type="button"
