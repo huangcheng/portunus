@@ -207,8 +207,6 @@ GUANGYAPAN_MANIFEST: dict[str, Any] = _load_packaged_manifest("guangyapan.exampl
 PROTON_DRIVE_MANIFEST: dict[str, Any] = _load_packaged_manifest("proton-drive.example.yaml")
 # 腾讯 Agent Mail — agently-cli via skill-bridge (browser oauth_link; no hosted MCP).
 AGENT_MAIL_MANIFEST: dict[str, Any] = _load_packaged_manifest("agent-mail.example.yaml")
-# 百度网盘 — official bdpan CLI via skill-bridge (paste-code oauth_link; no hosted MCP).
-BAIDU_DRIVE_MANIFEST: dict[str, Any] = _load_packaged_manifest("baidu-drive.example.yaml")
 HIMALAYA_MANIFEST: dict[str, Any] = _load_packaged_manifest("himalaya.example.yaml")
 # Default paths on Portunus runners (see deploy). Overridable via Connect env.
 GUANGYAPAN_SKILL_ROOT = "/var/lib/portunus/skills/guangyapan-drive"
@@ -218,8 +216,6 @@ PROTON_DRIVE_SKILL_ROOT = "/var/lib/portunus/skills/proton-drive"
 PROTON_DRIVE_STATE_DIR = "/var/lib/portunus/skill-state/proton-drive"
 AGENT_MAIL_SKILL_ROOT = "/var/lib/portunus/skills/agent-mail"
 AGENT_MAIL_STATE_DIR = "/var/lib/portunus/skill-state/agent-mail"
-BAIDU_DRIVE_SKILL_ROOT = "/var/lib/portunus/skills/baidu-drive"
-BAIDU_DRIVE_STATE_DIR = "/var/lib/portunus/skill-state/baidu-drive"
 # Seeded once when the table is empty. Operators can edit/delete afterward.
 # ``categories`` drive browse filters (Composio-style); ``tags`` are freeform chips.
 DEFAULT_APPS: list[dict[str, Any]] = [
@@ -1112,32 +1108,25 @@ DEFAULT_APPS: list[dict[str, Any]] = [
         "label": "百度网盘",
         "name": "百度网盘",
         "description": (
-            "Baidu Netdisk via official bdpan CLI (skill-bridge): paste-code Connect, "
-            "then list/search/upload/download/share under /apps/bdpan/. No hosted MCP; "
-            "prefers domestic runners."
+            "Baidu Netdisk via official remote MCP (SSE). Paste a Baidu access token; "
+            "file tools run under your account."
         ),
-        "connection": "skill_bridge",
+        "connection": "http",
         "egress": "domestic",
         "popular": True,
         "categories": ["Storage"],
-        "tags": ["baidu", "netdisk", "drive", "json_cli", "oauth_link"],
+        "tags": ["baidu", "netdisk", "drive", "http", "sse"],
         "sort_order": 79,
         "spec": {
-            "manifest": BAIDU_DRIVE_MANIFEST,
-            "secrets": [],
-            "env_defaults": {
-                "SKILL_ROOT": BAIDU_DRIVE_SKILL_ROOT,
-                "STATE_DIR": BAIDU_DRIVE_STATE_DIR,
-                "BDPAN_BIN": "/usr/local/bin/bdpan",
-            },
+            "url": "https://mcp-pan.baidu.com/sse",
+            "auth_header": "Authorization",
+            "token_prefix": "Bearer ",
             "setup_hints": [
                 (
-                    "Connect opens a Baidu authorize link (about 10 minutes). Paste the "
-                    "32-character code shown in the browser. Fleet sync installs "
-                    "`/usr/local/bin/bdpan` (CLI 3.8.9) into runners. File tools only touch "
-                    "`/apps/bdpan/` (我的应用数据/bdpan). Docs: "
-                    "[github.com/baidu-netdisk/bdpan-storage]"
-                    "(https://github.com/baidu-netdisk/bdpan-storage)."
+                    "Log in and authorize via Baidu's [MCP guide]"
+                    "(https://pan.baidu.com/union/doc/mcp-server). "
+                    "Copy only the value after `access_token=` from the redirected address. "
+                    "Tokens last 30 days; re-paste when Baidu returns auth errors."
                 ),
             ],
         },

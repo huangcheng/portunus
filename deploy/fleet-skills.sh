@@ -114,7 +114,6 @@ state_slug_for() {
     quarkclouddrive) echo quark ;;
     proton-drive) echo proton-drive ;;
     agent-mail) echo agent-mail ;;
-    baidu-drive) echo baidu-drive ;;
     rclone-shim) echo rclone ;;
     *) echo "$1" ;;
   esac
@@ -127,7 +126,6 @@ entrypoint_for() {
     quarkclouddrive) echo scripts/quark-drive.cjs ;;
     proton-drive) echo scripts/proton-drive.cjs ;;
     agent-mail) echo scripts/agent-mail.cjs ;;
-    baidu-drive) echo scripts/baidu-drive.cjs ;;
     rclone-shim) echo shim ;;
     *) echo "" ;;
   esac

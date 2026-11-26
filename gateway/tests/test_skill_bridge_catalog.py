@@ -963,39 +963,22 @@ def test_validate_proton_drive_auth_seed():
     assert "login" not in names
 
 
-def test_validate_baidu_drive_auth_seed():
+def test_validate_baidu_drive_mcp_seed():
     from portunus_gateway.catalog import (
-        BAIDU_DRIVE_MANIFEST,
-        BAIDU_DRIVE_SKILL_ROOT,
-        BAIDU_DRIVE_STATE_DIR,
         DEFAULT_APPS,
         preferred_regions_for_slug,
         validate_spec,
     )
 
     raw = next(a for a in DEFAULT_APPS if a["slug"] == "baidu-drive")
-    assert raw["connection"] == "skill_bridge"
+    assert raw["connection"] == "http"
     assert raw["egress"] == "domestic"
     assert raw["label"] == "百度网盘"
     assert preferred_regions_for_slug("baidu-drive") == ["domestic"]
-    out = validate_spec(
-        "skill_bridge",
-        {
-            "manifest": BAIDU_DRIVE_MANIFEST,
-            "secrets": [],
-            "env_defaults": {
-                "SKILL_ROOT": BAIDU_DRIVE_SKILL_ROOT,
-                "STATE_DIR": BAIDU_DRIVE_STATE_DIR,
-                "BDPAN_BIN": "/usr/local/bin/bdpan",
-            },
-        },
-    )
-    assert out["manifest"]["auth"]["type"] == "oauth_link"
-    assert out["manifest"]["auth"]["browser_capture"] is False
-    assert out["manifest"]["auth"]["token_paste"] is True
-    names = {t["name"] for t in out["manifest"]["tools"]}
-    assert {"ls", "quota", "upload", "download", "share", "vip"} <= names
-    assert "login" not in names
+    out = validate_spec("http", raw["spec"])
+    assert out["url"] == "https://mcp-pan.baidu.com/sse"
+    assert out["auth_header"] == "Authorization"
+    assert out["token_prefix"] == "Bearer "
 
 
 def test_validate_agent_mail_auth_seed():
