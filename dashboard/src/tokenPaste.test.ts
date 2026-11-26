@@ -1,43 +1,46 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { extractAccessToken, httpUsesTokenFlow, looksLikeAddress } from "./tokenPaste.ts";
+import {
+  httpUsesTokenFlow,
+  isBasicAuth,
+  looksLikeAddress,
+  parseAccessToken,
+} from "./tokenPaste.ts";
 
 const REDIRECT =
   "https://openapi.baidu.com/oauth/2.0/login_success#expires_in=2592000&access_token=121.abc_DEF-123.456&session_secret=&session_key=&scope=basic+netdisk";
 
-describe("extractAccessToken", () => {
+describe("parseAccessToken", () => {
   it("pulls access_token out of a pasted redirect address", () => {
-    assert.equal(extractAccessToken(REDIRECT), "121.abc_DEF-123.456");
+    assert.equal(parseAccessToken(REDIRECT), "121.abc_DEF-123.456");
   });
   it("accepts the fragment or query alone", () => {
-    assert.equal(
-      extractAccessToken("#expires_in=1&access_token=tok123&scope=a"),
-      "tok123",
-    );
-    assert.equal(extractAccessToken("?access_token=tok123"), "tok123");
+    assert.equal(parseAccessToken("#expires_in=1&access_token=tok123&scope=a"), "tok123");
+    assert.equal(parseAccessToken("?access_token=tok123"), "tok123");
   });
   it("takes a token at the end of the string", () => {
-    assert.equal(extractAccessToken("x#access_token=tok123"), "tok123");
+    assert.equal(parseAccessToken("x#access_token=tok123"), "tok123");
   });
   it("accepts a bare access_token=value paste", () => {
-    assert.equal(extractAccessToken("access_token=tok123&x=1"), "tok123");
+    assert.equal(parseAccessToken("access_token=tok123&x=1"), "tok123");
   });
   it("decodes percent-encoding", () => {
-    assert.equal(extractAccessToken("#access_token=a%2Bb%3D"), "a+b=");
+    assert.equal(parseAccessToken("#access_token=a%2Bb%3D"), "a+b=");
   });
   it("trims surrounding whitespace", () => {
-    assert.equal(extractAccessToken(`  ${REDIRECT}\n`), "121.abc_DEF-123.456");
+    assert.equal(parseAccessToken(`  ${REDIRECT}\n`), "121.abc_DEF-123.456");
   });
-  it("returns a plain token unchanged (trimmed)", () => {
-    assert.equal(extractAccessToken("  121.plainToken  "), "121.plainToken");
-    assert.equal(extractAccessToken("Bearer abc"), "Bearer abc");
-    assert.equal(extractAccessToken(""), "");
+  it("returns null when there is no token, including for a bare token", () => {
+    assert.equal(parseAccessToken("121.plainToken"), null);
+    assert.equal(parseAccessToken("Bearer abc"), null);
+    assert.equal(parseAccessToken(""), null);
+    assert.equal(parseAccessToken("https://x.example/authorize?a=1"), null);
   });
   it("does not mistake other parameters for access_token", () => {
-    assert.equal(extractAccessToken("x#my_access_token=zzz"), "x#my_access_token=zzz");
+    assert.equal(parseAccessToken("x#my_access_token=zzz"), null);
   });
-  it("leaves an empty access_token value untouched", () => {
-    assert.equal(extractAccessToken("#access_token=&scope=a"), "#access_token=&scope=a");
+  it("returns null for an empty access_token value", () => {
+    assert.equal(parseAccessToken("#access_token=&scope=a"), null);
   });
 });
 
@@ -53,6 +56,14 @@ describe("looksLikeAddress", () => {
     assert.equal(looksLikeAddress("key:secret"), false);
     assert.equal(looksLikeAddress("urn:abc"), false);
     assert.equal(looksLikeAddress(""), false);
+  });
+});
+
+describe("isBasicAuth", () => {
+  it("normalizes case and whitespace", () => {
+    assert.equal(isBasicAuth({ auth_scheme: " BASIC " }), true);
+    assert.equal(isBasicAuth({ auth_scheme: "bearer" }), false);
+    assert.equal(isBasicAuth({}), false);
   });
 });
 

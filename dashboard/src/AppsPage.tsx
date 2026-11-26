@@ -34,7 +34,7 @@ import {
 } from "./providers";
 import { SetupHints } from "./SetupHints";
 import { isSafeHintHref } from "./hintTokens";
-import { extractAccessToken, httpUsesTokenFlow, looksLikeAddress } from "./tokenPaste";
+import { httpUsesTokenFlow, isBasicAuth, looksLikeAddress, parseAccessToken } from "./tokenPaste";
 import {
   ROUTING_CHOICES,
   choiceToRegions,
@@ -2247,7 +2247,7 @@ function HttpManagePanel({
   const [basicPass, setBasicPass] = useState("");
   const urlFromOperator = specBool(app.spec, "url_from_operator");
   const urlIsCredential = specBool(app.spec, "url_is_credential");
-  const basicAuth = specString(app.spec, "auth_scheme").toLowerCase() === "basic";
+  const basicAuth = isBasicAuth(app.spec);
   const [mcpUrl, setMcpUrl] = useState(server?.url || "");
 
   useEffect(() => {
@@ -2265,10 +2265,11 @@ function HttpManagePanel({
   const customHeader = !!authHeader;
   // Vendor page that issues the token (e.g. 百度网盘); not offered for URL-credential / basic auth.
   const rawGetTokenUrl = httpUsesTokenFlow(app.spec) ? specString(app.spec, "get_token_url") : "";
-  // Paste handling follows the recipe; only the Open/Copy link itself is gated on https
-  // (defense in depth — the gateway enforces https, but never window.open anything else).
-  const tokenFromAddress = !!rawGetTokenUrl;
+  // Defense in depth: the gateway enforces https, but never window.open anything else.
   const getTokenUrl = isSafeHintHref(rawGetTokenUrl) ? rawGetTokenUrl : "";
+  // Paste handling follows the recipe (it declares an implicit-grant flow) even when the
+  // link itself is unusable — that case is surfaced in the drawer, never silent.
+  const tokenFromAddress = !!rawGetTokenUrl;
   const active = urlIsCredential
     ? !!current?.url
     : customHeader || basicAuth
@@ -2358,8 +2359,9 @@ function HttpManagePanel({
     }
     // Redirect-style vendors: accept the whole landing address and take access_token.
     const pasted = token.trim();
-    const raw = tokenFromAddress ? extractAccessToken(pasted) : pasted;
-    if (tokenFromAddress && raw === pasted && looksLikeAddress(pasted)) {
+    const found = tokenFromAddress ? parseAccessToken(pasted) : null;
+    const raw = found ?? pasted;
+    if (tokenFromAddress && found === null && looksLikeAddress(pasted)) {
       // Address-like paste that yielded no access_token (authorize link, error page,
       // protocol-relative/data URL) is not a credential. Reject before ensureServer so a
       // bad paste never creates a server or persists a bogus token.
@@ -2448,6 +2450,12 @@ function HttpManagePanel({
           </p>
         )}
         <SetupHints hints={specStringList(app.spec, "setup_hints")} />
+        {tokenFromAddress && !getTokenUrl ? (
+          <div className="notice error">
+            This app&apos;s authorization link is invalid (catalog <code>get_token_url</code> must
+            be https). Paste the token, or the address you land on, once you have it.
+          </div>
+        ) : null}
         {getTokenUrl ? (
           <div className="skill-auth-link">
             <p className="muted">Step 1 — authorize in your browser:</p>
